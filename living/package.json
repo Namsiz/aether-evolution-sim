@@ -1,0 +1,13 @@
+{
+  "name": "living",
+  "version": "2.0.0",
+  "description": "Living world viewer: JS ecology path (aether.html) + WASM snapshot path (wasm-viewer.html).",
+  "scripts": {
+    "build": "python3 build.py",
+    "build:wasm": "cd ../core && cargo build --release --target wasm32-unknown-unknown -p aether-sim-ecology && cp target/wasm32-unknown-unknown/release/aether_sim_ecology.wasm ../living/ecology-sim.wasm"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module"
+}

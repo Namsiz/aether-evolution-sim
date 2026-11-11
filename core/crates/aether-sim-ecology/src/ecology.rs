@@ -307,6 +307,41 @@ pub const MIN_SPEC_TIME_TICKS: u32 = 200;
 /// (a one-agent "species" is sampling noise and dies within a pass).
 const SPECIATION_MIN_SIDE: usize = 2;
 
+// ----- Phase 16: niche axis + competitive exclusion ---------------------------
+//
+// Niche model: each clade carries a 1-D `niche_offset` in [-1, 1]. A living
+// daughter clade re-derives its position every detection pass from its
+// parent's position plus the current centroid deco_efficiency gap
+// (NICHE_EFF_SCALE maps the legal eff band [0.5, 1.5] onto [-1, 1]); the root
+// clade is pinned at 0. The value is therefore a pure function of saved
+// clade state + live genomes — no RNG draws, no extra saved drift history —
+// so a restored sim re-derives bit-identical niches (save/restore contract).
+/// eff gap -> niche displacement: (eff_child - eff_parent) * 2 spans [-1, 1]
+/// for the legal eff band [0.5, 1.5].
+pub const NICHE_EFF_SCALE: f64 = 2.0;
+/// Two clades whose niche positions are closer than this compete for the
+/// same resources (1-D Gause overlap window).
+pub const NICHE_OVERLAP_THRESHOLD: f64 = 0.15;
+/// Extra metabolic multiplier applied to the fitness-loser of an overlapping
+/// clade pair (+15 % drain). Only computed in SELECTIVE mode — in legacy mode
+/// deco_efficiency is fitness-neutral by contract, so burdening the
+/// lower-efficiency clade would smuggle selection into the neutral control
+/// (`legacy_mode_shows_no_selection`).
+pub const COMPETITION_BURDEN: f64 = 0.15;
+/// Cap on the summed burden of one clade (multi-overlap stacking).
+pub const COMPETITION_BURDEN_MAX: f64 = 0.5;
+/// Wander-heading bias in radians: a clade at niche +/-1 roams up to
+/// +/-0.9 rad off its unbiased random heading, spatially separating clades.
+pub const NICHE_HEADING_BIAS: f64 = 0.9;
+/// Fraction of a bite's mineral boost re-deposited into the niche-direction
+/// neighbor cell (DECO mineral preference direction).
+pub const NICHE_DEPOSIT_BIAS: f64 = 0.25;
+/// Event log kinds (CladeSpeciationEvent.event_kind / ABI event-record
+/// offset 12, formerly the reserved u32).
+pub const EVENT_KIND_SPECIATION: u8 = 0;
+pub const EVENT_KIND_EXTINCTION: u8 = 1;
+pub const EVENT_KIND_COMPETITIVE_EXCLUSION: u8 = 2;
+
 /// One branch of the species phylogeny. `members` is a cached view rebuilt
 /// from live agents at each detection pass; `death_tick` freezes the record
 /// when the last member dies (fossil).
@@ -320,6 +355,9 @@ pub struct SpeciesClade {
     pub death_tick: Option<u32>,
     pub centroid_genome: Genome,
     pub members: Vec<u32>,
+    /// Phase 16: 1-D niche position in [-1, 1]. Living daughters re-derive it
+    /// every pass (parent position + centroid eff gap); fossils freeze it.
+    pub niche_offset: f64,
 }
 
 /// One clade-based speciation event (parent clade → one or more daughter
@@ -330,6 +368,10 @@ pub struct CladeSpeciationEvent {
     pub parent_clade_id: u32,
     pub child_clade_ids: Vec<u32>,
     pub genetic_distance: f64,
+    /// Phase 16: 0 = speciation, 1 = plain extinction, 2 = competitive
+    /// exclusion (the losing clade carried a nonzero burden when its members
+    /// emptied). Appended at the tail; JSON key "kind" defaults to 0.
+    pub event_kind: u8,
 }
 
 /// Tiny union-find over MST vertex slots (n ≤ MAX_DECO = 80; no rank or
@@ -544,6 +586,10 @@ pub struct Ecology {
     pub next_clade_id: u32,
     pub speciation_events: Vec<CladeSpeciationEvent>,
     last_clade_spec_tick: u32,
+    /// Phase 16: per-clade metabolic burden from niche competition, rebuilt
+    /// every detection pass (clade id -> multiplier >= 0). Vec of pairs in
+    /// first-seen order — deterministic iteration, no HashMap in wasm.
+    pub clade_burdens: Vec<(u32, f64)>,
 }
 
 impl Ecology {
@@ -594,6 +640,7 @@ impl Ecology {
             next_clade_id: 0,
             speciation_events: Vec::new(),
             last_clade_spec_tick: 0,
+            clade_burdens: Vec::new(),
             history: Vec::new(),
             last_sample: 0,
             gene_barrier_strength: 0.5,
@@ -671,6 +718,7 @@ impl Ecology {
             next_clade_id: 0,
             speciation_events: Vec::new(),
             last_clade_spec_tick: 0,
+            clade_burdens: Vec::new(),
             history: Vec::new(),
             last_sample: 0,
             gene_barrier_strength: 0.5,
@@ -2548,6 +2596,9 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         let g_sense = self.agents[idx].genome.sense;
         let g_metabolism = self.agents[idx].genome.metabolism;
         let deco_eff = self.agents[idx].genome.deco_efficiency;
+        // Phase 16: the agent's clade niche modulates foraging direction and
+        // mineral-deposit bias below (0.0 for root / unassigned agents).
+        let clade_niche = self.clade_niche_of(self.agents[idx].clade_id);
         self.agents[idx].bite -= h;
         self.agents[idx].repro -= h;
         self.agents[idx].think -= h;
@@ -2580,7 +2631,9 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 self.agents[idx].state = "approach";
             } else {
                 self.agents[idx].state = "wander";
-                let wa = self.rng.next_f64() * std::f64::consts::PI * 2.0;
+                // Phase 16: clade niche biases the wander heading — diverging
+                // clades roam in different directions (spatial niche split).
+                let wa = self.rng.next_f64() * std::f64::consts::PI * 2.0 + clade_niche * NICHE_HEADING_BIAS;
                 let wp = self.clamp_home(self.agents[idx].x, self.agents[idx].z,
                     self.agents[idx].home_x, self.agents[idx].home_z,
                     self.agents[idx].range,
@@ -2612,7 +2665,8 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                         self.agents[idx].state = "eat";
                     } else {
                         self.agents[idx].state = "wander";
-                        let wa = self.rng.next_f64() * std::f64::consts::PI * 2.0;
+                        // Phase 16: same heading bias as the search branch.
+                        let wa = self.rng.next_f64() * std::f64::consts::PI * 2.0 + clade_niche * NICHE_HEADING_BIAS;
                         let wp = self.clamp_home(self.agents[idx].x, self.agents[idx].z,
                             self.agents[idx].home_x, self.agents[idx].home_z,
                             self.agents[idx].range,
@@ -2676,6 +2730,28 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                                 }
                             }
                         }
+                        // Phase 16: niche-directed deposit — clades with
+                        // diverging niches enrich different directions, which
+                        // spatially partitions the soil-mineral resource.
+                        if clade_niche.abs() > 0.05 {
+                            let theta = clade_niche * std::f64::consts::PI;
+                            let (dxn, dzn) = (aether_libm::cos(theta), aether_libm::sin(theta));
+                            let cands = [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)];
+                            let mut best = cands[0];
+                            let mut best_dot = f64::NEG_INFINITY;
+                            for &cand in &cands {
+                                let d = dxn * cand.0 as f64 + dzn * cand.1 as f64;
+                                if d > best_dot { best_dot = d; best = cand; }
+                            }
+                            let dni = gi_col + best.0 as isize;
+                            let dnj = gi_row + best.1 as isize;
+                            if dni >= 0 && dnj >= 0 && (dni as u32) < GRID_N && (dnj as u32) < GRID_N {
+                                let ng = (dnj as usize) * GRID_N as usize + dni as usize;
+                                if self.suit[ng] > 0.02 {
+                                    self.mineral_field[ng] = (self.mineral_field[ng] as f64 + boost * NICHE_DEPOSIT_BIAS).min(1.0) as f32;
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -2693,7 +2769,11 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         let eff_metab_mod = if self.deco_eff_choice_mode == save_state::DECO_CHOICE_SELECTIVE {
             1.2 - 0.2 * deco_eff
         } else { 1.0 };
-        let total_drain = g_metabolism * (0.12 + 0.25 * activity) * crowd_penalty * season_meta_deco * h * eff_metab_mod;
+        // Phase 16: competitive-exclusion burden — the loser of an overlapping
+        // clade pair drains +15 % faster (burden map rebuilt every detection
+        // pass; always empty in legacy mode).
+        let niche_burden = self.clade_burden_of(self.agents[idx].clade_id);
+        let total_drain = g_metabolism * (0.12 + 0.25 * activity) * crowd_penalty * season_meta_deco * h * eff_metab_mod * (1.0 + niche_burden);
         self.agents[idx].energy -= total_drain;
 
         if self.agents[idx].energy <= 0.0 {
@@ -3233,10 +3313,30 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 self.species_clades[pos].members.push(self.agents[i].id);
             }
         }
+        // Phase 16: a clade whose member count hits zero freezes its record
+        // AND logs an extinction event in the unified log. kind 2 = the clade
+        // carried a competitive burden in the previous pass (Gause exclusion),
+        // kind 1 = plain death (resource loss / old age).
+        let mut extinct: Vec<(u32, u8)> = Vec::new();
         for clade in self.species_clades.iter_mut() {
             if clade.members.is_empty() && clade.death_tick.is_none() {
                 clade.death_tick = Some(now);
+                let kind = if self.clade_burdens.iter().any(|(id, b)| *id == clade.id && *b > 0.0) {
+                    EVENT_KIND_COMPETITIVE_EXCLUSION
+                } else {
+                    EVENT_KIND_EXTINCTION
+                };
+                extinct.push((clade.id, kind));
             }
+        }
+        for (id, kind) in extinct {
+            self.speciation_events.push(CladeSpeciationEvent {
+                tick: now,
+                parent_clade_id: id,
+                child_clade_ids: Vec::new(),
+                genetic_distance: 0.0,
+                event_kind: kind,
+            });
         }
         if deco_idx.is_empty() { return; }
 
@@ -3257,6 +3357,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 death_tick: None,
                 centroid_genome: centroid,
                 members: deco_idx.iter().map(|&i| self.agents[i].id).collect(),
+                niche_offset: 0.0,
             });
         }
         // Re-point DECOs whose clade id no longer exists to the root.
@@ -3276,6 +3377,10 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
 
         // (d) refresh cached members + centroids from live agents.
         self.refresh_clade_stats(&deco_idx);
+
+        // (e) Phase 16: niche re-derivation + competitive-exclusion burdens
+        // (impl in niche.rs; pure bookkeeping — consumes no RNG draws).
+        self.update_niches_and_competition();
     }
 
     /// MST gap detection + clade split. `deco_idx` holds the agent slots of
@@ -3374,6 +3479,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                     parent_clade_id: parent,
                     child_clade_ids: Vec::new(),
                     genetic_distance: 0.0,
+                    event_kind: EVENT_KIND_SPECIATION,
                 });
                 last_parent = Some(parent);
             }
@@ -3383,6 +3489,16 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             self.next_clade_id += 1;
             let refs: Vec<&Agent> = members.iter().map(|&p| &self.agents[deco_idx[p]]).collect();
             let centroid = Self::mean_genome(&refs);
+            // Phase 16: birth-time niche = parent niche + centroid eff gap
+            // (update_niches_and_competition re-derives it on the same pass;
+            // this initial value keeps the record self-consistent).
+            let (parent_niche, parent_eff) = self.species_clades.iter()
+                .find(|c| c.id == parent)
+                .map(|p| (p.niche_offset, p.centroid_genome.deco_efficiency))
+                .unwrap_or((0.0, centroid.deco_efficiency));
+            let niche0 = (parent_niche
+                + (centroid.deco_efficiency - parent_eff) * NICHE_EFF_SCALE)
+                .clamp(-1.0, 1.0);
             for &p in members.iter() {
                 self.agents[deco_idx[p]].clade_id = cid;
             }
@@ -3395,6 +3511,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 death_tick: None,
                 centroid_genome: centroid,
                 members: members.iter().map(|&p| self.agents[deco_idx[p]].id).collect(),
+                niche_offset: niche0,
             });
             let ev = event.as_mut().unwrap();
             ev.child_clade_ids.push(cid);
@@ -3724,9 +3841,9 @@ fn clade_to_json(c: &SpeciesClade) -> String {
         None => "null".to_string(),
     };
     format!(
-        "{{\"id\":{},\"parentId\":{},\"kind\":\"{}\",\"name\":\"{}\",\"birthTick\":{},\"deathTick\":{},\"centroidEff\":{},\"aliveCount\":{}}}",
+        "{{\"id\":{},\"parentId\":{},\"kind\":\"{}\",\"name\":\"{}\",\"birthTick\":{},\"deathTick\":{},\"centroidEff\":{},\"aliveCount\":{},\"niche\":{}}}",
         c.id, parent, c.kind, c.name, c.birth_tick, death,
-        c.centroid_genome.deco_efficiency, c.members.len(),
+        c.centroid_genome.deco_efficiency, c.members.len(), c.niche_offset,
     )
 }
 
@@ -3738,8 +3855,8 @@ fn clade_event_to_json(e: &CladeSpeciationEvent) -> String {
         .collect::<Vec<String>>()
         .join(",");
     format!(
-        "{{\"tick\":{},\"parentCladeId\":{},\"childCladeIds\":[{}],\"geneticDistance\":{}}}",
-        e.tick, e.parent_clade_id, children, e.genetic_distance,
+        "{{\"tick\":{},\"parentCladeId\":{},\"childCladeIds\":[{}],\"geneticDistance\":{},\"kind\":{}}}",
+        e.tick, e.parent_clade_id, children, e.genetic_distance, e.event_kind,
     )
 }
 
@@ -3858,6 +3975,14 @@ impl Ecology {
                 self.speciation_events.iter().map(clade_event_to_json).collect::<Vec<String>>().join(",")
             )),
             LastCladeSpecTick: self.last_clade_spec_tick,
+            // Phase 16: burden map as compact JSON (see save_state::SavedBurdens).
+            CladeNicheBurdens: save_state::SavedBurdens(format!(
+                "[{}]",
+                self.clade_burdens.iter()
+                    .map(|(id, b)| format!("[{},{}]", id, b))
+                    .collect::<Vec<String>>()
+                    .join(",")
+            )),
             // None ⇔ empty registry (`Ecology::new` path); Some ⇔ registered
             // list in insertion order (`with_biomes` path incl. full-world +
             // aquatic). The two paths differ behaviorally (aquatic
@@ -3971,6 +4096,9 @@ impl Ecology {
             let birth_tick = c["birthTick"].as_u64().unwrap_or(0) as u32;
             let death_tick = c.get("deathTick").and_then(|v| v.as_u64()).map(|v| v as u32);
             let centroid_eff = c["centroidEff"].as_f64().unwrap_or(1.0);
+            // Phase 16: pre-v3 saves carry no "niche" key -> 0.0; the next
+            // detection pass re-derives it from the parent chain.
+            let niche = c.get("niche").and_then(|v| v.as_f64()).unwrap_or(0.0);
             SpeciesClade {
                 id,
                 parent_id,
@@ -3980,6 +4108,7 @@ impl Ecology {
                 death_tick,
                 centroid_genome: { let mut g = Genome::default_deco(); g.deco_efficiency = centroid_eff; g },
                 members: Vec::new(),
+                niche_offset: niche,
             }
         }).collect();
         let speciation_events = json_events.iter().map(|e| CladeSpeciationEvent {
@@ -3990,9 +4119,27 @@ impl Ecology {
                 .map(|arr| arr.iter().map(|v| v.as_u64().unwrap_or(0) as u32).collect())
                 .unwrap_or_default(),
             genetic_distance: e["geneticDistance"].as_f64().unwrap_or(0.0),
+            // Phase 16: pre-v3 saves default to speciation (0).
+            event_kind: e.get("kind").and_then(|v| v.as_u64()).unwrap_or(0) as u8,
         }).collect();
         let next_clade_id = state.NextCladeId;
         let last_clade_spec_tick = state.LastCladeSpecTick;
+
+        // Phase 16: competitive-exclusion burden map `[[cladeId,burden],…]`.
+        // Pre-v3 saves carry the serde default (empty string) -> no burdens;
+        // the next detection pass recomputes them from live clades.
+        let clade_burdens: Vec<(u32, f64)> =
+            serde_json::from_str::<serde_json::Value>(&state.CladeNicheBurdens.0)
+                .ok()
+                .and_then(|v| v.as_array().cloned())
+                .map(|arr| {
+                    arr.iter().filter_map(|pair| {
+                        let id = pair.get(0)?.as_u64()? as u32;
+                        let b = pair.get(1)?.as_f64()?;
+                        Some((id, b))
+                    }).collect::<Vec<(u32, f64)>>()
+                })
+                .unwrap_or_default();
 
         let history = state.history.into_iter().map(|h| HistorySample {
             t: h.t, season: h.season, h: h.h, p: h.p, scav: h.scav, omn: h.omn,
@@ -4136,6 +4283,7 @@ impl Ecology {
             next_clade_id,
             speciation_events,
             last_clade_spec_tick,
+            clade_burdens,
             seed: state.seed,
             biome_reg,
             deco_eff_choice_mode,

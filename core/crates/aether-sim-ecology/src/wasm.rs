@@ -443,15 +443,18 @@ pub const SCRATCH_OFF_DAYLIGHT: usize = AGENT_BASE + AGENT_CAP * AGENT_SLOT_SIZE
 pub const SCRATCH_OFF_COUNTS: usize = SCRATCH_OFF_DAYLIGHT + DAYLIGHT_CAP * 8; // 6 × u32
 pub const SCRATCH_OFF_HIST: usize = SCRATCH_OFF_COUNTS + 6 * 4; // DECO_HUE_BUCKETS_CAP × u32
 /// Phase 15: phylogeny readout region appended after the histogram area.
-/// Clade record (36 bytes, mirrors sim_get_clade):
+/// Clade record (40 bytes since Phase 16, mirrors sim_get_clade):
 ///   [id u32][parent u32 (u32::MAX = root)][kind_hash u32][birth u32]
-///   [death u32 (u32::MAX = alive)][alive_count u32][centroid_eff f64][argb u32]
+///   [death u32 (u32::MAX = alive)][member_count u32][centroid_eff f64][argb u32]
+///   [niche f32]   <- Phase 16 tail field (member_count = alive_count @20)
 /// Event record (56 bytes, mirrors sim_get_event):
-///   [tick u32][parent u32][child_count u32][reserved u32]
+///   [tick u32][parent u32][child_count u32][event_kind u32 (was reserved)]
 ///   [genetic_distance f64][child0..7 u32]
 pub const CLADE_CAP: usize = 64;
 pub const EVENT_CAP: usize = 64;
-pub const CLADE_RECORD_SIZE: usize = 36;
+/// Phase 16: 36 -> 40 bytes (niche f32 appended at offset 36; existing
+/// offsets are unchanged so JS readers of the old layout only miss the tail).
+pub const CLADE_RECORD_SIZE: usize = 40;
 pub const EVENT_RECORD_SIZE: usize = 56;
 pub const CLADE_NAME_CAP: usize = 32;
 pub const MAX_EVENT_CHILDREN: usize = 8;
@@ -765,6 +768,9 @@ mod sim_exports {
         rec[20..24].copy_from_slice(&(c.members.len() as u32).to_le_bytes());
         rec[24..32].copy_from_slice(&eff.to_le_bytes());
         rec[32..36].copy_from_slice(&argb.to_le_bytes());
+        // Phase 16: clade niche position (f32 tail field; offset 36 was the
+        // record end before Phase 16, so old readers simply never see it).
+        rec[36..40].copy_from_slice(&(c.niche_offset as f32).to_le_bytes());
         std::ptr::copy_nonoverlapping(rec.as_ptr(), out, CLADE_RECORD_SIZE);
         1
     }
@@ -819,12 +825,19 @@ mod sim_exports {
         rec[4..8].copy_from_slice(&e.parent_clade_id.to_le_bytes());
         let n_children = e.child_clade_ids.len().min(MAX_EVENT_CHILDREN);
         rec[8..12].copy_from_slice(&(n_children as u32).to_le_bytes());
+        // Phase 16: the reserved u32 now carries the event kind
+        // (0 = speciation, 1 = extinction, 2 = competitive exclusion).
+        rec[12..16].copy_from_slice(&(e.event_kind as u32).to_le_bytes());
         rec[16..24].copy_from_slice(&e.genetic_distance.to_le_bytes());
         for (k, cid) in e.child_clade_ids.iter().take(MAX_EVENT_CHILDREN).enumerate() {
             rec[24 + k * 4..28 + k * 4].copy_from_slice(&cid.to_le_bytes());
         }
         std::ptr::copy_nonoverlapping(rec.as_ptr(), out, EVENT_RECORD_SIZE);
-        n_children as u32
+        // Return contract (Phase 16): >= 1 on success (children count, min 1
+        // so extinction records — 0 children — stay distinguishable from
+        // failure), 0 on failure. JS reads the true child count from the
+        // record's child_count field at offset 8.
+        n_children.max(1) as u32
     }
 
     /// Serialize the current state as Snapshot v3 JSON. Returns a pointer to a
@@ -906,7 +919,13 @@ mod sim_exports {
                 // Validate schema_name/version now so panic (trap) only happens
                 // during restore, not during a future update call.
                 assert_eq!(state.schema_name, crate::save_state::SAVE_STATE_SCHEMA_NAME);
-                assert_eq!(state.version, crate::save_state::SAVE_STATE_VERSION);
+                // Phase 16: accept older schema revisions (v1/v2 saves restore
+                // with #[serde(default)] niche/burden fields), reject future ones.
+                assert!(
+                    state.version <= crate::save_state::SAVE_STATE_VERSION,
+                    "unsupported future save state version {} (current is {})",
+                    state.version, crate::save_state::SAVE_STATE_VERSION
+                );
                 let core = WasmSimCore {
                     eco: crate::ecology::Ecology::from_save_state(state),
                     scratch: vec![0u8; SCRATCH_SIZE],

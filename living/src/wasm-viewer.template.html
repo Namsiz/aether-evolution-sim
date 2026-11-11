@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#0b0f13">
+<title>以太 · WASM 生态快照</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<canvas id="stage"></canvas>
+
+<div id="loading" class="overlay">
+  <div class="intro-inner">
+    <div class="eyebrow">W A S M &nbsp; S N A P S H O T &nbsp; V 3</div>
+    <h1 class="title">以太<span class="title-dot">.</span></h1>
+    <p class="subtitle">Rust 生态内核驱动的实时世界</p>
+    <p class="lede">六物种（牧食/掠食/腐食/杂食/鱼/分解者）由 aether-sim-ecology<br>每帧推进并渲染，M 键切换「死亡滋养土地」矿化热力层，N 键切换 DECO hue 直方图。</p>
+    <button id="enter" class="enter" disabled>
+      <span class="enter-dot"></span>
+      <span id="enter-label">正在加载 WASM</span>
+    </button>
+    <p id="load-status" class="load-status">正在加载 WASM…</p>
+  </div>
+  <div class="intro-foot">拖拽环视 · 滚轮缩放 · M 热力层 · N 直方图 · 空格暂停</div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script src="app-wasm.js"></script>
+</body>
+</html>

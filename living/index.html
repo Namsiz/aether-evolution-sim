@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#0b0f13">
+<title>以太 · 自生世界</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<canvas id="stage"></canvas>
+
+<div id="loading" class="overlay">
+  <div class="intro-inner">
+    <div class="eyebrow">A L I V I N G &nbsp; W O R L D</div>
+    <h1 class="title">以太<span class="title-dot">.</span></h1>
+    <p class="subtitle">一个没有剧本的三维生态</p>
+    <p class="lede">地形、湖泊与天空来自同一套程序化规则。<br>每一只动物都在觅食、逃跑、求偶、繁殖与死亡。<br>没有事件脚本，只有个体行为汇成的世界。</p>
+    <div class="intro-meta">
+      <span>程序化地形</span><i></i><span>实时生态</span><i></i><span>可手动放置</span>
+    </div>
+    <button id="enter" class="enter" disabled>
+      <span class="enter-dot"></span>
+      <span id="enter-label">正在生成世界</span>
+    </button>
+    <p id="load-status" class="load-status">正在计算高度场…</p>
+  </div>
+  <div class="intro-foot">拖拽环视 · 滚轮缩放 · WASD 飞行</div>
+</div>
+
+<header id="hud" class="hud">
+  <div class="brand">
+    <div class="brand-mark">Æ</div>
+    <div class="brand-text">
+      <b>以太</b>
+      <span>自生世界 · LIVE ECOSYSTEM</span>
+    </div>
+  </div>
+  <div class="stats">
+    <div class="stat"><span class="dot herb"></span><em>牧食者</em><b id="stat-h">—</b></div>
+    <div class="stat"><span class="dot pred"></span><em>掠食者</em><b id="stat-p">—</b></div>
+    <div class="stat"><span class="dot plant"></span><em>草量</em><b id="stat-plant">—</b></div>
+    <div class="stat"><span class="dot gen"></span><em>世代</em><b id="stat-gen">—</b></div>
+    <div class="stat"><span class="dot pred"></span><em>食物网</em><b id="stat-food">—</b></div>
+  </div>
+</header>
+
+<aside class="time-card">
+  <div class="time-top">
+    <span id="day-label">第 1 天</span>
+    <b id="clock">16:24</b>
+  </div>
+  <input id="time-slider" type="range" min="0" max="24" step="0.05" value="16.4" aria-label="时间">
+  <div class="time-ticks"><span>00</span><span>06</span><span>12</span><span>18</span><span>24</span></div>
+</aside>
+
+<aside id="chart-card" class="chart-card">
+  <div class="chart-head">
+    <span>种群波动</span>
+    <span class="chart-key"><i class="herb"></i>牧食<i class="pred"></i>掠食<i class="plant"></i>草量</span>
+  </div>
+  <canvas id="chart" width="440" height="150"></canvas>
+  <div class="chart-head">
+    <span>演化速率</span>
+    <span class="chart-key" style="font-size:9px">速<H>牧<H>掠<S>腐<O>杂</span>
+  </div>
+  <canvas id="evo-chart" width="440" height="80"></canvas>
+  <div class="chart-head">
+    <span>基因分布</span>
+    <span class="chart-key" style="font-size:9px">速度值分布（多峰=分化）</span>
+  </div>
+  <canvas id="gene-dist" width="440" height="60"></canvas>
+  <div class="chart-head">
+    <span>军备竞赛</span>
+    <span class="chart-key" style="font-size:9px">牧食速-掠食速（正=牧领先/负=掠追赶）</span>
+  </div>
+  <canvas id="arms-race" width="440" height="60"></canvas>
+  <div class="chart-head">
+    <span>适应度景观</span>
+    <span class="chart-key" style="font-size:9px">速度(横)×感知(纵)→适应度亮度</span>
+  </div>
+  <canvas id="fit-landscape" width="440" height="80"></canvas>
+  <div class="gene-row">
+    <span>牧食基因</span>
+    <span id="gene-h">速度 0.00 · 感知 0.0</span>
+  </div>
+  <div class="gene-row">
+    <span>掠食基因</span>
+    <span id="gene-p">速度 0.00 · 感知 0.0</span>
+  </div>
+  <div class="gene-row">
+    <span>达尔文</span>
+    <span id="stat-darwin">适应度 — · 选择 — · 演化 —</span>
+  </div>
+  <div class="gene-row">
+    <span>演化速率</span>
+    <span id="stat-evolution">—</span>
+  </div>
+  <div class="gene-row">
+    <span>物种形成</span>
+    <span id="stat-speciation">—</span>
+  </div>
+</aside>
+
+<div id="toolbar" class="toolbar">
+  <div class="tools">
+    <button class="tool active" data-tool="look" aria-label="观察">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2.5"/></svg>
+      <span>观察</span>
+    </button>
+    <button class="tool" data-tool="tree" aria-label="种树">
+      <svg viewBox="0 0 24 24"><path d="M12 3l5 6h-3l5 6h-4l4 5H5l4-5H5l5-6H7z"/><path d="M12 20v2"/></svg>
+      <span>种树</span>
+    </button>
+    <button class="tool" data-tool="rock" aria-label="放置岩石">
+      <svg viewBox="0 0 24 24"><path d="M5 14l4-9 6 2 4 7-3 5H8z"/><path d="M9 5l2 4-5 2"/></svg>
+      <span>岩石</span>
+    </button>
+    <button class="tool" data-tool="clear" aria-label="移除树木">
+      <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      <span>清除</span>
+    </button>
+    <button class="tool" data-tool="herb" aria-label="放置牧食者">
+      <svg viewBox="0 0 24 24"><path d="M7 9c0-2.5 2-4 5-4s5 1.5 5 4v3a5 5 0 0 1-10 0z"/><path d="M9 18v3M15 18v3M8 6l-2-2M16 6l2-2"/></svg>
+      <span>牧食者</span>
+    </button>
+    <button class="tool" data-tool="pred" aria-label="放置掠食者">
+      <svg viewBox="0 0 24 24"><path d="M6 8l3-4 3 3 3-3 3 4v5c0 3-2.5 6-6 6s-6-3-6-6z"/><path d="M9 12h.01M15 12h.01M9 16c1.5 1.3 4.5 1.3 6 0"/></svg>
+      <span>掠食者</span>
+    </button>
+  </div>
+  <div class="sep"></div>
+  <div class="sim-controls">
+    <button id="pause-btn" class="mini" aria-label="暂停生态">
+      <svg viewBox="0 0 24 24"><path d="M9 6v12M15 6v12"/></svg>
+      <span>暂停</span>
+    </button>
+    <button id="speed-btn" class="mini" aria-label="生态速度"><b>1×</b><span>速度</span></button>
+    <button id="orbit-btn" class="mini on" aria-label="自动巡航">
+      <svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 0 1 14-5M20 12a8 8 0 0 1-14 5"/><path d="M18 3v4h-4M6 21v-4h4"/></svg>
+      <span>巡航</span>
+    </button>
+    <button id="iso-btn" class="mini" aria-label="等距观赏">
+      <svg viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12l8-4.5M12 12L4 7.5M12 12v9"/></svg>
+      <span>等距</span>
+    </button>
+    <button id="walk-btn" class="mini" aria-label="进入世界">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="4.5" r="2.2"/><path d="M12 8v6M12 14l-3 6M12 14l3 6M8 10l4 1 4-1"/></svg>
+      <span>进入</span>
+    </button>
+    <button id="view-btn" class="mini hidden" aria-label="切换视角">
+      <svg viewBox="0 0 24 24"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12z"/><circle cx="12" cy="12" r="2.5"/></svg>
+      <span>视角</span>
+    </button>
+  </div>
+</div>
+
+<div id="hint" class="hint">拖拽环视 · 滚轮缩放 · WASD 飞行</div>
+<div id="invbar" class="invbar hidden"><span class="inv-item">饱 <b id="inv-hunger">100</b></span><span class="inv-item">命 <b id="inv-life">100</b></span><span class="inv-item">世界 <b id="inv-world">—</b></span></div>
+<div id="prompt" class="prompt hidden"></div>
+<div id="joystick" class="joystick hidden"><div id="stick" class="stick"></div></div>
+<aside id="inspect" class="inspect">
+  <div class="insp-head"><b id="insp-title">牧食者</b><span id="insp-state">吃草</span></div>
+  <div id="insp-body" class="insp-body"></div>
+</aside>
+<div id="eco-panels" class="eco-panel hidden">
+  <div class="ep-row ep-top"><span class="ep-icon" id="ep-weather">☀</span><span class="ep-season" id="ep-season">春</span></div>
+  <div class="ep-bar-wrap"><div class="ep-bar-bg"><div class="ep-bar-fill" id="ep-season-bar" style="width:0%"></div></div><span class="ep-seq" id="ep-season-label">第 1/4 季</span></div>
+  <div class="ep-section"><div class="ep-label">物种数量 / MAX（H:420 P:110 S:40 O:80）</div>
+    <div class="ep-bars"><div class="ep-r" title="牧食者"><span class="ep-v" style="width:0%"></span></div><div class="ep-r" title="掠食者"><span class="ep-v" style="width:0%"></span></div><div class="ep-r" title="腐食者"><span class="ep-v" style="width:0%"></span></div><div class="ep-r" title="杂食者"><span class="ep-v" style="width:0%"></span></div></div>
+    <div class="ep-counts"><span>H</span><span>P</span><span>S</span><span>O</span></div>
+  </div>
+  <div class="ep-section ep-time" id="ep-time">  <span id="eco-clock" class="ep-clock">12:00</span></div>
+  <div class="ep-section ep-countdown"><span id="ep-phase">下午</span><span id="ep-dusk-countdown" class="ep-dusk">离日落 06h32m</span></div>
+  <div class="ep-section ep-stats"><span id="ep-grass">草量 --</span><span id="ep-species-ratios" class="ep-spec-r"></span></div>
+  <div class="ep-section ep-coop"><span id="ep-coop-share">coopShareH: --</span></div>
+</div>
+
+<aside id="eco-replay-panel" class="eco-replay hidden">
+  <div class="er-head">
+    <span class="er-title">生态轨迹回放</span>
+    <span class="er-key">gapHP 曲线（正=牧领先 / 负=掠追赶）</span>
+    <span class="er-ctrl">
+      <select id="replay-window" aria-label="回放窗口时长">
+        <option value="5">近 5 分钟</option>
+        <option value="10" selected>近 10 分钟</option>
+        <option value="30">近 30 分钟</option>
+      </select>
+      <button id="replay-close" class="er-close" aria-label="关闭回放">✕</button>
+    </span>
+  </div>
+  <canvas id="replay-canvas" width="640" height="160"></canvas>
+  <div class="er-foot"><span id="replay-range">—</span></div>
+</aside>
+<div id="toast" class="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

@@ -26,3 +26,6 @@ aether_run*.html
 Thumbs.db
 *.swp
 *~
+
+# ── Embedded repo backups (not repo content) ──
+**/.git.bak*/

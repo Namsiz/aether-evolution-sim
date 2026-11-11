@@ -1,4 +1,4 @@
-//! save_state.rs — Phase 6 save/restore schema (`aether-sim-save-state` v1).
+//! save_state.rs — Phase 6 save/restore schema (`aether-sim-save-state`).
 //!
 //! Sim-internal serialization, fully independent from the render-packet v3
 //! `Snapshot` (`aether-render-packet`): different schema_name, own version
@@ -16,12 +16,19 @@
 //! PascalCase field naming mirrors the render-packet style; serde_json
 //! roundtrips f32/f64 losslessly (shortest-repr), so checksums survive the
 //! JSON hop unchanged.
+//!
+//! Version history:
+//! v1 → v2: Phase 6/7/8 additive fields (`#[serde(default)]` keeps v1 loads).
+//! v2 → v3 (Phase 16): niche state rides inside the compact JSON clade/event
+//! strings (`niche` / `kind` keys) plus the new `CladeNicheBurdens` string —
+//! all three are `#[serde(default)]`, so v2 saves restore with
+//! niche_offset = 0 / event_kind = 0 / empty burdens.
 
 use serde::{Deserialize, Serialize};
 
 use crate::ecology::{DECO, FISH, HERB, OMN, PRED, SCAV};
 
-pub const SAVE_STATE_VERSION: u32 = 2;
+pub const SAVE_STATE_VERSION: u32 = 3;
 pub const SAVE_STATE_SCHEMA_NAME: &str = "aether-sim-save-state";
 
 /// DECO selection-pressure mode selector (persisted in SaveState v2).
@@ -138,10 +145,10 @@ pub struct SaveIsolatedGroup {
 }
 
 /// Phase 15: species-clade tree + speciation-event log, stored as compact JSON
-/// strings inside the v2 schema. Keeping them as `String` (instead of typed
+/// strings inside the schema. Keeping them as `String` (instead of typed
 /// Vec<Struct> fields) avoids monomorphizing extra serde visitors for two new
 /// struct types into the wasm binary; parsing happens in
-/// `Ecology::from_save_state`. Defaults keep pre-Phase-15 v2 saves loadable —
+/// `Ecology::from_save_state`. Defaults keep pre-Phase-15 saves loadable —
 /// they restore into single-clade (root-only) mode.
 #[derive(Default, Clone, Debug)]
 pub struct SavedClades(pub String);
@@ -167,6 +174,25 @@ impl serde::Serialize for SavedEvents {
     }
 }
 impl<'de> serde::Deserialize<'de> for SavedEvents {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s: String = serde::Deserialize::deserialize(d)?;
+        Ok(Self(s))
+    }
+}
+
+/// Phase 16: per-clade competitive burden map as a compact JSON string
+/// (`[[cladeId,burden],…]`, same trick as SavedClades/SavedEvents — no extra
+/// serde visitors in the wasm binary). Parsed in `Ecology::from_save_state`;
+/// empty on pre-Phase-16 saves (burdens rebuild within one detection pass).
+#[derive(Default, Clone, Debug)]
+pub struct SavedBurdens(pub String);
+
+impl serde::Serialize for SavedBurdens {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.0)
+    }
+}
+impl<'de> serde::Deserialize<'de> for SavedBurdens {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let s: String = serde::Deserialize::deserialize(d)?;
         Ok(Self(s))
@@ -368,7 +394,9 @@ pub struct SaveState {
     pub last_speciation: f64,
     /// Phase 15: species phylogeny (clades incl. fossils, split events, and
     /// the engine's id/timing state), as compact JSON strings. Defaults keep
-    /// pre-Phase-15 v2 saves loadable — they restore into single-clade mode.
+    /// pre-Phase-15 saves loadable — they restore into single-clade mode.
+    /// Since v3, clade records also carry a `niche` key and event records a
+    /// `kind` key (both default 0 on older saves).
     #[serde(default)]
     pub SpeciesClades: SavedClades,
     #[serde(default)]
@@ -377,6 +405,11 @@ pub struct SaveState {
     pub SpeciationEvents: SavedEvents,
     #[serde(default)]
     pub LastCladeSpecTick: u32,
+    /// Phase 16: competitive-exclusion burden map (compact JSON string).
+    /// `#[serde(default)]` keeps pre-Phase-16 saves loadable — they restore
+    /// with no active burdens; the next detection pass recomputes them.
+    #[serde(default)]
+    pub CladeNicheBurdens: SavedBurdens,
     /// `None` = registry empty (default `Ecology::new` path, no biomes
     /// registered); `Some(list)` = biomes in registration order (the
     /// `with_biomes` path, including the implicit full-world + aquatic
