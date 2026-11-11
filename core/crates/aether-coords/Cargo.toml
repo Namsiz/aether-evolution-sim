@@ -1,0 +1,10 @@
+[package]
+name = "aether-coords"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Minimal reference frame tree (ScaleFrame + FrameTree) for multi-scale coordinate transforms"
+
+[dependencies]
+
+[dev-dependencies]

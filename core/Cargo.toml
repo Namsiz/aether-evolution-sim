@@ -1,0 +1,32 @@
+[workspace]
+members = [
+    "crates/aether-rng",
+    "crates/aether-coords",
+    "crates/aether-clock",
+    "crates/aether-sim-ecology",
+    "crates/aether-libm",
+    "crates/aether-render-packet",
+    "crates/aether-biome",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+aether-rng = { path = "crates/aether-rng" }
+aether-coords = { path = "crates/aether-coords" }
+aether-clock = { path = "crates/aether-clock" }
+aether-libm = { path = "crates/aether-libm" }
+aether-render-packet = { path = "crates/aether-render-packet" }
+aether-biome = { path = "crates/aether-biome" }
+
+# WASM-target release profile: shrink binary by ~40% over defaults.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+lto = true
+panic = "abort"
+strip = true

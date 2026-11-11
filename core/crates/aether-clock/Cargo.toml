@@ -1,0 +1,10 @@
+[package]
+name = "aether-clock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Hierarchical clock with lamport-style causal ordering for cross-frame anchor events"
+
+[dependencies]
+
+[dev-dependencies]

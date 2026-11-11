@@ -1,0 +1,28 @@
+# ── Rust build artifacts ──
+**/target/
+**/*.rs.bk
+*.pdb
+
+# ── Node ──
+node_modules/
+package-lock.json
+
+# ── Python ──
+__pycache__/
+*.pyc
+
+# ── Early-phase experiment artifacts (regenerable one-off visualizations) ──
+/*.png
+/*.svg
+/*.jpg
+aether_run*.html
+*.log
+
+# reference/ 设计参考图保留入库（644K）
+!reference/*
+
+# ── OS / editor ──
+.DS_Store
+Thumbs.db
+*.swp
+*~

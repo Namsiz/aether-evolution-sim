@@ -1,0 +1,6 @@
+[package]
+name = "aether-biome"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Phase 4-A spatial biomes: per-region suitability modifiers, carrying capacities, and home-range modulation."

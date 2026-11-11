@@ -1,0 +1,11 @@
+[package]
+name = "aether-rng"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bit-exact Mulberry32 PRNG aligned with the JS oracle in living/src/world.js"
+
+[dependencies]
+
+[dev-dependencies]
+# No external deps: gold sample diff reads raw f64 bytes via std::fs::read.

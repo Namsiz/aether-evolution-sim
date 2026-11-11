@@ -1,0 +1,28 @@
+[package]
+name = "aether-sim-ecology"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Phase-2 port of the JS ecology oracle: minimal HERB+PRED simulation targeting bit-exact checksum."
+
+[dependencies]
+aether-rng = { path = "../aether-rng" }
+aether-libm = { path = "../aether-libm" }
+aether-biome = { path = "../aether-biome" }
+aether-render-packet.workspace = true
+serde = { version = "1", features = ["derive"] }
+# float_roundtrip: default fast-path float parsing is off by 1 ULP for some
+# decimals, which desyncs the sim after restore (bit-exactness requirement).
+serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
+wasm-bindgen = "0.2.92"
+
+[dev-dependencies]
+aether-libm = { path = "../aether-libm" }
+
+[[bin]]
+name = "ecology-sim"
+path = "src/main.rs"
+
+# Both a cdylib (for the browser wasm) and rlib (for tests/bins in this crate).
+[lib]
+crate-type = ["cdylib", "rlib"]

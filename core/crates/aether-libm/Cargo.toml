@@ -1,0 +1,13 @@
+[package]
+name = "aether-libm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+aether-rng = { path = "../aether-rng" }
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(sim_fp_contract)'] }
