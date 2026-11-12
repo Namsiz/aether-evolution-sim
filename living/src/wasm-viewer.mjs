@@ -121,6 +121,7 @@ function createSimHandle(instance) {
     views: ensureViews,
     step(n, daylightLen) { E.sim_step(sim, n, scratchPtr + OFF_DAYLIGHT, daylightLen); },
     readAgents() { return E.sim_agents_flat(sim, AGENT_CAP); },
+    agentCount() { return E.sim_agent_count ? E.sim_agent_count(sim) : -1; },
     readMineral() { E.sim_mineral_resampled(sim); },
     readCounts() { E.sim_counts(sim); },
     tick() { return E.sim_tick(sim); },
@@ -1010,7 +1011,10 @@ export async function bootWasmViewer(canvasId = 'stage') {
       }
       handle.step(TICKS_PER_FRAME, TICKS_PER_FRAME);
       const n = handle.readAgents();
-      updateInstancedMeshes(meshes, handle, n);
+      if (n === 0 && handle.tick() > 100) {
+        console.warn('[agent-debug] readAgents()=0 at tick', handle.tick(),
+          'agentCount:', handle.agentCount(), 'decoEff:', handle.decoEffMean().toFixed(4));
+      }      updateInstancedMeshes(meshes, handle, n);
       trackDeaths(n);
       // Phase 19: update uTime uniform + LOD switch + compare mode data
       for (const kind of KIND_ORDER) {
@@ -1109,6 +1113,7 @@ export async function bootWasmViewer(canvasId = 'stage') {
       hud.innerHTML =
         `<b>WASM SNAPSHOT v3</b> · tick ${handle.tick()} · D+${hh}h<br>` +
         `牧 ${c[0]} · 掠 ${c[1]} · 腐 ${c[2]} · 杂 ${c[3]} · 鱼 ${c[4]} · 分解 ${c[5]}<br>` +
+        (c[0]+c[1]+c[2]+c[3]+c[4]+c[5]===0 ? `<span style="color:#ffb347">⚠ direct count=${handle.agentCount()} · mismatch!</span><br>` : '') +
         decoLine +
         cladeLine +
         catLine +

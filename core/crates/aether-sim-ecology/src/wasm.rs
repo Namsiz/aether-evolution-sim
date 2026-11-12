@@ -709,6 +709,11 @@ mod sim_exports {
     pub unsafe extern "C" fn sim_deco_eff_mean(sim: *mut WasmSimCore) -> f64 {
         (*sim).eco.stats().deco_eff_mean
     }
+    /// Debug: return the count of alive agents (bypasses scratch buffer).
+    #[no_mangle]
+    pub unsafe extern "C" fn sim_agent_count(sim: *mut WasmSimCore) -> u32 {
+        (*sim).eco.agents.iter().filter(|a| a.alive).count() as u32
+    }
     #[no_mangle]
     pub unsafe extern "C" fn sim_deco_eff_std(sim: *mut WasmSimCore) -> f64 {
         (*sim).eco.stats().deco_eff_std
