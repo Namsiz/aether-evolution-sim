@@ -31,6 +31,7 @@ import { terrainHeight, WATER_LEVEL, clamp } from './world.js';
 import { deriveMorphology, buildSpeciesBaseGeometry, addAnimAttributes, updateAnimAttributes,
   applyHullRatioToScale, createMorphologyCompareMode, lodLevelForDist } from './morphology.mjs';
 import { createMorphologyMaterial, updateMorphoTime, getLODLevel, setLODLevel } from './morphology-shader.mjs';
+import { createMobileToolbar } from './mobile-controls.mjs';
 
 // ─── Scratch layout — keep in sync with wasm.rs SCRATCH_* constants ──────────
 const AGENT_CAP = 1024;
@@ -348,6 +349,21 @@ export async function bootWasmViewer(canvasId = 'stage') {
   setStatus('就绪');
   const enter = document.getElementById('enter');
   const loading = document.getElementById('loading');
+
+  // Mobile: add touch button bar + auto-hide all overlays by default (no-op on desktop)
+  const mobileBar = createMobileToolbar();
+  if (mobileBar) {
+    // On mobile: start with all overlays OFF so the 3D view dominates.
+    // User taps buttons to toggle them on.
+    const hideOverlay = (el) => { if (el) el.style.display = 'none'; };
+    // The overlays are created later in the boot sequence; mark them off on next frame.
+    setTimeout(() => {
+      document.querySelectorAll('#hist-overlay, #spec-overlay, #phy-overlay, #cat-overlay, #niche-overlay, #geo-overlay, #bio-overlay, .overlay-panel').forEach(el => {
+        el.dataset.wasShown = '1';
+        el.style.display = 'none';
+      });
+    }, 50);
+  }
   if (enter) {
     enter.disabled = false;
     const label = document.getElementById('enter-label');
@@ -386,13 +402,14 @@ export async function bootWasmViewer(canvasId = 'stage') {
   // Phase 10: DECO hue 直方图 overlay（旧 wasm 无 sim_deco_hue_histogram 时自动降级隐藏）。
   const histSupported = typeof instance.exports.sim_deco_hue_histogram === 'function';
   const histOverlay = histSupported ? createEvolutionHistogramOverlay() : null;
-  let histOn = true;
+  const isMobile = /Android|iPhone/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 0 && window.innerWidth < 900);
+  let histOn = !isMobile;
   const histCounts = new Uint32Array(DECO_HUE_BUCKETS);
   let histTotal = 0, histPeak = 0, histTick = 0;
 
   // Phase 11: DECO hue 演化光谱条纹图 overlay（旧 wasm 无导出时降级隐藏）。
   const specOverlay = histSupported ? createSpectrogramOverlay() : null;
-  let specOn = true; // 默认 ON，与 histogram 独立
+  let specOn = !isMobile; // 默认 ON，与 histogram 独立（移动端默认关）
   let specMax = 0;
 
   // Phase 13：spectral 时间锚点与累计帧计数器（HUD / 刻度标注用）。
@@ -405,7 +422,7 @@ export async function bootWasmViewer(canvasId = 'stage') {
   // Phase 15: 物种系统发育 overlay（旧 wasm 无 sim_clade_count 时自动降级隐藏）。
   const phyloSupported = typeof instance.exports.sim_clade_count === 'function';
   const phyloOverlay = phyloSupported ? createPhylogenyOverlay() : null;
-  let phyloOn = true;   // T 键切换，默认 ON
+  let phyloOn = !isMobile;   // T 键切换（移动端默认关）
   let fossilOn = false; // F 键切换化石高亮，默认 OFF
   let phyloClades = [];
   let phyloEvents = [];
@@ -415,7 +432,7 @@ export async function bootWasmViewer(canvasId = 'stage') {
 
   // Phase 16: 生态位空间 overlay（U 键切换；复用 phylogeny 的 60-tick 拉取节奏）。
   const nicheOverlay = phyloSupported ? createNicheOverlay() : null;
-  let nicheOn = true;
+  let nicheOn = !isMobile;
 
   // Phase 17: 灾变系统 —— 注入（C/X 键）、烟尘 overlay、spectrogram/phylogeny
   // 时间标记与 HUD 历史（旧 wasm 无导出时整体降级隐藏）。
@@ -602,16 +619,16 @@ export async function bootWasmViewer(canvasId = 'stage') {
     // 把初始可见性交给 drawHist 首次调用后决定（warmup 阶段已经先画了），这里保持 true。
   }
   if (histOverlay) {
-    histOverlay.setVisible(true);
-    if (specOverlay) specOverlay.setVisible(true);
+    histOverlay.setVisible(histOn);
+    if (specOverlay) specOverlay.setVisible(specOn);
     drawHist(); // 预热阶段已产生 15 只 DECO，立即让面板有内容
   }
   if (phyloOverlay) {
-    phyloOverlay.setVisible(true);
+    phyloOverlay.setVisible(phyloOn);
     pullPhylogeny(true); // 预热后首次拉取（root clade 已在 t≈60 诞生）
   }
   if (nicheOverlay) {
-    nicheOverlay.setVisible(true);
+    nicheOverlay.setVisible(nicheOn);
     renderNiche();
   }
   if (catSupported) {
