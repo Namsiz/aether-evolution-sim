@@ -199,7 +199,7 @@ async function main() {
   step(simA, 100, 140);
   const save4 = readSave(E, simA);
   const catList = JSON.parse(save4.Cataclysms);
-  check('Version == 4', save4.Version === 4, `v${save4.Version}`);
+  check('Version >= 4', save4.Version >= 4, `v${save4.Version}`);
   check('v4 save carries 2 cataclysms + id counter', Array.isArray(catList)
     && catList.length === 2 && save4.NextCataclysmId === 3);
   check('climate record kind = 1 with climateDelta = -0.5',

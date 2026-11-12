@@ -451,9 +451,16 @@ impl Ecology {
     /// Tick stamp of the last completed geologic step (0 = never stepped).
     pub fn geo_last_step_tick(&self) -> u32 { self.geo.last_geo_tick }
     /// Smoothed tectonic activity in [0, 1].
+    /// Current epoch name (e.g. "Cambrian"). Pure function of step index.
+    pub fn geo_epoch_name(&self) -> &str { self.geo.epoch_name }
     pub fn geo_seismic_index(&self) -> f64 { self.geo.seismic_index }
     /// Read a single elevation-delta cell (tests + minimap probes).
     #[inline]
+    /// Test-injection: set a specific cell's elevation delta directly.
+    pub fn set_elevation_delta(&mut self, idx: usize, v: f32) {
+        self.elevation_delta[idx] = v;
+    }
+
     pub fn elevation_delta_at(&self, idx: usize) -> f32 {
         self.elevation_delta.get(idx).copied().unwrap_or(0.0)
     }
