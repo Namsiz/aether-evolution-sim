@@ -598,15 +598,18 @@ mod sim_exports {
         let core = &mut *sim;
         let cap = (cap as usize).min(AGENT_CAP);
         let base = core.scratch.as_mut_ptr() as usize + AGENT_BASE;
-        let mut n = 0usize;
-        // Diagnostic: write total/alive counts to scratch[8..16] before the agent loop
+        // Diagnostic: write total/alive counts to scratch[8..16]
         let scratch_base = core.scratch.as_mut_ptr() as *mut u32;
-        *scratch_base.add(2) = core.eco.agents.len() as u32;       // scratch[8]  = total agents
-        *scratch_base.add(3) = core.eco.agents.iter().filter(|a| a.alive).count() as u32; // scratch[12] = alive
-        for a in core.eco.agents.iter().filter(|a| a.alive) {
-            if n >= cap {
-                break;
-            }
+        *scratch_base.add(2) = core.eco.agents.len() as u32;
+        *scratch_base.add(3) = core.eco.agents.iter().filter(|a| a.alive).count() as u32;
+        let agents = &core.eco.agents;
+        let mut n = 0usize;
+        // Index loop instead of .iter().filter() — avoids LLVM wasm32 mis-compile
+        // where the filter iterator body was optimised away (loop never executes).
+        for i in 0..agents.len() {
+            if !agents[i].alive { continue; }
+            if n >= cap { break; }
+            let a = &agents[i];
             let row = (base + n * AGENT_SLOT_SIZE) as *mut u8;
             let max_e = if a.max_energy > 0.0 { a.max_energy } else { 1.0 };
             *(row.add(SLOT_X) as *mut f32) = a.x as f32;
