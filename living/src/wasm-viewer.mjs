@@ -60,7 +60,9 @@ const OFF_EVENTS = OFF_CLADES + CLADE_CAP * CLADE_RECORD_SIZE;
 const OFF_CLADE_NAME = OFF_EVENTS + EVENT_CAP * EVENT_RECORD_SIZE;
 
 const KIND_ORDER = ['herb', 'pred', 'scav', 'omn', 'fish', 'deco'];
-const KIND_BYTE = { h: 'herb', p: 'pred', s: 'scav', o: 'omn', f: 'fish', d: 'deco' };
+// Keyed by the raw u8 kind byte the WASM writes (h=104, p=112, s=115, o=111, f=102, d=100),
+// because the readers index with dv.getUint8() — numeric, not char.
+const KIND_BYTE = { 104: 'herb', 112: 'pred', 115: 'scav', 111: 'omn', 102: 'fish', 100: 'deco' };
 
 const SEED = 20261102;
 const WARMUP_TICKS = 300; // 30 sim-seconds of history so the world opens alive

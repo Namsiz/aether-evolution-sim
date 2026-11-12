@@ -594,11 +594,9 @@ mod sim_exports {
     /// # Safety
     /// `sim` from `sim_new`.
     #[no_mangle]
-    pub unsafe extern "C" fn sim_agents_flat(sim: *mut WasmSimCore, _cap: u32) -> u32 {
+    pub unsafe extern "C" fn sim_agents_flat(sim: *mut WasmSimCore, cap: u32) -> u32 {
         let core = &mut *sim;
-        // Hardcode cap to AGENT_CAP — the Android browser's V8 WASM runtime
-        // was passing cap=0 regardless of the JS argument.
-        let cap = AGENT_CAP;
+        let cap = (cap as usize).min(AGENT_CAP);
         let base = core.scratch.as_mut_ptr() as usize + AGENT_BASE;
         let agents = &core.eco.agents;
         let mut n = 0usize;

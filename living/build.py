@@ -43,6 +43,9 @@ def build_wasm():
             return
         raise SystemExit("cargo build failed and no prebuilt ecology-sim.wasm present") from e
     WASM.write_bytes(target.read_bytes())
+    # wasm-viewer.html fetches the versioned filename (cache-bust on rename);
+    # keep the unversioned copy in sync for direct consumers/tests.
+    (ROOT / "ecology-sim-v2.wasm").write_bytes(target.read_bytes())
 
 
 def inline(html: str, js: str, css: str) -> str:
