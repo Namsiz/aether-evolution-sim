@@ -604,8 +604,8 @@ mod sim_exports {
         *scratch_base.add(3) = core.eco.agents.iter().filter(|a| a.alive).count() as u32;
         let agents = &core.eco.agents;
         let mut n = 0usize;
-        // Index loop instead of .iter().filter() — avoids LLVM wasm32 mis-compile
-        // where the filter iterator body was optimised away (loop never executes).
+        // Write cap to scratch[16] for debugging: if cap=0 the loop breaks immediately
+        *scratch_base.add(4) = cap;
         for i in 0..agents.len() {
             if !agents[i].alive { continue; }
             if n >= cap { break; }
