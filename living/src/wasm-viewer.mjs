@@ -84,7 +84,7 @@ const SPECIES = {
 async function loadWasmModule() {
   // Must be loaded over http/https — fetch('./ecology-sim.wasm') resolves
   // relative to the HTML file. No file:// fallback: see README for deploy notes.
-  const resp = await fetch('./ecology-sim.wasm');
+  const resp = await fetch(`./ecology-sim.wasm?_v=${Date.now()}`, { cache: 'no-store' });
   if (!resp.ok) throw new Error(`fetch ecology-sim.wasm: ${resp.status}`);
   if (resp.headers.get('content-type')?.includes('application/wasm') && 'instantiateStreaming' in WebAssembly) {
     return (await WebAssembly.instantiateStreaming(resp, {})).instance;
