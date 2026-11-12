@@ -714,6 +714,19 @@ mod sim_exports {
     pub unsafe extern "C" fn sim_agent_count(sim: *mut WasmSimCore) -> u32 {
         (*sim).eco.agents.iter().filter(|a| a.alive).count() as u32
     }
+    /// Debug: write a known marker to scratch[0] and return the alive count.
+    /// If JS reads 0xCAFEBABE at scratch[0], the scratch write path works.
+    #[no_mangle]
+    pub unsafe extern "C" fn sim_agent_count_debug(sim: *mut WasmSimCore) -> u32 {
+        let core = &mut *sim;
+        let count = core.eco.agents.iter().filter(|a| a.alive).count() as u32;
+        // Write marker to scratch[0..4]
+        let scratch = core.scratch.as_mut_ptr();
+        *(scratch as *mut u32) = 0xCAFEBABE;
+        // Also write the count to scratch[4..8]
+        *((scratch as *mut u32).add(1)) = count;
+        count
+    }
     #[no_mangle]
     pub unsafe extern "C" fn sim_deco_eff_std(sim: *mut WasmSimCore) -> f64 {
         (*sim).eco.stats().deco_eff_std

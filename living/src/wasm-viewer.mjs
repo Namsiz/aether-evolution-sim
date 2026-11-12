@@ -122,6 +122,17 @@ function createSimHandle(instance) {
     step(n, daylightLen) { E.sim_step(sim, n, scratchPtr + OFF_DAYLIGHT, daylightLen); },
     readAgents() { return E.sim_agents_flat(sim, AGENT_CAP); },
     agentCount() { return E.sim_agent_count ? E.sim_agent_count(sim) : -1; },
+    agentCountDebug() {
+      if (E.sim_agent_count_debug) {
+        const n = E.sim_agent_count_debug(sim);
+        // Read the marker + count we just wrote to scratch[0..8]
+        const dv = new DataView(E.memory.buffer, scratchPtr, 8);
+        const marker = dv.getUint32(0, true);
+        const countInBuf = dv.getUint32(4, true);
+        return { n, marker, countInBuf, scratchPtr };
+      }
+      return null;
+    },
     readMineral() { E.sim_mineral_resampled(sim); },
     readCounts() { E.sim_counts(sim); },
     tick() { return E.sim_tick(sim); },
@@ -1111,9 +1122,10 @@ export async function bootWasmViewer(canvasId = 'stage') {
         ? `<span style="color:#8fd3ff">↓ PNG ready (t=${pngReadyTick})</span><br>`
         : '';
       const agentTotal = handle.agentCount();
+      const dbg = handle.agentCountDebug();
       const speciesTotal = c[0]+c[1]+c[2]+c[3]+c[4]+c[5];
       const countLine = agentTotal > 0
-        ? `agent count=${agentTotal} ${speciesTotal===0 ? '· ⚠ flat=0 (scratch mismatch)' : ''}<br>`
+        ? `agent count=${agentTotal} ${speciesTotal===0 ? `· ⚠ flat=0 · marker=${dbg ? dbg.marker.toString(16) : '?'} · buf=${dbg ? dbg.countInBuf : '?'} · sptr=${dbg ? dbg.scratchPtr : '?'}` : ''}<br>`
         : '';
       hud.innerHTML =
         `<b>WASM SNAPSHOT v3</b> · tick ${handle.tick()} · D+${hh}h<br>` +
