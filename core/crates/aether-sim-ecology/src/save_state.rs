@@ -23,12 +23,16 @@
 //! strings (`niche` / `kind` keys) plus the new `CladeNicheBurdens` string —
 //! all three are `#[serde(default)]`, so v2 saves restore with
 //! niche_offset = 0 / event_kind = 0 / empty burdens.
+//! v3 → v4 (Phase 17): cataclysm history + live effect state as the compact
+//! JSON string `Cataclysms` plus `NextCataclysmId` — both `#[serde(default)]`,
+/// so v3 saves restore with an empty cataclysm table (pre-cataclysm worlds
+/// keep running with identical checksums).
 
 use serde::{Deserialize, Serialize};
 
 use crate::ecology::{DECO, FISH, HERB, OMN, PRED, SCAV};
 
-pub const SAVE_STATE_VERSION: u32 = 3;
+pub const SAVE_STATE_VERSION: u32 = 4;
 pub const SAVE_STATE_SCHEMA_NAME: &str = "aether-sim-save-state";
 
 /// DECO selection-pressure mode selector (persisted in SaveState v2).
@@ -193,6 +197,25 @@ impl serde::Serialize for SavedBurdens {
     }
 }
 impl<'de> serde::Deserialize<'de> for SavedBurdens {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s: String = serde::Deserialize::deserialize(d)?;
+        Ok(Self(s))
+    }
+}
+
+/// Phase 17: cataclysm history + live effect state as a compact JSON string
+/// (`[{"id":…,"kind":…,…},…]`, same trick as SavedClades/SavedEvents/
+/// SavedBurdens — no extra serde visitors in the wasm binary). Parsed in
+/// `Ecology::from_save_state`; empty on pre-Phase-17 (v3) saves.
+#[derive(Default, Clone, Debug)]
+pub struct SavedCataclysms(pub String);
+
+impl serde::Serialize for SavedCataclysms {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.0)
+    }
+}
+impl<'de> serde::Deserialize<'de> for SavedCataclysms {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let s: String = serde::Deserialize::deserialize(d)?;
         Ok(Self(s))
@@ -410,6 +433,13 @@ pub struct SaveState {
     /// with no active burdens; the next detection pass recomputes them.
     #[serde(default)]
     pub CladeNicheBurdens: SavedBurdens,
+    /// Phase 17: cataclysm history + live effect state (compact JSON string).
+    /// `#[serde(default)]` keeps pre-Phase-17 (v3) saves loadable — they
+    /// restore with an empty table and id counter 1.
+    #[serde(default)]
+    pub Cataclysms: SavedCataclysms,
+    #[serde(default)]
+    pub NextCataclysmId: u32,
     /// `None` = registry empty (default `Ecology::new` path, no biomes
     /// registered); `Some(list)` = biomes in registration order (the
     /// `with_biomes` path, including the implicit full-world + aquatic

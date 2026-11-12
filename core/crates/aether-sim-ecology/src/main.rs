@@ -16,6 +16,7 @@ mod ecology;
 mod save_state;
 mod terrain;
 mod niche; // Phase 16: clade niche axis + competitive exclusion
+mod cataclysm; // Phase 17: cataclysms + recovery dynamics
 
 use ecology::{Agent, Ecology, Genome};
 use std::collections::HashMap;

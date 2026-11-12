@@ -15,11 +15,15 @@
 import * as THREE from 'three';
 import { createViewerRenderer, createViewerWorld, updateSunFocus, VIEWER_QUALITY } from './render-utils.mjs';
 import { createMineralHeatmapPlane, updateMineralTexture } from './renderer-mineral-mat.mjs';
-import { createEvolutionHistogramOverlay, createSpectrogramOverlay, DECO_HUE_MIN, DECO_HUE_SPAN, DECO_HUE_BUCKETS, HIST_FRAME_TICKS, getTickFromFrame } from './renderer-evolution-histogram.mjs';
+import { createEvolutionHistogramOverlay, createSpectrogramOverlay, DECO_HUE_MIN, DECO_HUE_SPAN, DECO_HUE_BUCKETS, HIST_FRAME_TICKS, getTickFromFrame,
+  SPECTROGRAM_HISTORY_FRAMES, SPECTROGRAM_WIDTH } from './renderer-evolution-histogram.mjs';
 import { createPhylogenyOverlay, readPhylogenyState, buildPhylogenyGraph,
   CLADE_CAP, EVENT_CAP, CLADE_RECORD_SIZE, EVENT_RECORD_SIZE, CLADE_NAME_CAP,
 } from './renderer-phylogeny.mjs';
 import { createNicheOverlay, buildNicheCloud } from './renderer-niche.mjs';
+import { createDustOverlay, drawCataclysmVline, drawCataclysmHline, drawCataclysmGlyph,
+  formatCataclysmHud, CATACLYSM_IMPACT, CATACLYSM_CLIMATE,
+} from './renderer-cataclysm.mjs';
 import { createEvolutionScrubber } from './evolution-scrubber.mjs';
 import { encodeEvolutionHistory } from './evolution-export.mjs';
 import { createSessionMeta } from './session-meta.mjs';
@@ -132,6 +136,14 @@ function createSimHandle(instance) {
       return readPhylogenyState(E, sim,
         scratchPtr + OFF_CLADES, scratchPtr + OFF_EVENTS, scratchPtr + OFF_CLADE_NAME, CLADE_NAME_CAP);
     },
+    // Phase 17: cataclysm 注入与读出（旧 wasm 无导出时为 undefined，调用方需先判
+    // catSupported）。out 指针由调用方提供（boot 期追加的 1 页内存）。
+    triggerCataclysm(kind, x, z, radius, severity, duration) {
+      return E.sim_trigger_cataclysm(sim, kind, x, z, radius, severity, duration) | 0;
+    },
+    cataclysmCount() { return E.sim_cataclysm_count(sim) | 0; },
+    getCataclysm(i, outPtr) { return E.sim_get_cataclysm(sim, i, outPtr) | 0; },
+    envMods(outPtr) { return E.sim_env_mods(sim, outPtr) | 0; },
     // Diagnostic helpers
     getBufferLen() { return E.memory.buffer.byteLength; },
     rawCountsBytes() {
@@ -284,6 +296,15 @@ export async function bootWasmViewer(canvasId = 'stage') {
 
   setStatus('加载 WASM 生态内核…');
   const instance = await loadWasmModule();
+  // Phase 17: cataclysm ABI 出参缓冲 —— 追加 1 页 wasm 内存（旧 wasm 无这些导出
+  // 时跳过；memory.grow 会使旧视图失效，ensureViews() 按 byteLength 自动重建）。
+  const catSupported = typeof instance.exports.sim_trigger_cataclysm === 'function';
+  let catBufPtr = 0;
+  if (catSupported) {
+    const pagesBefore = instance.exports.memory.buffer.byteLength / 65536;
+    instance.exports.memory.grow(1);
+    catBufPtr = pagesBefore * 65536;
+  }
   const handle = createSimHandle(instance);
   const v = handle.views();
 
@@ -378,6 +399,68 @@ export async function bootWasmViewer(canvasId = 'stage') {
   // Phase 16: 生态位空间 overlay（U 键切换；复用 phylogeny 的 60-tick 拉取节奏）。
   const nicheOverlay = phyloSupported ? createNicheOverlay() : null;
   let nicheOn = true;
+
+  // Phase 17: 灾变系统 —— 注入（C/X 键）、烟尘 overlay、spectrogram/phylogeny
+  // 时间标记与 HUD 历史（旧 wasm 无导出时整体降级隐藏）。
+  const dustOverlay = catSupported ? createDustOverlay() : null;
+  let catHistory = [];      // sim_get_cataclysm 拉取快照（旧 → 新）
+  let lastCatPull = -Infinity;
+
+  function pullCataclysms(force = false) {
+    if (!catSupported) return;
+    const t = handle.tick();
+    if (!force && t - lastCatPull < 60) return;
+    lastCatPull = t;
+    const count = Math.min(handle.cataclysmCount(), 64);
+    const list = [];
+    for (let i = 0; i < count; i++) {
+      if (handle.getCataclysm(i, catBufPtr) === 0) break;
+      const dv = new DataView(instance.exports.memory.buffer, catBufPtr, 40);
+      list.push({
+        id: dv.getUint32(0, true),
+        kind: dv.getUint32(4, true),
+        tick: dv.getUint32(8, true),
+        endsAt: dv.getUint32(12, true),
+        remaining: dv.getUint32(16, true),
+        x: dv.getFloat32(20, true),
+        z: dv.getFloat32(24, true),
+        radius: dv.getFloat32(28, true),
+        severity: dv.getFloat32(32, true),
+        active: dv.getUint32(36, true) === 1,
+      });
+    }
+    catHistory = list;
+  }
+
+  // 灾变时间标记：phylogeny（时间轴横向 → 竖线 + 图标）与 spectrogram（时间轴
+  // 纵向 → 横线 + 图标）。overlay 自身的 render 会整面重绘并抹掉标记，因此这里
+  // 每帧在其后补画（几条虚线 + 小图标，开销可忽略）。
+  function drawCataclysmMarks() {
+    if (!catSupported || catHistory.length === 0) return;
+    if (phyloOverlay && phyloOverlay.visible && phyloOverlay.graph) {
+      const g = phyloOverlay.graph;
+      const w = 360, h = 280; // 与 createPhylogenyOverlay 默认几何同步
+      const PAD = { top: 26, bottom: 20, left: 84, right: 30 };
+      const ctx = phyloOverlay.canvas.getContext('2d');
+      const span = Math.max(1, g.currentTick - g.rootTick);
+      for (const c of catHistory) {
+        if (c.tick < g.rootTick) continue;
+        const x = PAD.left + ((c.tick - g.rootTick) / span) * (w - PAD.left - PAD.right);
+        drawCataclysmVline(ctx, c.kind, x, PAD.top, h - PAD.bottom);
+        drawCataclysmGlyph(ctx, c.kind, x, PAD.top + 12);
+      }
+    }
+    if (specOverlay && specOverlay.visible && specNewestTick > 0) {
+      const ctx = specOverlay.canvas.getContext('2d');
+      for (const c of catHistory) {
+        const back = (specNewestTick - c.tick) / HIST_FRAME_TICKS;
+        if (back < 0 || back >= SPECTROGRAM_HISTORY_FRAMES) continue;
+        const y = Math.round(back);
+        drawCataclysmHline(ctx, c.kind, y, 12, SPECTROGRAM_WIDTH - 12);
+        drawCataclysmGlyph(ctx, c.kind, SPECTROGRAM_WIDTH - 22, Math.max(9, y - 7));
+      }
+    }
+  }
 
   function renderPhylo() {
     if (!phyloOverlay) return;
@@ -514,6 +597,10 @@ export async function bootWasmViewer(canvasId = 'stage') {
     nicheOverlay.setVisible(true);
     renderNiche();
   }
+  if (catSupported) {
+    pullCataclysms(true); // 预热阶段无灾变，仅建立空基线
+    dustOverlay.setDust(1);
+  }
 
   window.addEventListener('keydown', (e) => {
     if (e.code === 'KeyM') {
@@ -606,6 +693,24 @@ export async function bootWasmViewer(canvasId = 'stage') {
       fossilOn = !fossilOn;
       renderPhylo();
       toast(`fossil highlight ${fossilOn ? 'ON' : 'OFF'}（F 切换）`);
+    } else if (e.code === 'KeyC' && catSupported) {
+      // Phase 17: 演示小行星 —— 固定参数（地图中心偏移），实验者手动注入。
+      const id = handle.triggerCataclysm(CATACLYSM_IMPACT, 140, -90, 170, 0.9, 600);
+      if (id > 0) {
+        pullCataclysms(true);
+        toast(`☄ 小行星撞击已注入 (#${id}) · 尘幕 600t`);
+      } else {
+        toast('注入失败（参数无效）');
+      }
+    } else if (e.code === 'KeyX' && catSupported) {
+      // Phase 17: 演示气候突变 —— 全图草地生长 ×0.5，持续 1200t。
+      const id = handle.triggerCataclysm(CATACLYSM_CLIMATE, 0, 0, 0, 0.5, 1200);
+      if (id > 0) {
+        pullCataclysms(true);
+        toast(`🌡 气候突变已注入 (#${id}) · 生长 ×0.5 · 1200t`);
+      } else {
+        toast('注入失败（参数无效）');
+      }
     } else if (e.code === 'KeyS') {
       // S 键保存 snapshot：截取当前 WebGL canvas + overlay canvases 合并为一张 PNG，存 localStorage。
       try {
@@ -870,9 +975,16 @@ export async function bootWasmViewer(canvasId = 'stage') {
       histFrame += 1;
       // Phase 15: 每 60 sim-tick 拉一次 clade/event（内部有节奏门控）。
       if (phyloOverlay) pullPhylogeny();
+      // Phase 17: 灾变拉取（60-tick 门控）+ 每帧烟尘浓度读数。
+      if (catSupported) {
+        pullCataclysms();
+        handle.envMods(catBufPtr);
+        dustOverlay.setDust(new DataView(instance.exports.memory.buffer, catBufPtr, 16).getFloat64(0, true));
+      }
     }
 
     updateGhosts(clock.elapsedTime);
+    if (catSupported) drawCataclysmMarks(); // overlay 自绘之后补画灾变标记
     renderer.render(scene, camera);
 
     if (elapsed - lastHud > 0.25) {
@@ -896,6 +1008,13 @@ export async function bootWasmViewer(canvasId = 'stage') {
           .map((c) => (c.extinct ? `†${c.name}` : c.name));
         const list = names.length <= 5 ? names.join(' · ') : `${alive} alive / ${names.length} total`;
         cladeLine = `<span style="color:#c9a0ff">clades: ${list} · ${phyloEvents.length} event${phyloEvents.length === 1 ? '' : 's'}</span><br>`;
+      }
+      // Phase 17: 活跃灾变徽标 + 最近 5 条历史。
+      let catLine = '';
+      if (catSupported && catHistory.length > 0) {
+        handle.envMods(catBufPtr);
+        const dust = new DataView(instance.exports.memory.buffer, catBufPtr, 16).getFloat64(0, true);
+        catLine = formatCataclysmHud(catHistory, dust);
       }
       // Phase 13: 当前帧绝对读数（播放=最新帧；scrub=选中帧，红标）。
       let frameLine = '';
@@ -926,6 +1045,7 @@ export async function bootWasmViewer(canvasId = 'stage') {
         `牧 ${c[0]} · 掠 ${c[1]} · 腐 ${c[2]} · 杂 ${c[3]} · 鱼 ${c[4]} · 分解 ${c[5]}<br>` +
         decoLine +
         cladeLine +
+        catLine +
         frameLine +
         loadedLine +
         histLine +

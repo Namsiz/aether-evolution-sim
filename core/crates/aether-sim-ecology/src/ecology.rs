@@ -21,9 +21,9 @@ pub const OMN: &str = "omn";
 pub const FISH: &str = "fish";
 pub const DECO: &str = "deco";
 
-const GRID_N: u32 = 76;
-const GRID_SPAN: f64 = 1080.0;
-const CELL: f64 = GRID_SPAN / (GRID_N as f64);
+pub(crate) const GRID_N: u32 = 76;
+pub(crate) const GRID_SPAN: f64 = 1080.0;
+pub(crate) const CELL: f64 = GRID_SPAN / (GRID_N as f64);
 const MAX_HERB: usize = 420;
 const MAX_PRED: usize = 110;
 const MAX_SCAV: usize = 40;
@@ -342,6 +342,49 @@ pub const EVENT_KIND_SPECIATION: u8 = 0;
 pub const EVENT_KIND_EXTINCTION: u8 = 1;
 pub const EVENT_KIND_COMPETITIVE_EXCLUSION: u8 = 2;
 
+// ----- Phase 17: cataclysms + recovery dynamics --------------------------------
+//
+// Cataclysms are experimenter-injected extinction events (C-ABI only — the
+// engine never fires one on its own). All bookkeeping is deterministic: no
+// RNG draws anywhere in the cataclysm path, and with no active cataclysm
+// every environment multiplier is exactly 1.0 (f64 x*1.0 is bit-exact), so
+// the checksum trajectory of cataclysm-free runs is untouched.
+/// kind 0: asteroid impact — local resource wipe + mass mortality + dust.
+pub const CATACLYSM_IMPACT: u8 = 0;
+/// kind 1: climate shift — global grass-growth throttle, no direct mortality.
+pub const CATACLYSM_CLIMATE: u8 = 1;
+/// Energy struck off every agent inside the impact radius (scaled by
+/// severity). Deaths reuse the regular die() path (cause "cataclysm").
+pub const CATACLYSM_DAMAGE: f64 = 60.0;
+/// Peak additive metabolic-stress factor at full dust cover: drain formulas
+/// scale with the genome's metabolism gene, so this yields a measurable
+/// K-Pg-style selection against high-maintenance phenotypes.
+pub const CATACLYSM_STRESS_SCALE: f64 = 1.5;
+
+/// One cataclysm record: the injection event plus its live effect state.
+/// `remaining` counts down once per substep in `update`; `active` flips to
+/// false at zero. Persisted in SaveState v4 via the compact JSON string.
+#[derive(Clone, Debug)]
+pub struct Cataclysm {
+    pub id: u32,
+    pub kind: u8,
+    /// Injection tick (ecology tick_count at trigger time).
+    pub tick: u32,
+    pub x: f64,
+    pub z: f64,
+    pub radius: f64,
+    pub severity: f64,
+    /// Impact only: dust multiplier recovers linearly over this many ticks.
+    pub dust_recovery_ticks: u32,
+    /// Climate only: additive growth modifier (negative = throttled).
+    pub climate_delta: f64,
+    /// Last tick the effect can act (tick + duration at injection).
+    pub ends_at: u32,
+    /// Live countdown; > 0 ⇔ active.
+    pub remaining: u32,
+    pub active: bool,
+}
+
 /// One branch of the species phylogeny. `members` is a cached view rebuilt
 /// from live agents at each detection pass; `death_tick` freezes the record
 /// when the last member dies (fossil).
@@ -525,8 +568,10 @@ pub struct Ecology {
     pub fires: Vec<(f64, f64)>,
     pub torch: Option<(f64, f64)>,
     pub rain: f64,
-    grass: Vec<f32>,
-    grass_p: [Vec<f32>; GRASS_N],
+    // Phase 17: cataclysm.rs mutates the resource fields directly (impact
+    // blast); the public accessors remain authoritative for reads.
+    pub(crate) grass: Vec<f32>,
+    pub(crate) grass_p: [Vec<f32>; GRASS_N],
     suit_eff_by: [Vec<f32>; GRASS_N],
     suit: Vec<f32>,
     shade: Vec<f32>,
@@ -534,7 +579,7 @@ pub struct Ecology {
     /// Phase 4-C: soil mineral density per grid cell, same layout as `grass_p`.
     /// Decomposers deposit into it while feeding on carcasses; it decays each
     /// tick and multiplies grass logistic growth. Clamped to [0, 1].
-    mineral_field: Vec<f32>,
+    pub(crate) mineral_field: Vec<f32>,
     grid_acc: f64,
     pub grid_n: u32,
     pub grid_span: f64,
@@ -590,6 +635,10 @@ pub struct Ecology {
     /// every detection pass (clade id -> multiplier >= 0). Vec of pairs in
     /// first-seen order — deterministic iteration, no HashMap in wasm.
     pub clade_burdens: Vec<(u32, f64)>,
+    /// Phase 17: cataclysm injection log (history + live effect state), in
+    /// trigger order. See `cataclysm.rs`; persisted in SaveState v4.
+    pub cataclysms: Vec<Cataclysm>,
+    pub(crate) next_cataclysm_id: u32,
 }
 
 impl Ecology {
@@ -641,6 +690,8 @@ impl Ecology {
             speciation_events: Vec::new(),
             last_clade_spec_tick: 0,
             clade_burdens: Vec::new(),
+            cataclysms: Vec::new(),
+            next_cataclysm_id: 1,
             history: Vec::new(),
             last_sample: 0,
             gene_barrier_strength: 0.5,
@@ -719,6 +770,8 @@ impl Ecology {
             speciation_events: Vec::new(),
             last_clade_spec_tick: 0,
             clade_burdens: Vec::new(),
+            cataclysms: Vec::new(),
+            next_cataclysm_id: 1,
             history: Vec::new(),
             last_sample: 0,
             gene_barrier_strength: 0.5,
@@ -1810,7 +1863,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         }
     }
 
-    fn die(&mut self, idx: usize, cause: &'static str) {
+    pub(crate) fn die(&mut self, idx: usize, cause: &'static str) {
         if !self.agents[idx].alive { return; }
         self.agents[idx].alive = false;
         self.deaths += 1;
@@ -2773,7 +2826,10 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         // clade pair drains +15 % faster (burden map rebuilt every detection
         // pass; always empty in legacy mode).
         let niche_burden = self.clade_burden_of(self.agents[idx].clade_id);
-        let total_drain = g_metabolism * (0.12 + 0.25 * activity) * crowd_penalty * season_meta_deco * h * eff_metab_mod * (1.0 + niche_burden);
+        // Phase 17: impact-dust metabolic stress also hits DECO (its drain
+        // path uses its own season table, bypassing self.season_meta).
+        let cat_stress = 1.0 + self.cataclysm_stress_scale();
+        let total_drain = g_metabolism * (0.12 + 0.25 * activity) * crowd_penalty * season_meta_deco * h * eff_metab_mod * (1.0 + niche_burden) * cat_stress;
         self.agents[idx].energy -= total_drain;
 
         if self.agents[idx].energy <= 0.0 {
@@ -2789,21 +2845,36 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
 
     pub fn update(&mut self, dt: f64, daylight: f64) {
         if dt <= 0.0 { return; }
-        self.daylight = daylight;
+        // Phase 17: cataclysm env modulation. Dust darkens the daylight (also
+        // drives the resting/plasticity thresholds downstream); the climate
+        // shift throttles grass growth below. With no active cataclysm both
+        // multipliers are exactly 1.0 — f64 x*1.0 is bit-exact, so cataclysm-
+        // free runs keep their checksum trajectory untouched.
+        let (dust_mult, grow_mult) = self.cataclysm_env_mods();
+        self.daylight = daylight * dust_mult;
         let steps = ((dt / 0.1).round() as i32).max(1);
         let h = dt / steps as f64;
         for _s in 0..steps {
             self.time += h;
             self.tick_count += 1;
+            // Phase 17: per-substep cataclysm countdown (pure bookkeeping,
+            // zero RNG).
+            self.tick_cataclysms();
 
             self.season = ((self.time / 1800.0) as i32) % 4;
             let season_grass = [1.3f64, 0.6, 0.8, 0.25][self.season as usize];
             let season_meta = [1.0f64, 1.15, 0.9, 0.75][self.season as usize];
-            self.season_meta = season_meta;
+            // Phase 17: impact-dust metabolic stress — the additive factor
+            // scales with (1 − dust), so every drain (∝ genome metabolism)
+            // rises while the sky is dark (K-Pg-style high-maintenance
+            // penalty). Exactly 1.0 without active impacts → bit-exact no-op.
+            self.season_meta = season_meta * (1.0 + self.cataclysm_stress_scale());
 
             // Grass logistic growth — mineral deposits (Phase 4-C) boost the
             // per-cell rate by up to +30% before the per-species update.
-            let grow = 0.0056 * season_grass * (0.18 + 0.82 * daylight) * (1.0 + self.rain * 0.02);
+            // Phase 17: grow_mult = climate-shift throttle; self.daylight
+            // already carries the dust darkening.
+            let grow = 0.0056 * season_grass * grow_mult * (0.18 + 0.82 * self.daylight) * (1.0 + self.rain * 0.02);
             for i in 0..self.grass.len() {
                 let suit = self.suit[i];
                 if suit <= 0.02 { continue; }
@@ -3860,6 +3931,18 @@ fn clade_event_to_json(e: &CladeSpeciationEvent) -> String {
     )
 }
 
+/// Compact camelCase JSON view of a Cataclysm for the SaveState v4 string
+/// field (same hand-rolled format! trick as clade_to_json — no extra serde
+/// visitors in the wasm binary).
+fn cataclysm_to_json(c: &Cataclysm) -> String {
+    format!(
+        "{{\"id\":{},\"kind\":{},\"tick\":{},\"x\":{},\"z\":{},\"radius\":{},\"severity\":{},\"dustRecoveryTicks\":{},\"climateDelta\":{},\"endsAt\":{},\"remaining\":{},\"active\":{}}}",
+        c.id, c.kind, c.tick, c.x, c.z, c.radius, c.severity,
+        c.dust_recovery_ticks, c.climate_delta, c.ends_at, c.remaining,
+        if c.active { 1 } else { 0 },
+    )
+}
+
 impl Ecology {
     /// Phase 8 helper: acquire an exclusive occupancy lock on a carcass.
     /// An agent holds at most one lock at a time; if it already holds another
@@ -3983,6 +4066,13 @@ impl Ecology {
                     .collect::<Vec<String>>()
                     .join(",")
             )),
+            // Phase 17: cataclysm history + live effect state (compact JSON,
+            // see save_state::SavedCataclysms).
+            Cataclysms: save_state::SavedCataclysms(format!(
+                "[{}]",
+                self.cataclysms.iter().map(cataclysm_to_json).collect::<Vec<String>>().join(",")
+            )),
+            NextCataclysmId: self.next_cataclysm_id,
             // None ⇔ empty registry (`Ecology::new` path); Some ⇔ registered
             // list in insertion order (`with_biomes` path incl. full-world +
             // aquatic). The two paths differ behaviorally (aquatic
@@ -4124,6 +4214,34 @@ impl Ecology {
         }).collect();
         let next_clade_id = state.NextCladeId;
         let last_clade_spec_tick = state.LastCladeSpecTick;
+
+        // Phase 17: cataclysm table. Pre-v4 saves carry the serde default
+        // (empty string) → empty history, id counter 1 (pre-cataclysm world,
+        // bit-identical continuation).
+        let cataclysms: Vec<Cataclysm> =
+            serde_json::from_str::<serde_json::Value>(&state.Cataclysms.0)
+                .ok()
+                .and_then(|v| v.as_array().cloned())
+                .map(|arr| {
+                    arr.iter().filter_map(|c| {
+                        Some(Cataclysm {
+                            id: c.get("id")?.as_u64()? as u32,
+                            kind: c.get("kind")?.as_u64()? as u8,
+                            tick: c.get("tick")?.as_u64()? as u32,
+                            x: c.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                            z: c.get("z").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                            radius: c.get("radius").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                            severity: c.get("severity").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                            dust_recovery_ticks: c.get("dustRecoveryTicks").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                            climate_delta: c.get("climateDelta").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                            ends_at: c.get("endsAt").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                            remaining: c.get("remaining").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                            active: c.get("active").and_then(|v| v.as_u64()).unwrap_or(0) == 1,
+                        })
+                    }).collect::<Vec<Cataclysm>>()
+                })
+                .unwrap_or_default();
+        let next_cataclysm_id = if state.NextCataclysmId > 0 { state.NextCataclysmId } else { 1 };
 
         // Phase 16: competitive-exclusion burden map `[[cladeId,burden],…]`.
         // Pre-v3 saves carry the serde default (empty string) -> no burdens;
@@ -4284,6 +4402,8 @@ impl Ecology {
             speciation_events,
             last_clade_spec_tick,
             clade_burdens,
+            cataclysms,
+            next_cataclysm_id,
             seed: state.seed,
             biome_reg,
             deco_eff_choice_mode,

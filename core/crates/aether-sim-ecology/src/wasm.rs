@@ -456,6 +456,12 @@ pub const EVENT_CAP: usize = 64;
 /// offsets are unchanged so JS readers of the old layout only miss the tail).
 pub const CLADE_RECORD_SIZE: usize = 40;
 pub const EVENT_RECORD_SIZE: usize = 56;
+/// Phase 17: cataclysm record (sim_get_cataclysm, JS-provided out buffer —
+/// NOT part of the scratch arena, so SCRATCH_SIZE is unchanged):
+///   [id u32][kind u32][tick u32][ends_at u32][remaining u32]
+///   [x f32][z f32][radius f32][severity f32][active u32]
+pub const CATACLYSM_RECORD_SIZE: usize = 40;
+pub const CATACLYSM_CAP: usize = 64;
 pub const CLADE_NAME_CAP: usize = 32;
 pub const MAX_EVENT_CHILDREN: usize = 8;
 pub const SCRATCH_OFF_CLADES: usize = SCRATCH_OFF_HIST + DECO_HUE_BUCKETS_CAP * 4;
@@ -838,6 +844,80 @@ mod sim_exports {
         // failure), 0 on failure. JS reads the true child count from the
         // record's child_count field at offset 8.
         n_children.max(1) as u32
+    }
+
+    // ─── Phase 17: cataclysm injection & env readout ─────────────────────────
+
+    /// Inject a cataclysm. kind: 0 = impact (x/z/radius/severity used),
+    /// 1 = climate shift (severity doubles as the negative growth delta).
+    /// Returns the cataclysm id (≥ 1), or 0 on null handle / invalid params.
+    ///
+    /// # Safety
+    /// `sim` from `sim_new`.
+    #[no_mangle]
+    pub unsafe extern "C" fn sim_trigger_cataclysm(
+        sim: *mut WasmSimCore,
+        kind: u32,
+        x: f64,
+        z: f64,
+        radius: f64,
+        severity: f64,
+        duration: u32,
+    ) -> u32 {
+        if sim.is_null() { return 0; }
+        (*sim).eco.trigger_cataclysm(kind as u8, x, z, radius, severity, duration)
+    }
+
+    /// Total number of cataclysms ever injected (history + live). JS reads
+    /// records with sim_get_cataclysm, capping at CATACLYSM_CAP = 64.
+    ///
+    /// # Safety
+    /// `sim` from `sim_new`.
+    #[no_mangle]
+    pub unsafe extern "C" fn sim_cataclysm_count(sim: *mut WasmSimCore) -> u32 {
+        if sim.is_null() { return 0; }
+        (*sim).eco.cataclysm_count()
+    }
+
+    /// Fill the 40-byte cataclysm record at `out`:
+    ///   [id u32][kind u32][tick u32][ends_at u32][remaining u32]
+    ///   [x f32][z f32][radius f32][severity f32][active u32]
+    /// Returns 1 on success, 0 on null/bounds failure (never traps).
+    ///
+    /// # Safety
+    /// `sim` from `sim_new`; `out` writable for CATACLYSM_RECORD_SIZE bytes.
+    #[no_mangle]
+    pub unsafe extern "C" fn sim_get_cataclysm(sim: *mut WasmSimCore, idx: u32, out: *mut u8) -> u32 {
+        if sim.is_null() || out.is_null() { return 0; }
+        let core = &mut *sim;
+        let Some(c) = core.eco.cataclysms.get(idx as usize) else { return 0; };
+        let mut rec = [0u8; CATACLYSM_RECORD_SIZE];
+        rec[0..4].copy_from_slice(&c.id.to_le_bytes());
+        rec[4..8].copy_from_slice(&(c.kind as u32).to_le_bytes());
+        rec[8..12].copy_from_slice(&c.tick.to_le_bytes());
+        rec[12..16].copy_from_slice(&c.ends_at.to_le_bytes());
+        rec[16..20].copy_from_slice(&c.remaining.to_le_bytes());
+        rec[20..24].copy_from_slice(&(c.x as f32).to_le_bytes());
+        rec[24..28].copy_from_slice(&(c.z as f32).to_le_bytes());
+        rec[28..32].copy_from_slice(&(c.radius as f32).to_le_bytes());
+        rec[32..36].copy_from_slice(&(c.severity as f32).to_le_bytes());
+        rec[36..40].copy_from_slice(&(c.active as u32).to_le_bytes());
+        std::ptr::copy_nonoverlapping(rec.as_ptr(), out, CATACLYSM_RECORD_SIZE);
+        1
+    }
+
+    /// Current environment multipliers: writes dust (f64) then growth (f64)
+    /// to `out`; returns 2. JS reads these every frame for the dust overlay.
+    ///
+    /// # Safety
+    /// `sim` from `sim_new`; `out` writable for 2 × f64.
+    #[no_mangle]
+    pub unsafe extern "C" fn sim_env_mods(sim: *mut WasmSimCore, out: *mut f64) -> u32 {
+        if sim.is_null() || out.is_null() { return 0; }
+        let (dust, grow) = (*sim).eco.cataclysm_env_mods();
+        *out.add(0) = dust;
+        *out.add(1) = grow;
+        2
     }
 
     /// Serialize the current state as Snapshot v3 JSON. Returns a pointer to a
