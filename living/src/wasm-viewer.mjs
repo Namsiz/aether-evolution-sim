@@ -263,8 +263,16 @@ function updateInstancedMeshes(meshes, handle, agentCount) {
 
 // ─── daylight curve (mirrors the JS viewer: one day per 48 real minutes) ─────
 
+// 与 JS 路径一致（sky.js createEnvironment 的 startHour 默认值）：世界从午后开始。
+// 若不偏移，tick 0 对应 0 点 = 午夜，开局长时间黑夜。
+const START_HOUR = 16.4;
+
+function hourFor(tick) {
+  return (START_HOUR + tick * 0.1 * 24 / DAY_TICKS) % 24;
+}
+
 function daylightFor(tick) {
-  const hour = (tick * 0.1 * 24 / DAY_TICKS) % 24; // DAY_TICKS ticks per full day
+  const hour = hourFor(tick);
   const elev = Math.sin(((hour - 6) / 12) * Math.PI);
   return clamp((elev + 0.03) / 0.27, 0, 1);
 }
@@ -1000,7 +1008,7 @@ export async function bootWasmViewer(canvasId = 'stage') {
     fpsAcc += raw; fpsN += 1;
 
     const elapsed = clock.elapsedTime;
-    const hour = (handle.tick() * 0.1 * 24 / DAY_TICKS) % 24;
+    const hour = hourFor(handle.tick());
     env.setTime(hour);
     updateSunFocus(env, controls.target);
     env.update(raw, elapsed);
@@ -1063,7 +1071,7 @@ export async function bootWasmViewer(canvasId = 'stage') {
       lastHud = elapsed;
       fps = fpsN / Math.max(fpsAcc, 1e-6); fpsAcc = 0; fpsN = 0;
       const c = censusFromFlat(handle.readAgents());
-      const hh = Math.floor((handle.tick() * 0.1 * 24 / DAY_TICKS) % 24);
+      const hh = Math.floor(hourFor(handle.tick()));
       // Phase 9: DECO 效率演化读数（相对 warmup 基线的 delta）。
       const effMean = handle.decoEffMean();
       const effStd = handle.decoEffStd();
