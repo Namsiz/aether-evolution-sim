@@ -135,6 +135,8 @@ pub struct Genome {
     /// Phase 4-C DECO-only gene: scales both carcass processing throughput
     /// and mineral deposit strength. Non-DECO kinds carry the default 1.0.
     pub deco_efficiency: f64,
+    pub hull_ratio: f64,
+    pub limb_scale: f64,
 }
 
 #[derive(Debug)]
@@ -549,6 +551,7 @@ impl Genome {
             hue: 0.0, bold: 0.0, curious: 0.0, social: 0.0,
             help_thr: None, pref_sig: None, tol_sig: None,
             fin_color: 0.0, deco_efficiency: 1.0,
+            hull_ratio: 1.0, limb_scale: 3.0,
         }
     }
 }
@@ -1134,7 +1137,18 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
 
     // ----- genome factories -------------------------------------------------
 
+    /// Phase 19: deterministic morphology from agent ID (no RNG consumed).
+    /// Uses a 16-bit FNV split so JS can replicate from SLOT_ID.
+    #[inline]
+    fn morpho_pair(id: u32) -> (f64, f64) {
+        let h = id.wrapping_mul(0x9E3779B9);
+        let hr = 0.6 + ((h & 0xFFFF) as f64 / 65535.0) * 0.8;
+        let ls = 2.0 + (((h >> 16) & 0xFFFF) as f64 / 65535.0) * 2.0;
+        (hr, ls)
+    }
+
     fn random_genome(&mut self, kind: &'static str) -> Genome {
+        let (hr, ls) = Self::morpho_pair(self.next_id);
         if kind == HERB {
             Genome {
                 speed: 3.8 + self.rng.next_f64() * 4.2,
@@ -1151,6 +1165,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 tol_sig: Some(self.triangular(0.15, 0.20, 0.25).clamp(SIG_TOL_MIN, SIG_TOL_MAX)),
                 fin_color: 0.0,
                 deco_efficiency: 1.0,
+            hull_ratio: hr, limb_scale: ls,
             }
         } else if kind == FISH {
             Genome {
@@ -1168,6 +1183,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 tol_sig: None,
                 fin_color: self.fish_rng.next_f64(),
                 deco_efficiency: 1.0,
+            hull_ratio: hr, limb_scale: ls,
             }
         } else if kind == DECO {
             Genome {
@@ -1185,6 +1201,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 tol_sig: None,
                 fin_color: 0.0,
                 deco_efficiency: 0.5 + self.rng.next_f64(),
+            hull_ratio: hr, limb_scale: ls,
             }
         } else {
             Genome {
@@ -1202,6 +1219,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 tol_sig: None,
                 fin_color: 0.0,
                 deco_efficiency: 1.0,
+            hull_ratio: hr, limb_scale: ls,
             }
         }
     }
@@ -1260,6 +1278,8 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             tol_sig: None,
             fin_color: (a.fin_color + b.fin_color) * 0.5,
             deco_efficiency: (a.deco_efficiency + b.deco_efficiency) * 0.5,
+            hull_ratio: (a.hull_ratio + b.hull_ratio) * 0.5,
+            limb_scale: (a.limb_scale + b.limb_scale) * 0.5,
         };
         if let (Some(x), Some(y)) = (a.help_thr, b.help_thr) { g.help_thr = Some((x + y) * 0.5); }
         if let (Some(x), Some(y)) = (a.pref_sig, b.pref_sig) { g.pref_sig = Some((x + y) * 0.5); }
@@ -3341,6 +3361,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             hue: 0.0, bold: 0.0, curious: 0.0, social: 0.0,
             help_thr: None, pref_sig: None, tol_sig: None,
             fin_color: 0.0, deco_efficiency: 0.0,
+            hull_ratio: 0.0, limb_scale: 0.0,
         };
         let mut opt_sum = [0.0f64; 3];
         let mut opt_cnt = [0usize; 3];
@@ -3357,6 +3378,8 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             acc.social += g.social;
             acc.fin_color += g.fin_color;
             acc.deco_efficiency += g.deco_efficiency;
+            acc.hull_ratio += g.hull_ratio;
+            acc.limb_scale += g.limb_scale;
             for (k, v) in [g.help_thr, g.pref_sig, g.tol_sig].into_iter().enumerate() {
                 if let Some(x) = v { opt_sum[k] += x; opt_cnt[k] += 1; }
             }
@@ -3372,6 +3395,8 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         acc.social /= n;
         acc.fin_color /= n;
         acc.deco_efficiency /= n;
+        acc.hull_ratio /= n;
+        acc.limb_scale /= n;
         acc.help_thr = (opt_cnt[0] > 0).then(|| opt_sum[0] / opt_cnt[0] as f64);
         acc.pref_sig = (opt_cnt[1] > 0).then(|| opt_sum[1] / opt_cnt[1] as f64);
         acc.tol_sig = (opt_cnt[2] > 0).then(|| opt_sum[2] / opt_cnt[2] as f64);
@@ -3891,6 +3916,7 @@ fn genome_to_save(g: &Genome) -> save_state::SaveGenome {
         bold: g.bold, curious: g.curious, social: g.social,
         help_thr: g.help_thr, pref_sig: g.pref_sig, tol_sig: g.tol_sig,
         fin_color: g.fin_color, deco_efficiency: g.deco_efficiency,
+        hull_ratio: g.hull_ratio, limb_scale: g.limb_scale,
     }
 }
 
@@ -3901,6 +3927,7 @@ fn genome_from_save(g: save_state::SaveGenome) -> Genome {
         bold: g.bold, curious: g.curious, social: g.social,
         help_thr: g.help_thr, pref_sig: g.pref_sig, tol_sig: g.tol_sig,
         fin_color: g.fin_color, deco_efficiency: g.deco_efficiency,
+        hull_ratio: g.hull_ratio, limb_scale: g.limb_scale,
     }
 }
 

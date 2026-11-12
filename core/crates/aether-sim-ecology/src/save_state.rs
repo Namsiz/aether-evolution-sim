@@ -71,6 +71,10 @@ pub struct SaveGenome {
     pub tol_sig: Option<f64>,
     pub fin_color: f64,
     pub deco_efficiency: f64,
+    #[serde(default)]
+    pub hull_ratio: f64,
+    #[serde(default)]
+    pub limb_scale: f64,
 }
 
 /// Complete agent state (superset of render-packet AgentView: full genome,

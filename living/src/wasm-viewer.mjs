@@ -28,6 +28,9 @@ import { createEvolutionScrubber } from './evolution-scrubber.mjs';
 import { encodeEvolutionHistory } from './evolution-export.mjs';
 import { createSessionMeta } from './session-meta.mjs';
 import { terrainHeight, WATER_LEVEL, clamp } from './world.js';
+import { deriveMorphology, buildSpeciesBaseGeometry, addAnimAttributes, updateAnimAttributes,
+  applyHullRatioToScale, createMorphologyCompareMode, lodLevelForDist } from './morphology.mjs';
+import { createMorphologyMaterial, updateMorphoTime, getLODLevel, setLODLevel } from './morphology-shader.mjs';
 
 // ─── Scratch layout — keep in sync with wasm.rs SCRATCH_* constants ──────────
 const AGENT_CAP = 1024;
@@ -156,24 +159,18 @@ function createSimHandle(instance) {
 
 // ─── agent meshes ─────────────────────────────────────────────────────────────
 
-function makeSpeciesGeometry(kind) {
-  switch (kind) {
-    case 'herb': return new THREE.SphereGeometry(1.0, 10, 8);
-    case 'pred': { const g = new THREE.ConeGeometry(0.9, 2.6, 8); g.rotateX(Math.PI / 2); return g; }
-    case 'scav': { const g = new THREE.ConeGeometry(0.7, 2.0, 7); g.rotateX(Math.PI / 2); return g; }
-    case 'omn': return new THREE.SphereGeometry(0.85, 9, 7);
-    case 'fish': { const g = new THREE.ConeGeometry(0.45, 2.2, 6); g.rotateX(Math.PI / 2); return g; }
-    case 'deco': return new THREE.OctahedronGeometry(0.7, 0);
-    default: return new THREE.SphereGeometry(1, 8, 6);
-  }
+function makeSpeciesGeometry(kind, lod = 0) {
+  return buildSpeciesBaseGeometry(kind, lod, THREE);
 }
 
 function createSpeciesMeshes(scene) {
   const meshes = {};
   for (const kind of KIND_ORDER) {
     const spec = SPECIES[kind];
-    const geo = makeSpeciesGeometry(kind);
-    const mat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+    // Phase 19: LOD — build 3 detail levels, default to LOD-0
+    const lodGeos = [makeSpeciesGeometry(kind, 0), makeSpeciesGeometry(kind, 1), makeSpeciesGeometry(kind, 2)];
+    const geo = lodGeos[0];
+    const mat = createMorphologyMaterial(THREE, { color: 0xffffff });
     const mesh = new THREE.InstancedMesh(geo, mat, spec.cap);
     mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     // Per-instance genome color（r150+）：直接写 attribute，避免 setColorAt 的对象分配。
@@ -182,6 +179,10 @@ function createSpeciesMeshes(scene) {
     mesh.frustumCulled = false;
     mesh.count = 0;
     mesh.castShadow = kind !== 'fish';
+    // Phase 19: per-instance animation attributes + LOD geometries
+    addAnimAttributes(mesh, spec.cap, THREE);
+    mesh.userData.lodGeos = lodGeos;
+    mesh.userData.currentLOD = 0;
     scene.add(mesh);
     meshes[kind] = mesh;
   }
@@ -197,7 +198,12 @@ function updateInstancedMeshes(meshes, handle, agentCount) {
   const v = handle.views();
   const dv = v.agents;
   const perKind = { herb: 0, pred: 0, scav: 0, omn: 0, fish: 0, deco: 0 };
-  for (const kind of KIND_ORDER) meshes[kind].count = 0;
+  for (const kind of KIND_ORDER) {
+    meshes[kind].count = 0;
+    // Phase 19: track agent IDs per mesh for animation attribute updates
+    if (!meshes[kind].userData.agentIds) meshes[kind].userData.agentIds = [];
+    meshes[kind].userData.agentIds.length = 0;
+  }
 
   for (let i = 0; i < agentCount; i++) {
     const base = i * AGENT_SLOT_SIZE;
@@ -211,14 +217,20 @@ function updateInstancedMeshes(meshes, handle, agentCount) {
     const scale = dv.getFloat32(base + SLOT_SCALE, true);
     const argb = dv.getUint32(base + SLOT_COLOR, true);
     const flags = dv.getUint32(base + SLOT_FLAGS, true);
+    // Phase 19: read agent ID for morphology derivation
+    const agentId = dv.getUint32(base + SLOT_ID, true);
     const spec = SPECIES[kind];
     const y = kind === 'fish'
       ? WATER_LEVEL - 0.8 + Math.sin(i * 2.1) * 0.3
       : terrainHeight(x, z) + spec.yOff(scale);
     _pos.set(x, y, z);
-    _scale.setScalar(scale);
+    // Phase 19: anisotropic scale from hull_ratio (volume-preserving)
+    const { hull_ratio } = deriveMorphology(agentId);
+    applyHullRatioToScale(_scale, scale, hull_ratio);
     _matrix.compose(_pos, _quat, _scale);
     mesh.setMatrixAt(mesh.count, _matrix);
+    // Phase 19: track ID for animation attribute update
+    mesh.userData.agentIds.push(agentId);
     const j = mesh.count * 3;
     const ca = mesh.instanceColor.array;
     ca[j] = ((argb >>> 16) & 0xff) / 255;
@@ -234,8 +246,13 @@ function updateInstancedMeshes(meshes, handle, agentCount) {
     perKind[kind] += 1;
   }
   for (const kind of KIND_ORDER) {
-    meshes[kind].instanceMatrix.needsUpdate = true;
-    meshes[kind].instanceColor.needsUpdate = true;
+    const mesh = meshes[kind];
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.instanceColor.needsUpdate = true;
+    // Phase 19: update per-instance animation attributes (aPhase, aSwayAmp)
+    if (mesh.userData.agentIds.length > 0) {
+      updateAnimAttributes(mesh, mesh.userData.agentIds, THREE);
+    }
   }
   return perKind;
 }
@@ -602,6 +619,10 @@ export async function bootWasmViewer(canvasId = 'stage') {
     dustOverlay.setDust(1);
   }
 
+  // Phase 19: morphology compare mode (V key)
+  const morphoCompare = createMorphologyCompareMode(scene, THREE);
+  let morphoCompareAgents = []; // populated each frame from agent IDs
+
   window.addEventListener('keydown', (e) => {
     if (e.code === 'KeyM') {
       mineralOn = !mineralOn;
@@ -815,6 +836,17 @@ export async function bootWasmViewer(canvasId = 'stage') {
           ? `Loaded ${res.loaded}×${res.buckets} frames from session ${res.capturedAt}（再按 R 清除）`
           : res.err);
       }
+    } else if (e.code === 'KeyV') {
+      // Phase 19: V 键切换「形态对比模式」（同 clade 两代并排显示）
+      const on = morphoCompare.toggle();
+      if (on && morphoCompareAgents.length >= 2) {
+        morphoCompare.show(morphoCompareAgents[0], morphoCompareAgents[1]);
+        toast('形态对比 ON（V 关闭）');
+      } else if (!on) {
+        toast('形态对比 OFF');
+      } else {
+        toast('形态对比：需要 ≥2 个个体（等待 sim 产出数据）');
+      }
     }
   });
 
@@ -963,6 +995,23 @@ export async function bootWasmViewer(canvasId = 'stage') {
       const n = handle.readAgents();
       updateInstancedMeshes(meshes, handle, n);
       trackDeaths(n);
+      // Phase 19: update uTime uniform + LOD switch + compare mode data
+      for (const kind of KIND_ORDER) {
+        updateMorphoTime(meshes[kind].material, elapsed);
+        const lodLevel = getLODLevel(camera.position.length());
+        if (lodLevel !== meshes[kind].userData.currentLOD) {
+          setLODLevel(meshes[kind], lodLevel, THREE);
+          meshes[kind].userData.currentLOD = lodLevel;
+        }
+      }
+      // Populate morphoCompareAgents from the first species mesh with data
+      morphoCompareAgents = (meshes.herb.userData.agentIds || [])
+        .map((id, idx) => ({ id, kind: 'herb' }));
+      if (morphoCompareAgents.length < 2 && meshes.pred.userData.agentIds?.length > 0) {
+        morphoCompareAgents = morphoCompareAgents.concat(
+          meshes.pred.userData.agentIds.map((id) => ({ id, kind: 'pred' }))
+        );
+      }
       if (mineralOn) {
         handle.readMineral();
         let peak = 0;
