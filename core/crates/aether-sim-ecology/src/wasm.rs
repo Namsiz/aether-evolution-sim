@@ -599,6 +599,10 @@ mod sim_exports {
         let cap = (cap as usize).min(AGENT_CAP);
         let base = core.scratch.as_mut_ptr() as usize + AGENT_BASE;
         let mut n = 0usize;
+        // Diagnostic: write total/alive counts to scratch[8..16] before the agent loop
+        let scratch_base = core.scratch.as_mut_ptr() as *mut u32;
+        *scratch_base.add(2) = core.eco.agents.len() as u32;       // scratch[8]  = total agents
+        *scratch_base.add(3) = core.eco.agents.iter().filter(|a| a.alive).count() as u32; // scratch[12] = alive
         for a in core.eco.agents.iter().filter(|a| a.alive) {
             if n >= cap {
                 break;
@@ -725,7 +729,15 @@ mod sim_exports {
         *(scratch as *mut u32) = 0xCAFEBABE;
         // Also write the count to scratch[4..8]
         *((scratch as *mut u32).add(1)) = count;
+        // Write alive count and total count to scratch[8..16] for cross-check
+        let total = core.eco.agents.len() as u32;
+        *((scratch as *mut u32).add(2)) = total;
         count
+    }
+    /// Debug: return total agents (alive + dead) in the Vec.
+    #[no_mangle]
+    pub unsafe extern "C" fn sim_agent_total(sim: *mut WasmSimCore) -> u32 {
+        (*sim).eco.agents.len() as u32
     }
     #[no_mangle]
     pub unsafe extern "C" fn sim_deco_eff_std(sim: *mut WasmSimCore) -> f64 {

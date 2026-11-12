@@ -125,11 +125,12 @@ function createSimHandle(instance) {
     agentCountDebug() {
       if (E.sim_agent_count_debug) {
         const n = E.sim_agent_count_debug(sim);
-        // Read the marker + count we just wrote to scratch[0..8]
-        const dv = new DataView(E.memory.buffer, scratchPtr, 8);
+        const dv = new DataView(E.memory.buffer, scratchPtr, 16);
         const marker = dv.getUint32(0, true);
         const countInBuf = dv.getUint32(4, true);
-        return { n, marker, countInBuf, scratchPtr };
+        const totalAgents = dv.getUint32(8, true);    // written by sim_agents_flat
+        const aliveAgents = dv.getUint32(12, true);   // written by sim_agents_flat
+        return { n, marker, countInBuf, totalAgents, aliveAgents, scratchPtr };
       }
       return null;
     },
@@ -1125,7 +1126,7 @@ export async function bootWasmViewer(canvasId = 'stage') {
       const dbg = handle.agentCountDebug();
       const speciesTotal = c[0]+c[1]+c[2]+c[3]+c[4]+c[5];
       const countLine = agentTotal > 0
-        ? `agent count=${agentTotal} ${speciesTotal===0 ? `· ⚠ flat=0 · marker=${dbg ? dbg.marker.toString(16) : '?'} · buf=${dbg ? dbg.countInBuf : '?'} · sptr=${dbg ? dbg.scratchPtr : '?'}` : ''}<br>`
+        ? `agent count=${agentTotal} ${speciesTotal===0 ? `· ⚠ flat=0 · marker=${dbg ? dbg.marker.toString(16) : '?'} · buf=${dbg ? dbg.countInBuf : '?'} · total=${dbg ? dbg.totalAgents : '?'} · alive=${dbg ? dbg.aliveAgents : '?'} · sptr=${dbg ? dbg.scratchPtr : '?'}` : ''}<br>`
         : '';
       hud.innerHTML =
         `<b>WASM SNAPSHOT v3</b> · tick ${handle.tick()} · D+${hh}h<br>` +
