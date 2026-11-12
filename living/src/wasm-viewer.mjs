@@ -1110,10 +1110,15 @@ export async function bootWasmViewer(canvasId = 'stage') {
       const pngLine = elapsed < pngReadyUntil
         ? `<span style="color:#8fd3ff">↓ PNG ready (t=${pngReadyTick})</span><br>`
         : '';
+      const agentTotal = handle.agentCount();
+      const speciesTotal = c[0]+c[1]+c[2]+c[3]+c[4]+c[5];
+      const countLine = agentTotal > 0
+        ? `agent count=${agentTotal} ${speciesTotal===0 ? '· ⚠ flat=0 (scratch mismatch)' : ''}<br>`
+        : '';
       hud.innerHTML =
         `<b>WASM SNAPSHOT v3</b> · tick ${handle.tick()} · D+${hh}h<br>` +
         `牧 ${c[0]} · 掠 ${c[1]} · 腐 ${c[2]} · 杂 ${c[3]} · 鱼 ${c[4]} · 分解 ${c[5]}<br>` +
-        (c[0]+c[1]+c[2]+c[3]+c[4]+c[5]===0 ? `<span style="color:#ffb347">⚠ direct count=${handle.agentCount()} · mismatch!</span><br>` : '') +
+        countLine +
         decoLine +
         cladeLine +
         catLine +
