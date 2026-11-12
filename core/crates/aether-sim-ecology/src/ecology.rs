@@ -12,6 +12,8 @@ use super::terrain::*;
 use aether_biome::{Biome, BiomeRegistry};
 use aether_rng::Mulberry32;
 use crate::save_state;
+use crate::biochemistry::{NutrientPools, mineralization_path_of};
+use crate::geology::GeologicState;
 use std::collections::HashMap;
 
 pub const HERB: &str = "herb";
@@ -21,9 +23,9 @@ pub const OMN: &str = "omn";
 pub const FISH: &str = "fish";
 pub const DECO: &str = "deco";
 
-pub(crate) const GRID_N: u32 = 76;
-pub(crate) const GRID_SPAN: f64 = 1080.0;
-pub(crate) const CELL: f64 = GRID_SPAN / (GRID_N as f64);
+pub const GRID_N: u32 = 76;
+pub const GRID_SPAN: f64 = 1080.0;
+pub const CELL: f64 = GRID_SPAN / (GRID_N as f64);
 const MAX_HERB: usize = 420;
 const MAX_PRED: usize = 110;
 const MAX_SCAV: usize = 40;
@@ -639,6 +641,25 @@ pub struct Ecology {
     /// trigger order. See `cataclysm.rs`; persisted in SaveState v4.
     pub cataclysms: Vec<Cataclysm>,
     pub(crate) next_cataclysm_id: u32,
+    /// Phase 18: geological layer (plates, eustatic sea level, seismic
+    /// index). Initialized fresh from the seed in `new()` via the DEDICATED
+    /// geology RNG stream (never the ecology streams); deserialized from the
+    /// compact JSON string in `SavedGeology` during `from_save_state` (v5+
+    /// only; pre-v5 gets the serde default: empty plates → step no-op).
+    pub geo: GeologicState,
+    /// Phase 18: biochemical layer (fast/slow nutrient pools + tectonic
+    /// deposit modifier). Baseline at construction matches
+    /// `NutrientPools::new()`: fast=snow=0.5, deposit_rate=1.0 — the
+    /// grass-growth multiplier reads exactly 1.0 (bit-exact no-op).
+    pub nutrients: NutrientPools,
+    /// Phase 18: additive terrain offset per grid cell (world-height units).
+    /// Initially all zeros; mutated by `apply_uplift` during collision/rift
+    /// phases and folded through `rebuild_biome_registry` onto suit/moist.
+    pub(crate) elevation_delta: Vec<f32>,
+    /// Phase 18: per-bite accumulator feeding the pools at each biochem_step
+    /// commit boundary (fast share scaled by deposit_rate; slow share
+    /// unaffected). Pure bookkeeping — ecology only sees it via biochem_step.
+    pub(crate) pool_acc: [f64; 2],
 }
 
 impl Ecology {
@@ -692,6 +713,15 @@ impl Ecology {
             clade_burdens: Vec::new(),
             cataclysms: Vec::new(),
             next_cataclysm_id: 1,
+            // Phase 18: geo/biochem layers start in locked baseline states.
+            // Zero-side-effect contract: `geo.last_geo_tick == 0` (first step
+            // fires at GEO_TICKS_PER_STEP) and `nutrients.fast_pool ==
+            // FAST_BASELINE` (growth multiplier == 1.0 exactly) — neither
+            // perturbs the trajectory before its step boundary.
+            geo: GeologicState::new(seed),
+            nutrients: NutrientPools::new(),
+            elevation_delta: vec![0.0; n],
+            pool_acc: [0.0; 2],
             history: Vec::new(),
             last_sample: 0,
             gene_barrier_strength: 0.5,
@@ -772,6 +802,15 @@ impl Ecology {
             clade_burdens: Vec::new(),
             cataclysms: Vec::new(),
             next_cataclysm_id: 1,
+            // Phase 18: geo/biochem layers start in locked baseline states.
+            // Zero-side-effect contract: `geo.last_geo_tick == 0` (first step
+            // fires at GEO_TICKS_PER_STEP) and `nutrients.fast_pool ==
+            // FAST_BASELINE` (growth multiplier == 1.0 exactly) — neither
+            // perturbs the trajectory before its step boundary.
+            geo: GeologicState::new(seed),
+            nutrients: NutrientPools::new(),
+            elevation_delta: vec![0.0; n],
+            pool_acc: [0.0; 2],
             history: Vec::new(),
             last_sample: 0,
             gene_barrier_strength: 0.5,
@@ -2771,6 +2810,16 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 if gi >= 0 {
                     let g = gi as usize;
                     let boost = take * deco_eff * MINERAL_DEPOSIT_RATE;
+                    // Phase 18: split a share of the mineralized mass into
+                    // the fast/slow nutrient pools (accumulator; committed at
+                    // the next biochem_step). The mineral_field deposit above
+                    // is UNCHANGED (spec "不只堆积在 mineral_field" = in
+                    // addition to), so deco_cycle_test and other deposit
+                    // gates keep passing bit-exactly.
+                    let pool_in = take * deco_eff * crate::biochemistry::BIOCHEM_DEPOSIT_RATE;
+                    let path = mineralization_path_of(deco_eff);
+                    self.pool_acc[0] += pool_in * path;         // fast share
+                    self.pool_acc[1] += pool_in * (1.0 - path); // slow share
                     if g < self.mineral_field.len() {
                         self.mineral_field[g] = (self.mineral_field[g] as f64 + boost).min(1.0) as f32;
                         let gi_col = (g % GRID_N as usize) as isize;
@@ -2875,6 +2924,11 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             // Phase 17: grow_mult = climate-shift throttle; self.daylight
             // already carries the dust darkening.
             let grow = 0.0056 * season_grass * grow_mult * (0.18 + 0.82 * self.daylight) * (1.0 + self.rain * 0.02);
+            // Phase 18: nutrient fast-pool fertility (exactly 1.0 at baseline
+            // → bit-exact no-op; spec: "fast pool 直接调节 grass logistic
+            // 增长的 baseline rate", centered on FAST_BASELINE so existing
+            // calibration absorbs the multiplier naturally).
+            let fert_mult = self.biochem_growth_mult();
             for i in 0..self.grass.len() {
                 let suit = self.suit[i];
                 if suit <= 0.02 { continue; }
@@ -2882,7 +2936,8 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 for s in 0..GRASS_N { total += self.grass_p[s][i] as f64; }
                 if total >= 1.0 { continue; }
                 let shade_f = 1.0 - self.shade[i] as f64 * 0.55;
-                let cell_grow = grow * (1.0 + self.mineral_field[i] as f64 * GROWTH_BONUS_PER_MINERAL);
+                let cell_grow = grow * (1.0 + self.mineral_field[i] as f64 * GROWTH_BONUS_PER_MINERAL)
+                    * fert_mult;
                 for sp in 0..GRASS_N {
                     let b = self.grass_p[sp][i] as f64;
                     let nb = b + self.suit_eff_by[sp][i] as f64 * cell_grow * RMAX_EFF[sp] * (1.0 - total) * (0.42 + b) * shade_f * h;
@@ -3021,6 +3076,18 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 self.last_sample = self.tick_count;
                 self.sample();
             }
+        }
+
+        // Phase 18: scale-transition hooks — geology FIRST (terrain changes
+        // feed the biochemistry read); both strictly after the full substep
+        // loop so the ecology checksum trajectory stays segment-continuous.
+        // `geology_step` is a no-op when plates is empty (legacy v4+), and
+        // both hooks are zero-RNG by contract.
+        if self.tick_count % crate::geology::GEO_TICKS_PER_STEP == 0 {
+            self.geology_step();
+        }
+        if self.tick_count % crate::biochemistry::BIOCHEM_TICKS == 0 {
+            self.biochem_step();
         }
     }
 
@@ -3783,9 +3850,12 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
     pub fn grass(&self) -> &[f32] { &self.grass }
     pub fn grass_p(&self, sp: usize) -> &[f32] { &self.grass_p[sp] }
     pub fn suit(&self) -> &[f32] { &self.suit }
+    pub(crate) fn suit_mut(&mut self) -> &mut [f32] { &mut self.suit }
     pub fn moist(&self) -> &[f32] { &self.moist }
+    pub(crate) fn moist_mut(&mut self) -> &mut [f32] { &mut self.moist }
     pub fn shade(&self) -> &[f32] { &self.shade }
     pub fn suit_eff_by(&self, sp: usize) -> &[f32] { &self.suit_eff_by[sp] }
+    pub(crate) fn suit_eff_by_mut(&mut self, sp: usize) -> &mut [f32] { &mut self.suit_eff_by[sp] }
     pub fn mineral_field(&self) -> &[f32] { &self.mineral_field }
     /// Scenario helper (Phase 4-C test baseline): marks every living agent of
     /// `kind` dead so the species stays extinct for the rest of the run —
@@ -4094,6 +4164,18 @@ impl Ecology {
             },
             DecoEffChoiceMode: self.deco_eff_choice_mode,
             CarcaseLockEnabled: self.carcass_lock_enabled,
+            // Phase 18: geologic layer (plates + sea level + epoch + last-step
+            // tickstamp + sparse uplift map) and nutrient-pool readout. All
+            // f64 values roundtrip through JSON losslessly (serde_json
+            // float_roundtrip is enabled in Cargo.toml). `SavedGeology`
+            // keeps the serde visitor footprint flat (hand-rolled pattern
+            // shared with SavedClades/SavedEvents/SavedBurdens/
+            // SavedCataclysms), with its own parser in geology.rs.
+            Geology: save_state::SavedGeology(crate::geology::geology_to_json(
+                &self.geo, &self.elevation_delta)),
+            NutrientFast: self.nutrients.fast_pool,
+            NutrientSlow: self.nutrients.slow_pool,
+            NutrientDepositRate: self.nutrients.deposit_rate,
         }
     }
 
@@ -4259,6 +4341,36 @@ impl Ecology {
                 })
                 .unwrap_or_default();
 
+        // Phase 18: geologic state. Pre-v5 saves carry the serde default
+        // (empty string) → empty plates → geology_step is a no-op forever.
+        // Uplift pairs are parsed from the sparse [[idx,val],…] array inside
+        // the Geology JSON; the parser returns a dense Vec<f32> of length
+        // `n` wired straight into `elevation_delta`.
+        let n_cells = state.grass.len();
+        let (geo_parsed, uplift_parsed) =
+            crate::geology::geology_from_json(&state.Geology.0, n_cells);
+        // Phase 18: nutrient pools. Pre-v5 carries serde defaults (0.0) —
+        // non-positive or non-finite values snap to the neutral baseline
+        // (fast=snow=0.5, deposit_rate=1.0) so legacy restores land on the
+        // exact `NutrientPools::new()` state (bit-exact continuation).
+        let nutrients = NutrientPools {
+            fast_pool: if state.NutrientFast.is_finite() && state.NutrientFast > 0.0 {
+                state.NutrientFast
+            } else {
+                crate::biochemistry::FAST_BASELINE
+            },
+            slow_pool: if state.NutrientSlow.is_finite() && state.NutrientSlow > 0.0 {
+                state.NutrientSlow
+            } else {
+                crate::biochemistry::FAST_BASELINE
+            },
+            deposit_rate: if state.NutrientDepositRate.is_finite() && state.NutrientDepositRate > 0.0 {
+                state.NutrientDepositRate
+            } else {
+                1.0
+            },
+        };
+
         let history = state.history.into_iter().map(|h| HistorySample {
             t: h.t, season: h.season, h: h.h, p: h.p, scav: h.scav, omn: h.omn,
             plant: h.plant, plant_by: h.plant_by,
@@ -4404,6 +4516,10 @@ impl Ecology {
             clade_burdens,
             cataclysms,
             next_cataclysm_id,
+            geo: geo_parsed,
+            nutrients,
+            elevation_delta: uplift_parsed,
+            pool_acc: [0.0; 2],
             seed: state.seed,
             biome_reg,
             deco_eff_choice_mode,

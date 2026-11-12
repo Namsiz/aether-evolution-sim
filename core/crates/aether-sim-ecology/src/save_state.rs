@@ -27,12 +27,18 @@
 //! JSON string `Cataclysms` plus `NextCataclysmId` — both `#[serde(default)]`,
 /// so v3 saves restore with an empty cataclysm table (pre-cataclysm worlds
 /// keep running with identical checksums).
+/// v4 → v5 (Phase 18): geologic layer (`Geology` compact JSON string: plates +
+/// sea level + epoch + last stepped tick + sparse uplift map) plus the three
+/// nutrient-pool floats (`NutrientFast`/`NutrientSlow`/`NutrientDepositRate`).
+/// All four are `#[serde(default)]`: pre-v5 restores land on empty plates
+/// (geology_step becomes a permanent no-op) and the neutral baseline pools
+/// (fast=snow=0.5, deposit_rate=1.0) — bit-exact continuation.
 
 use serde::{Deserialize, Serialize};
 
 use crate::ecology::{DECO, FISH, HERB, OMN, PRED, SCAV};
 
-pub const SAVE_STATE_VERSION: u32 = 4;
+pub const SAVE_STATE_VERSION: u32 = 5;
 pub const SAVE_STATE_SCHEMA_NAME: &str = "aether-sim-save-state";
 
 /// DECO selection-pressure mode selector (persisted in SaveState v2).
@@ -216,6 +222,27 @@ impl serde::Serialize for SavedCataclysms {
     }
 }
 impl<'de> serde::Deserialize<'de> for SavedCataclysms {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s: String = serde::Deserialize::deserialize(d)?;
+        Ok(Self(s))
+    }
+}
+
+/// Phase 18: geologic layer (plate positions/velocities, eustatic sea level,
+/// epoch label, last stepped tick, sparse uplift map) as a compact JSON
+/// string — same hand-rolled pattern as SavedClades/SavedEvents/
+/// SavedBurdens/SavedCataclysms. Parsed in `geology::geology_from_json`.
+/// Pre-Phase-18 saves restore with an empty plate list, so `geology_step`
+/// becomes a permanent no-op (bit-exact legacy continuation).
+#[derive(Default, Clone, Debug)]
+pub struct SavedGeology(pub String);
+
+impl serde::Serialize for SavedGeology {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.0)
+    }
+}
+impl<'de> serde::Deserialize<'de> for SavedGeology {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let s: String = serde::Deserialize::deserialize(d)?;
         Ok(Self(s))
@@ -459,6 +486,22 @@ pub struct SaveState {
     /// so the feature does not silently disable on an older save file.
     #[serde(default = "default_carcass_lock_enabled")]
     pub CarcaseLockEnabled: bool,
+    /// Phase 18: geologic layer (compact JSON string, see `SavedGeology`).
+    /// `#[serde(default)]` keeps pre-Phase-18 saves loadable — they restore
+    /// with an empty plate list, so `geology_step` becomes a no-op.
+    #[serde(default)]
+    pub Geology: SavedGeology,
+    /// Phase 18: nutrient pools. Legacy restore defaults to the neutral
+    /// baseline (fast_pool = slow_pool = 0.5, deposit_rate = 1.0), matching
+    /// `NutrientPools::new()`, so the grass-growth multiplier reads exactly
+    /// 1.0 and the Phase 17 checksum trajectory is preserved through
+    /// t < BIOCHEM_TICKS.
+    #[serde(default)]
+    pub NutrientFast: f64,
+    #[serde(default)]
+    pub NutrientSlow: f64,
+    #[serde(default)]
+    pub NutrientDepositRate: f64,
 }
 
 /// Map a runtime string back to a `'static str`. Known constants are matched

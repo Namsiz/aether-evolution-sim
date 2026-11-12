@@ -462,6 +462,13 @@ pub const EVENT_RECORD_SIZE: usize = 56;
 ///   [x f32][z f32][radius f32][severity f32][active u32]
 pub const CATACLYSM_RECORD_SIZE: usize = 40;
 pub const CATACLYSM_CAP: usize = 64;
+/// Phase 18: plate record (sim_get_plate) — 48 bytes:
+///   [id u32][x f64][z f64][vx f64][vz f64][angle f32][type u32][seismic f32]
+pub const PLATE_RECORD_SIZE: usize = 48;
+/// Phase 18: nutrient state readout (sim_nutrient_state) — 24 bytes:
+///   [fast f64][slow f64][deposit_rate f64]
+/// (Spec drafted 36 B; actual payload is 3×f64 = 24 B — documented.)
+pub const NUTRIENT_RECORD_SIZE: usize = 24;
 pub const CLADE_NAME_CAP: usize = 32;
 pub const MAX_EVENT_CHILDREN: usize = 8;
 pub const SCRATCH_OFF_CLADES: usize = SCRATCH_OFF_HIST + DECO_HUE_BUCKETS_CAP * 4;
@@ -918,6 +925,130 @@ mod sim_exports {
         *out.add(0) = dust;
         *out.add(1) = grow;
         2
+    }
+
+    // ─── Phase 18: scale-transition ABI ─────────────────────────────────────
+
+    /// Advance ONE geologic step IF `tick_count % GEO_TICKS_PER_STEP == 0`;
+    /// otherwise a no-op. The live viewer never calls this (geology
+    /// auto-advances inside `sim_step`'s update() hook chain); tests drive
+    /// it directly when manual stepping is desired. Deterministic, zero RNG.
+    ///
+    /// # Safety
+    /// `sim` from `sim_new`.
+    #[no_mangle]
+    pub unsafe extern "C" fn sim_geology_tick(sim: *mut WasmSimCore) {
+        if sim.is_null() { return; }
+        let core = &mut *sim;
+        if core.eco.tick_count() % crate::geology::GEO_TICKS_PER_STEP == 0 {
+            core.eco.geology_step();
+        }
+    }
+
+    /// Total tracked plates (≤ PLATE_CAP = 8). 0 on a null handle — also
+    /// signals a legacy v4-era save restoring with no plates (geology off).
+    ///
+    /// # Safety
+    /// `sim` from `sim_new`.
+    #[no_mangle]
+    pub unsafe extern "C" fn sim_plate_count(sim: *mut WasmSimCore) -> u32 {
+        if sim.is_null() { return 0; }
+        (*sim).eco.geo_plates().len() as u32
+    }
+
+    /// Fill the 48-byte plate record at `out`:
+    ///   [id u32][x f64][z f64][vx f64][vz f64][angle f32][type u32][seismic f32]
+    /// Returns 1 on success, 0 on null/bounds failure (never traps).
+    ///
+    /// # Safety
+    /// `sim` from `sim_new`; `out` writable for PLATE_RECORD_SIZE bytes.
+    #[no_mangle]
+    pub unsafe extern "C" fn sim_get_plate(sim: *mut WasmSimCore, idx: u32, out: *mut u8) -> u32 {
+        if sim.is_null() || out.is_null() { return 0; }
+        let core = &mut *sim;
+        let Some(p) = core.eco.geo_plates().get(idx as usize) else { return 0; };
+        let mut rec = [0u8; PLATE_RECORD_SIZE];
+        rec[0..4].copy_from_slice(&p.id.to_le_bytes());
+        rec[4..12].copy_from_slice(&p.x.to_le_bytes());
+        rec[12..20].copy_from_slice(&p.z.to_le_bytes());
+        rec[20..28].copy_from_slice(&p.vx.to_le_bytes());
+        rec[28..36].copy_from_slice(&p.vz.to_le_bytes());
+        rec[36..40].copy_from_slice(&(p.angle as f32).to_le_bytes());
+        rec[40..44].copy_from_slice(&(p.type_ as u32).to_le_bytes());
+        rec[44..48].copy_from_slice(&(core.eco.geo_seismic_index() as f32).to_le_bytes());
+        std::ptr::copy_nonoverlapping(rec.as_ptr(), out, PLATE_RECORD_SIZE);
+        1
+    }
+
+    /// Eustatic sea-level anomaly relative to the base coastline (world
+    /// units; positive = transgression). Drives `compute_ocean_mask` but
+    /// NOT the suit grid (scope cut documented in geology.rs module header).
+    ///
+    /// # Safety
+    /// `sim` from `sim_new`.
+    #[no_mangle]
+    pub unsafe extern "C" fn sim_sea_level(sim: *mut WasmSimCore) -> f64 {
+        if sim.is_null() { return 0.0; }
+        (*sim).eco.geo_sea_level()
+    }
+
+    /// Copy the current epoch name (UTF-8, ≤ cap bytes). Returns byte count
+    /// written. 0 on null handle / zero cap (never traps).
+    ///
+    /// # Safety
+    /// `sim` from `sim_new`; `buf` writable for `cap` bytes.
+    #[no_mangle]
+    pub unsafe extern "C" fn sim_epoch_name(sim: *mut WasmSimCore, buf: *mut u8, cap: u32) -> u32 {
+        if sim.is_null() || buf.is_null() || cap == 0 { return 0; }
+        let name = (*sim).eco.geo_epoch_name().as_bytes();
+        let n = name.len().min(cap as usize);
+        std::ptr::copy_nonoverlapping(name.as_ptr(), buf, n);
+        n as u32
+    }
+
+    /// Advance ONE biochemical cycle IF `tick_count % BIOCHEM_TICKS == 0`;
+    /// no-op otherwise. Deterministic, zero RNG.
+    ///
+    /// # Safety
+    /// `sim` from `sim_new`.
+    #[no_mangle]
+    pub unsafe extern "C" fn sim_biochem_step(sim: *mut WasmSimCore) {
+        if sim.is_null() { return; }
+        let core = &mut *sim;
+        if core.eco.tick_count() % crate::biochemistry::BIOCHEM_TICKS == 0 {
+            core.eco.biochem_step();
+        }
+    }
+
+    /// Write the three nutrient-state fields to `out`:
+    ///   [fast f64][slow f64][deposit_rate f64]
+    /// Returns 3 (field count) on success, 0 on null (never traps).
+    ///
+    /// # Safety
+    /// `sim` from `sim_new`; `out` writable for NUTRIENT_RECORD_SIZE bytes.
+    #[no_mangle]
+    pub unsafe extern "C" fn sim_nutrient_state(sim: *mut WasmSimCore, out: *mut u8) -> u32 {
+        if sim.is_null() || out.is_null() { return 0; }
+        let n = &(*sim).eco.nutrients;
+        let mut rec = [0u8; NUTRIENT_RECORD_SIZE];
+        rec[0..8].copy_from_slice(&n.fast_pool.to_le_bytes());
+        rec[8..16].copy_from_slice(&n.slow_pool.to_le_bytes());
+        rec[16..24].copy_from_slice(&n.deposit_rate.to_le_bytes());
+        std::ptr::copy_nonoverlapping(rec.as_ptr(), out, NUTRIENT_RECORD_SIZE);
+        3
+    }
+
+    /// Fertility boost contributed by the fast nutrient pool (f64; 0.0 at
+    /// the neutral baseline, positive when the fast pool exceeds baseline
+    /// after DECO carcass feeding). Grass growth folds it in as
+    /// `1.0 + fertility_boost * MINERAL_EFFICIENCY`.
+    ///
+    /// # Safety
+    /// `sim` from `sim_new`.
+    #[no_mangle]
+    pub unsafe extern "C" fn sim_fertility_boost(sim: *mut WasmSimCore) -> f64 {
+        if sim.is_null() { return 0.0; }
+        (*sim).eco.fertility_boost()
     }
 
     /// Serialize the current state as Snapshot v3 JSON. Returns a pointer to a
