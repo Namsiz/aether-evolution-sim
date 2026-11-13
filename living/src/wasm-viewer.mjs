@@ -1082,14 +1082,18 @@ export async function bootWasmViewer(canvasId = 'stage') {
           + ` (${effMean >= decoBaselineMean ? '↑' : '↓'} ${(effMean - decoBaselineMean).toFixed(2)}`
           + ` / σ${effStd <= decoBaselineStd ? '↓' : '↑'} ${Math.abs((effStd - decoBaselineStd) / Math.max(decoBaselineStd, 1e-9) * 100).toFixed(0)}%)<br>`
         : '';
-      // Phase 15: 物种谱系行 —— clade 名单（≤5 个直接列名，否则计数）+ 事件数。
+      // Phase 15: 物种谱系行 —— clade 名单（≤5 个直接列名，否则计数）+ 事件数 + Phase 20 PE 信号。
       let cladeLine = '';
       if (phyloOverlay && phyloClades.length > 0) {
         const alive = phyloClades.filter((c) => !c.extinct).length;
         const names = phyloClades
           .map((c) => (c.extinct ? `†${c.name}` : c.name));
         const list = names.length <= 5 ? names.join(' · ') : `${alive} alive / ${names.length} total`;
-        cladeLine = `<span style="color:#c9a0ff">clades: ${list} · ${phyloEvents.length} event${phyloEvents.length === 1 ? '' : 's'}</span><br>`;
+        const pe = phyloOverlay.graph?.activitySummary;
+        const peBadge = pe && +pe.pctBurst >= 50
+          ? ` <span style="color:#ffb347">· PE active (${pe.pctBurst}% burst)</span>`
+          : '';
+        cladeLine = `<span style="color:#c9a0ff">clades: ${list} · ${phyloEvents.length} event${phyloEvents.length === 1 ? '' : 's'}${peBadge}</span><br>`;
       }
       // Phase 17: 活跃灾变徽标 + 最近 5 条历史。
       let catLine = '';
