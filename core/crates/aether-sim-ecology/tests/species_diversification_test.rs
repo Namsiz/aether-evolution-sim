@@ -148,7 +148,7 @@ fn manual_split_two_isolated_groups() {
     // Root clade exists from the first detection pass.
     let root = eco.species_clades.iter().find(|c| c.parent_id.is_none())
         .expect("root clade must exist");
-    assert_eq!(root.kind, DECO);
+    assert_eq!(root.kind, "deco");
     assert_eq!(root.name, "deco");
 
     // Exactly one split, root → deco-A.

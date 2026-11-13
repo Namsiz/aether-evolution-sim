@@ -14,7 +14,7 @@
 //! global biomass effect is bounded well below 1% at any sane deposit rate.
 //! The loop-closure proof is therefore asserted at deposit-site resolution.
 
-use aether_sim_ecology::ecology::{DECO, Ecology, FISH, HERB, OMN, PRED, SCAV};
+use aether_sim_ecology::ecology::{DECO, Ecology, FISH, HERB, OMN, PRED, SCAV, SpeciesKind};
 use aether_libm::sin;
 
 fn daylight_fn(t: u32) -> f64 {
@@ -25,7 +25,7 @@ fn grass_total(eco: &Ecology) -> f64 {
     eco.grass().iter().map(|&g| g as f64).sum::<f64>()
 }
 
-fn count_kind(eco: &Ecology, kind: &'static str) -> usize {
+fn count_kind(eco: &Ecology, kind: SpeciesKind) -> usize {
     eco.living().iter().filter(|a| a.alive && a.kind == kind).count()
 }
 

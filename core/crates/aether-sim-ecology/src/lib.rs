@@ -1,4 +1,6 @@
 pub mod ecology;
+#[cfg(feature = "spatial-index")]
+pub mod spatial_index; // Phase 31 Part B: uniform-grid C12 prerequisite
 pub mod save_state;
 pub mod terrain;
 pub mod niche; // Phase 16: clade niche axis + competitive exclusion

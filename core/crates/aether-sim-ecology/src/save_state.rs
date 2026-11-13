@@ -36,7 +36,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ecology::{DECO, FISH, HERB, OMN, PRED, SCAV};
 
 pub const SAVE_STATE_VERSION: u32 = 5;
 pub const SAVE_STATE_SCHEMA_NAME: &str = "aether-sim-save-state";
@@ -515,12 +514,12 @@ pub struct SaveState {
 /// distinct strings in one save file.
 pub(crate) fn intern_str(s: &str) -> &'static str {
     match s {
-        HERB => HERB,
-        PRED => PRED,
-        SCAV => SCAV,
-        OMN => OMN,
-        FISH => FISH,
-        DECO => DECO,
+        "herb" => "herb",
+        "pred" => "pred",
+        "scav" => "scav",
+        "omn" => "omn",
+        "fish" => "fish",
+        "deco" => "deco",
         other => Box::leak(other.to_string().into_boxed_str()),
     }
 }

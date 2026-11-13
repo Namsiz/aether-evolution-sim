@@ -43,7 +43,9 @@ fn wrap01(h: f64) -> f64 {
 }
 
 /// 物种色相锚点：herb 金黄 / pred 红褐 / scav 棕 / omn 绿 / fish 蓝 / deco 紫。
-fn hue_anchor(kind: &str) -> f64 {
+use crate::ecology::SpeciesKind;
+
+fn hue_anchor(kind: SpeciesKind) -> f64 {
     match kind {
         crate::ecology::HERB => 0.11,
         crate::ecology::PRED => 0.04,
@@ -57,7 +59,7 @@ fn hue_anchor(kind: &str) -> f64 {
 
 /// kind 级色相微移。FISH 的 fin_color 基因是唯一主表达通道（蓝→青→绿）；
 /// 其余物种只在锚点基础上做微调（草案中的 DECO/OMN/SCAV/PRED 偏移已折叠进锚点）。
-fn hue_shift(kind: &str, fin_color: f64) -> f64 {
+fn hue_shift(kind: SpeciesKind, fin_color: f64) -> f64 {
     match kind {
         crate::ecology::FISH => fin_color * 0.3,
         crate::ecology::DECO => 0.06,
@@ -69,7 +71,7 @@ fn hue_shift(kind: &str, fin_color: f64) -> f64 {
 }
 
 /// 每物种饱和度/明度：保持物种可辨识的同时让 hue 变异主导个体差异。
-fn hue_sl(kind: &str) -> (f64, f64) {
+fn hue_sl(kind: SpeciesKind) -> (f64, f64) {
     match kind {
         crate::ecology::HERB => (0.58, 0.67),
         crate::ecology::PRED => (0.39, 0.38),
@@ -83,7 +85,7 @@ fn hue_sl(kind: &str) -> (f64, f64) {
 
 /// 最终视觉色相，wrap 到 [0, 1)。
 #[inline]
-pub fn visual_hue(kind: &str, hue: f64, fin_color: f64) -> f64 {
+pub fn visual_hue(kind: SpeciesKind, hue: f64, fin_color: f64) -> f64 {
     wrap01(hue_anchor(kind) + (hue - 0.5) * HUE_SPREAD + hue_shift(kind, fin_color))
 }
 
@@ -180,7 +182,9 @@ impl From<crate::ecology::Ecology> for Snapshot {
 
 /// Borrowed variant of the owner-based conversion: copies agent fields out of
 /// `&Agent` so the sim instance stays intact for further `update` calls.
-fn agent_view(a: &crate::ecology::Agent) -> AgentView {
+/// `kinds` resolves the Agent's kind id to its registry name (JS contract
+/// keeps `AgentView.kind` as a string).
+fn agent_view(a: &crate::ecology::Agent, kinds: &crate::ecology::KindRegistry) -> AgentView {
     // hunger = energy / max_energy, clamped to [0, 1].
     let max_e = if a.max_energy > 0.0 { a.max_energy } else { 1.0 };
     let hunger = ((a.energy / max_e).min(1.0)) as f32;
@@ -188,7 +192,7 @@ fn agent_view(a: &crate::ecology::Agent) -> AgentView {
 
     AgentView {
         id: a.id,
-        kind: a.kind.to_string(),
+        kind: kinds.name(a.kind).to_string(),
         x: a.x,
         z: a.z,
         energy: a.energy as f32,
@@ -237,7 +241,7 @@ fn snapshot_from_ref(eco: &crate::ecology::Ecology) -> Snapshot {
         .agents
         .iter()
         .filter(|a| a.alive)
-        .map(agent_view)
+        .map(|a| agent_view(a, &eco.kinds))
         .collect();
     agent_views.sort_by_key(|v| v.id);
 
@@ -258,12 +262,12 @@ fn snapshot_from_ref(eco: &crate::ecology::Ecology) -> Snapshot {
     let (mut h, mut p, mut sc, mut om, mut f, mut d) = (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
     for a in &agent_views {
         match a.kind.as_str() {
-            crate::ecology::HERB => h += 1,
-            crate::ecology::PRED => p += 1,
-            crate::ecology::SCAV => sc += 1,
-            crate::ecology::OMN => om += 1,
-            crate::ecology::FISH => f += 1,
-            crate::ecology::DECO => d += 1,
+            "herb" => h += 1,
+            "pred" => p += 1,
+            "scav" => sc += 1,
+            "omn" => om += 1,
+            "fish" => f += 1,
+            "deco" => d += 1,
             _ => {}
         }
     }
@@ -337,12 +341,6 @@ pub fn downsample_block_average(
         }
     }
     out
-}
-
-impl From<crate::ecology::Agent> for AgentView {
-    fn from(a: crate::ecology::Agent) -> Self {
-        agent_view(&a)
-    }
 }
 
 /// Run the sim from seed through `ticks`, then emit a single JSON Snapshot string.
@@ -1280,14 +1278,14 @@ mod tests {
             assert!(a.genome_size_visual <= VIS_SCALE_MAX + 1e-6);
             assert_eq!(a.genome_color_hex & 0xFF00_0000, 0xFF00_0000, "alpha must be 0xFF");
         }
-        let fish = snap.agents.iter().find(|a| a.kind == crate::ecology::FISH).expect("fish present");
+        let fish = snap.agents.iter().find(|a| a.kind == "fish").expect("fish present");
         assert!(fish.fin_color_visual.is_some(), "FISH carries fin gene");
-        let non_fish = snap.agents.iter().find(|a| a.kind != crate::ecology::FISH).expect("non-fish present");
+        let non_fish = snap.agents.iter().find(|a| a.kind != "fish").expect("non-fish present");
         assert!(non_fish.fin_color_visual.is_none(), "only FISH carries fin gene");
         // Phase 9: DECO deco_eff_visual 有值，非 DECO 必为 None。
-        let deco = snap.agents.iter().find(|a| a.kind == crate::ecology::DECO).expect("deco present");
+        let deco = snap.agents.iter().find(|a| a.kind == "deco").expect("deco present");
         assert!(deco.deco_eff_visual.is_some(), "DECO carries deco_efficiency visual");
-        let non_deco = snap.agents.iter().find(|a| a.kind != crate::ecology::DECO).expect("non-deco present");
+        let non_deco = snap.agents.iter().find(|a| a.kind != "deco").expect("non-deco present");
         assert!(non_deco.deco_eff_visual.is_none(), "only DECO carries deco_eff_visual");
         // Phase 9: DECO hue 必须在效率驱动区间 [0.63, 0.87] 内。
         let deco_hue = deco.genome_hue_visual as f64 / 65535.0;

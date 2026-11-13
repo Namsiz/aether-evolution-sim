@@ -13,6 +13,8 @@
 //!   --dump-grass <t1,t2,...>  emit GRASS_ARR bit-hex dumps at specified ticks for grid-level diagnostics
 
 mod ecology;
+#[cfg(feature = "spatial-index")]
+mod spatial_index; // Phase 31 Part B: uniform-grid C12 prerequisite
 mod save_state;
 mod terrain;
 mod niche; // Phase 16: clade niche axis + competitive exclusion
@@ -54,6 +56,21 @@ fn fmt(v: f64) -> String {
 // sequence checksum() uses for agents (kind code, id, x*100, z*100, energy*100,
 // age*10, all floored; only the low 32 bits of each value participate, negative
 // floors wrap like BigInt(v) & 0xffffffffn). NaN floors to 0 on both sides.
+/// JS-oracle diff tool: the frozen oracle only ever emits the six legacy
+/// kind names, so this standalone mapping keeps checksum_local and the diff
+/// reports byte- and text-compatible with the JS side.
+fn kind_name(id: aether_sim_ecology::ecology::SpeciesKind) -> &'static str {
+    match id {
+        ecology::HERB => "herb",
+        ecology::PRED => "pred",
+        ecology::SCAV => "scav",
+        ecology::OMN => "omn",
+        ecology::FISH => "fish",
+        ecology::DECO => "deco",
+        _ => "?",
+    }
+}
+
 fn checksum_local(a: &Agent) -> u64 {
     const MOD: u64 = 0x0000_0100_0000_01B3; // FNV-1a 64 prime 0x100000001B3
     let mut h: u64 = 14695981039346656033;
@@ -62,7 +79,7 @@ fn checksum_local(a: &Agent) -> u64 {
         let val = (f as i64 as u64) & 0xFFFF_FFFF;
         *h = (*h ^ val).wrapping_mul(MOD);
     }
-    mix(&mut h, a.kind.as_bytes()[0] as f64);
+    mix(&mut h, kind_name(a.kind).as_bytes()[0] as f64);
     mix(&mut h, a.id as f64);
     mix(&mut h, a.x * 100.0);
     mix(&mut h, a.z * 100.0);
@@ -103,7 +120,7 @@ fn dump_state(eco: &Ecology, tick: u32, out: &mut String) {
         out.push_str(&format!(
             "STATE_DUMP t={} kind={} id={} x={} z={} energy={} age={} bite={} repro={} state={} heading={} lineage={} genome={{{}}} checksum_local={:08x}\n",
             tick,
-            a.kind,
+            kind_name(a.kind),
             a.id,
             fmt(a.x),
             fmt(a.z),
@@ -270,7 +287,7 @@ fn compare_tick(tick: u32, js: &[Rec], eco: &Ecology, ignore: &[String]) -> Opti
                     tick,
                     line: format!(
                         "FIRST_DIFF tick={} id={} kind={} field=missing_in_js val_js=none val_rs=id{}",
-                        tick, a.id, a.kind, a.id
+                        tick, a.id, kind_name(a.kind), a.id
                     ),
                 });
             }
@@ -293,12 +310,12 @@ fn compare_tick(tick: u32, js: &[Rec], eco: &Ecology, ignore: &[String]) -> Opti
                         ),
                     });
                 }
-                if rec.kind != a.kind {
+                if rec.kind != kind_name(a.kind) {
                     return Some(DiffReport {
                         tick,
                         line: format!(
                             "FIRST_DIFF tick={} id={} field=kind val_js={} val_rs={}",
-                            tick, a.id, rec.kind, a.kind
+                            tick, a.id, rec.kind, kind_name(a.kind)
                         ),
                     });
                 }
@@ -318,7 +335,7 @@ fn compare_tick(tick: u32, js: &[Rec], eco: &Ecology, ignore: &[String]) -> Opti
                         "state" => Some(Tok::Str(a.state.to_string())),
                         "heading" => Some(Tok::Num(a.heading)),
                         "lineage" => Some(Tok::Str(a.lineage.unwrap_or("undefined").to_string())),
-                        "kind" => Some(Tok::Str(a.kind.to_string())),
+                        "kind" => Some(Tok::Str(kind_name(a.kind).to_string())),
                         "checksum_local" => Some(Tok::Str(format!("{:08x}", checksum_local(a)))),
                         _ => None,
                     };
@@ -331,7 +348,7 @@ fn compare_tick(tick: u32, js: &[Rec], eco: &Ecology, ignore: &[String]) -> Opti
                                     tick,
                                     line: format!(
                                         "FIRST_DIFF tick={} id={} kind={} field=checksum_local val_js=0x{} val_rs=0x{:08x}",
-                                        tick, a.id, a.kind, js_hex, checksum_local(a)
+                                        tick, a.id, kind_name(a.kind), js_hex, checksum_local(a)
                                     ),
                                 });
                             }
@@ -345,7 +362,7 @@ fn compare_tick(tick: u32, js: &[Rec], eco: &Ecology, ignore: &[String]) -> Opti
                                 tick,
                                 line: format!(
                                     "FIRST_DIFF tick={} id={} kind={} field={} val_js={} val_rs=<absent>",
-                                    tick, a.id, a.kind, fname, tok_raw(&jt),
+                                    tick, a.id, kind_name(a.kind), fname, tok_raw(&jt),
                                 ),
                             });
                         }
@@ -354,7 +371,7 @@ fn compare_tick(tick: u32, js: &[Rec], eco: &Ecology, ignore: &[String]) -> Opti
                                 tick,
                                 line: format!(
                                     "FIRST_DIFF tick={} id={} kind={} field={} val_js=<absent> val_rs={}",
-                                    tick, a.id, a.kind, fname, tok_raw(&rt),
+                                    tick, a.id, kind_name(a.kind), fname, tok_raw(&rt),
                                 ),
                             });
                         }
@@ -364,7 +381,7 @@ fn compare_tick(tick: u32, js: &[Rec], eco: &Ecology, ignore: &[String]) -> Opti
                                     tick,
                                     line: format!(
                                         "FIRST_DIFF tick={} id={} kind={} field={} val_js={} val_rs={}",
-                                        tick, a.id, a.kind, fname, tok_raw(&jt), tok_raw(&rt),
+                                        tick, a.id, kind_name(a.kind), fname, tok_raw(&jt), tok_raw(&rt),
                                     ),
                                 });
                             }
@@ -410,7 +427,7 @@ fn compare_tick(tick: u32, js: &[Rec], eco: &Ecology, ignore: &[String]) -> Opti
                                 tick,
                                 line: format!(
                                     "FIRST_DIFF tick={} id={} kind={} field=genome[{}].key val_js={} val_rs={}",
-                                    tick, a.id, a.kind, k,
+                                    tick, a.id, kind_name(a.kind), k,
                                     if jk.is_empty() { "<absent>".to_string() } else { jk },
                                     if rk.is_empty() { "<absent>".to_string() } else { rk },
                                 ),
@@ -422,7 +439,7 @@ fn compare_tick(tick: u32, js: &[Rec], eco: &Ecology, ignore: &[String]) -> Opti
                                     tick,
                                     line: format!(
                                         "FIRST_DIFF tick={} id={} kind={} field=genome.{} val_js={} val_rs={}",
-                                        tick, a.id, a.kind, jk, tok_raw(jv3), tok_raw(rv3),
+                                        tick, a.id, kind_name(a.kind), jk, tok_raw(jv3), tok_raw(rv3),
                                     ),
                                 });
                             }
@@ -566,9 +583,9 @@ fn main() {
             let (mut h, mut p, mut scav, mut omn) = (0usize, 0usize, 0usize, 0usize);
             for r in js0 {
                 match r.kind.as_str() {
-                    ecology::HERB => h += 1,
-                    ecology::PRED => p += 1,
-                    ecology::SCAV => scav += 1,
+                    "herb" => h += 1,
+                    "pred" => p += 1,
+                    "scav" => scav += 1,
                     _ => omn += 1,
                 }
             }
@@ -635,10 +652,14 @@ fn main() {
         if debug || i % 300 == 0 {
             let s = eco.stats();
             let _ = writeln!(out, "SNAPSHOT {} {} {} {}", i, s.h, s.p, eco.checksum());
+            // Phase 31 Part B: v2 (registry-id kind field) runs in parallel;
+            // Phase 34 promotes it to primary and records the re-baseline.
+            let _ = writeln!(out, "SNAPSHOT_V2 {} {} {} {}", i, s.h, s.p, eco.checksum_v2());
         }
     }
     if !buf.is_empty() {
         let _ = out.write_all(buf.as_bytes());
     }
     let _ = writeln!(out, "CHECKSUM_FINAL {}", eco.checksum());
+    let _ = writeln!(out, "CHECKSUM_FINAL_V2 {}", eco.checksum_v2());
 }

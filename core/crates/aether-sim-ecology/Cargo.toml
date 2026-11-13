@@ -19,6 +19,12 @@ wasm-bindgen = "0.2.92"
 [dev-dependencies]
 aether-libm = { path = "../aether-libm" }
 
+# Phase 31 Part B: uniform-grid spatial index (C12 prerequisite). Off by
+# default so the wasm/JS build pays zero cost; enable to run its equivalence
+# tests or wire it into `nearest` (Part C).
+[features]
+spatial-index = []
+
 [[bin]]
 name = "ecology-sim"
 path = "src/main.rs"

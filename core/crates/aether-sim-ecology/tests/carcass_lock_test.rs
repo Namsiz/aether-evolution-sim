@@ -16,7 +16,7 @@
 //! Plus a v1→v2-schema probe: a save serialized before Phase 8 (missing the
 //! `CarcassLockEnabled` / `occupied_by` fields) loads and keeps running.
 
-use aether_sim_ecology::ecology::{Carcass, Ecology, DECO, SCAV};
+use aether_sim_ecology::ecology::{Carcass, Ecology, DECO, FISH, HERB, OMN, PRED, SCAV, SpeciesKind};
 use aether_sim_ecology::save_state::{self, SaveState};
 
 fn daylight(t: u32) -> f64 {
@@ -29,7 +29,7 @@ fn run_ticks(eco: &mut Ecology, from: u32, to: u32) {
     }
 }
 
-fn count_kind(eco: &Ecology, kind: &str) -> usize {
+fn count_kind(eco: &Ecology, kind: SpeciesKind) -> usize {
     eco.living().iter().filter(|a| a.alive && a.kind == kind).count()
 }
 
@@ -199,11 +199,12 @@ fn six_species_survives_600_ticks_with_locks() {
     run_ticks(&mut eco, 0, 600);
 
     let kinds = [
-        ("herb", 30), ("pred", 4), ("scav", 5), ("omn", 5), ("fish", 5), ("deco", 10),
+        (HERB, 30usize), (PRED, 4), (SCAV, 5), (OMN, 5), (FISH, 5), (DECO, 10),
     ];
     eprintln!("=== 600-tick census with carcass locks ===");
-    for (name, min) in kinds {
-        let n = count_kind(&eco, name);
+    for (kind, min) in kinds {
+        let n = count_kind(&eco, kind);
+        let name = eco.kind_name(kind);
         eprintln!("  {name:>5}: {n}");
         assert!(n >= min, "{name} population collapsed to {n} (<{min}) under carcass locking");
     }

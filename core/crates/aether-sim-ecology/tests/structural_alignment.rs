@@ -40,12 +40,12 @@ fn init_structure_matches_js_oracle() {
         assert!(a.alive, "no agent should be dead at init");
         *counts.entry(a.kind).or_insert(0usize) += 1;
     }
-    assert_eq!(*counts.get(HERB).unwrap_or(&0), 150, "herb count");
-    assert_eq!(*counts.get(PRED).unwrap_or(&0), 14, "pred count");
-    assert_eq!(*counts.get(SCAV).unwrap_or(&0), 8, "scav count");
-    assert_eq!(*counts.get(OMN).unwrap_or(&0), 12, "omn count");
-    assert_eq!(*counts.get(FISH).unwrap_or(&0), 30, "fish count (Phase 4-B)");
-    assert_eq!(*counts.get(DECO).unwrap_or(&0), 15, "deco count (Phase 4-C)");
+    assert_eq!(*counts.get(&HERB).unwrap_or(&0), 150, "herb count");
+    assert_eq!(*counts.get(&PRED).unwrap_or(&0), 14, "pred count");
+    assert_eq!(*counts.get(&SCAV).unwrap_or(&0), 8, "scav count");
+    assert_eq!(*counts.get(&OMN).unwrap_or(&0), 12, "omn count");
+    assert_eq!(*counts.get(&FISH).unwrap_or(&0), 30, "fish count (Phase 4-B)");
+    assert_eq!(*counts.get(&DECO).unwrap_or(&0), 15, "deco count (Phase 4-C)");
     assert_eq!(eco.agents.len(), 229, "total agent count (with fish + deco)");
 }
 
@@ -54,7 +54,7 @@ fn checksum_covers_all_six_kinds() {
     // checksum() must hash a.kind first byte for herb/pred/scav/omn/fish/deco
     let eco = Ecology::new(20261102);
     let kinds: std::collections::HashSet<&'static str> =
-        eco.agents.iter().map(|a| a.kind).collect();
+        eco.agents.iter().map(|a| eco.kind_name(a.kind)).collect();
     assert_eq!(kinds.len(), 6, "all six kinds present at init (Phase 4-C adds deco)");
     let ck = eco.checksum();
     assert!(ck.starts_with("0x"), "checksum format 0x…: {}", ck);
@@ -92,8 +92,8 @@ fn scav_omn_ecology_loop_active_and_counts_match_js_oracle() {
         let daylight = 0.5 + 0.5 * sin((t as f64 / 300.0) * std::f64::consts::PI);
         eco.update(0.1, daylight);
         if t == next_sample {
-            let s = eco.agents.iter().filter(|a| a.alive && a.kind == "scav").count();
-            let o = eco.agents.iter().filter(|a| a.alive && a.kind == "omn").count();
+            let s = eco.agents.iter().filter(|a| a.alive && a.kind == SCAV).count();
+            let o = eco.agents.iter().filter(|a| a.alive && a.kind == OMN).count();
             assert_eq!(s, 8, "scav count at t={}", t);
             let o_gold = if t == 300 { 14usize } else if t >= 250 { 13 } else { 12 };
             assert_eq!(o, o_gold, "omn count at t={}", t);
@@ -101,8 +101,8 @@ fn scav_omn_ecology_loop_active_and_counts_match_js_oracle() {
         }
         for a in &eco.agents {
             if !a.alive { continue; }
-            if a.kind == "scav" { states_scav.insert(a.state); }
-            if a.kind == "omn" { states_omn.insert(a.state); }
+            if a.kind == SCAV { states_scav.insert(a.state); }
+            if a.kind == OMN { states_omn.insert(a.state); }
         }
     }
     assert!(

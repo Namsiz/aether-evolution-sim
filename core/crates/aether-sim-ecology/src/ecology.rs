@@ -16,12 +16,259 @@ use crate::biochemistry::{NutrientPools, mineralization_path_of};
 use crate::geology::GeologicState;
 use std::collections::HashMap;
 
-pub const HERB: &str = "herb";
-pub const PRED: &str = "pred";
-pub const SCAV: &str = "scav";
-pub const OMN: &str = "omn";
-pub const FISH: &str = "fish";
-pub const DECO: &str = "deco";
+/// Phase 31: species identity is runtime registry data, not a code enum.
+/// `Agent.kind` holds a registry id; the display/checksum name lives in the
+/// `KindDef`. The six legacy species take ids 0-5 in this order — the same
+/// order the per-kind evolution histories, fitness records and the C-ABI
+/// count export were already indexed by, so a legacy id IS its slot.
+pub type SpeciesKind = u16;
+
+pub const HERB: SpeciesKind = 0;
+pub const PRED: SpeciesKind = 1;
+pub const SCAV: SpeciesKind = 2;
+pub const OMN: SpeciesKind = 3;
+pub const FISH: SpeciesKind = 4;
+pub const DECO: SpeciesKind = 5;
+/// Kinds registered by every constructor; runtime registrations append after.
+pub const LEGACY_KIND_COUNT: usize = 6;
+
+/// Which `Biome` capacity field applies to a species. `Fallback` reads the
+/// kind's own `global_cap` everywhere (DECO, and any future kind that does
+/// not couple to biome carrying capacities).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BiomeCap { Herb, Pred, Scav, Omn, Fish, Fallback }
+
+/// Genome factory template. Phase 32's open-loci system generalizes this into
+/// per-locus data; Phase 31 keeps the four proven draw patterns as-is so the
+/// RNG stream order is untouched.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GenomeTemplate { Herb, Fish, Deco, General }
+
+/// Which `update_*` behavior loop drives the kind. Phase 34 kind-forking
+/// derives new kinds from a parent's template instead of hardcoding names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BehaviorTemplate { Herb, Pred, Scav, Omn, Fish, Deco }
+
+/// One species-role record: every constant that used to live in a
+/// `match kind { … _ => unreachable!() }` arm is data here.
+#[derive(Clone, Debug)]
+pub struct KindDef {
+    pub id: SpeciesKind,
+    pub name: &'static str,
+    pub behavior: BehaviorTemplate,
+    pub genome_template: GenomeTemplate,
+    pub biome_cap: BiomeCap,
+    /// Population cap where no biome covers the position; also the crowding
+    /// denominator and the `Fallback` biome cap.
+    pub global_cap: usize,
+    pub max_energy: f64,
+    pub repro_cooldown: f64,
+    pub range_base: f64,
+    pub mature_age: f64,
+    pub repro_base_threshold: f64,
+    /// (parent drain, mate drain) on successful paired reproduction.
+    pub repro_drain_pair: (f64, f64),
+    pub repro_drain_solo: f64,
+    /// (base, span) of the spawn-time starting-energy draw.
+    pub start_energy: (f64, f64),
+    /// (min, max) clamp for the speed gene under mutation.
+    pub speed_clamp: (f64, f64),
+    pub mutates_fin_color: bool,
+    pub mutates_deco_eff: bool,
+}
+
+impl KindDef {
+    /// Conservative default for kinds appearing outside the registry (a save
+    /// file from a newer engine phase): pred-like behavior, general genome,
+    /// no biome coupling. Never panics — that is this phase's contract.
+    fn conservative(name: &'static str) -> Self {
+        KindDef {
+            id: 0,
+            name,
+            behavior: BehaviorTemplate::Pred,
+            genome_template: GenomeTemplate::General,
+            biome_cap: BiomeCap::Fallback,
+            global_cap: 1024,
+            max_energy: 190.0,
+            repro_cooldown: 76.0,
+            range_base: 280.0,
+            mature_age: 56.0,
+            repro_base_threshold: 0.96,
+            repro_drain_pair: (58.0, 48.0),
+            repro_drain_solo: 76.0,
+            start_energy: (92.0, 30.0),
+            speed_clamp: (3.4, 8.6),
+            mutates_fin_color: false,
+            mutates_deco_eff: false,
+        }
+    }
+}
+
+/// Append-only species registry. Ids are stable across a run: legacy six at
+/// 0-5, runtime registrations after. Names are the save-file and C-ABI
+/// identity (checksum v1 keeps hashing the name's first byte, unchanged).
+#[derive(Clone, Debug)]
+pub struct KindRegistry {
+    defs: Vec<KindDef>,
+}
+
+impl KindRegistry {
+    pub fn legacy() -> Self {
+        KindRegistry { defs: legacy_kind_defs() }
+    }
+
+    pub fn len(&self) -> usize { self.defs.len() }
+
+    pub fn defs(&self) -> &[KindDef] { &self.defs }
+
+    /// Registry lookup. An id outside the registry cannot be produced by
+    /// `spawn` (which resolves through the registry); if one arrives from a
+    /// test/edge path it reads the PRED definition instead of panicking —
+    /// the Phase 31 replacement for every former `unreachable!()`.
+    pub fn def(&self, id: SpeciesKind) -> &KindDef {
+        self.defs.get(id as usize).unwrap_or(&self.defs[PRED as usize])
+    }
+
+    pub fn name(&self, id: SpeciesKind) -> &'static str { self.def(id).name }
+
+    pub fn id_of(&self, name: &str) -> Option<SpeciesKind> {
+        self.defs.iter().position(|d| d.name == name).map(|i| i as SpeciesKind)
+    }
+
+    /// Register a new species definition; returns its stable id.
+    pub fn register(&mut self, def: KindDef) -> SpeciesKind {
+        let id = self.defs.len() as SpeciesKind;
+        let mut def = def;
+        def.id = id;
+        self.defs.push(def);
+        id
+    }
+
+    /// Save-load path: map a saved kind name back to its id, registering a
+    /// conservative definition for names this engine build does not know
+    /// (v5 saves only contain the six legacy names, so the fallback is
+    /// forward-compatibility, not a live path today).
+    pub fn resolve_or_register(&mut self, name: &str) -> SpeciesKind {
+        if let Some(id) = self.id_of(name) { return id; }
+        let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
+        self.register(KindDef::conservative(leaked))
+    }
+}
+
+/// Field-by-field snapshot of the former `match kind` arms; the
+/// `phase31_registry_test` suite asserts every value against this table.
+fn legacy_kind_defs() -> Vec<KindDef> {
+    vec![
+        KindDef {
+            id: HERB, name: "herb",
+            behavior: BehaviorTemplate::Herb,
+            genome_template: GenomeTemplate::Herb,
+            biome_cap: BiomeCap::Herb,
+            global_cap: MAX_HERB,
+            max_energy: 150.0,
+            repro_cooldown: HERB_REPRO_COOLDOWN,
+            range_base: 170.0,
+            mature_age: 30.0,
+            repro_base_threshold: 0.86,
+            repro_drain_pair: (38.0, 30.0),
+            repro_drain_solo: 52.0,
+            start_energy: (78.0, 25.0),
+            speed_clamp: (2.0, 8.4),
+            mutates_fin_color: false,
+            mutates_deco_eff: false,
+        },
+        KindDef {
+            id: PRED, name: "pred",
+            behavior: BehaviorTemplate::Pred,
+            genome_template: GenomeTemplate::General,
+            biome_cap: BiomeCap::Pred,
+            global_cap: MAX_PRED,
+            max_energy: 190.0,
+            repro_cooldown: PRED_REPRO_COOLDOWN,
+            range_base: 280.0,
+            mature_age: 56.0,
+            repro_base_threshold: 0.96,
+            repro_drain_pair: (58.0, 48.0),
+            repro_drain_solo: 76.0,
+            start_energy: (92.0, 30.0),
+            speed_clamp: (3.4, 8.6),
+            mutates_fin_color: false,
+            mutates_deco_eff: false,
+        },
+        KindDef {
+            id: SCAV, name: "scav",
+            behavior: BehaviorTemplate::Scav,
+            genome_template: GenomeTemplate::General,
+            biome_cap: BiomeCap::Scav,
+            global_cap: MAX_SCAV,
+            max_energy: 120.0,
+            repro_cooldown: SCAV_REPRO_COOLDOWN,
+            range_base: 200.0,
+            mature_age: 56.0,
+            repro_base_threshold: 0.96,
+            repro_drain_pair: (58.0, 48.0),
+            repro_drain_solo: 76.0,
+            start_energy: (55.0, 20.0),
+            speed_clamp: (3.4, 8.6),
+            mutates_fin_color: false,
+            mutates_deco_eff: false,
+        },
+        KindDef {
+            id: OMN, name: "omn",
+            behavior: BehaviorTemplate::Omn,
+            genome_template: GenomeTemplate::General,
+            biome_cap: BiomeCap::Omn,
+            global_cap: MAX_OMN,
+            max_energy: 135.0,
+            repro_cooldown: OMN_REPRO_COOLDOWN,
+            range_base: 185.0,
+            mature_age: 56.0,
+            repro_base_threshold: 0.96,
+            repro_drain_pair: (58.0, 48.0),
+            repro_drain_solo: 76.0,
+            start_energy: (65.0, 22.0),
+            speed_clamp: (3.4, 8.6),
+            mutates_fin_color: false,
+            mutates_deco_eff: false,
+        },
+        KindDef {
+            id: FISH, name: "fish",
+            behavior: BehaviorTemplate::Fish,
+            genome_template: GenomeTemplate::Fish,
+            biome_cap: BiomeCap::Fish,
+            global_cap: MAX_FISH,
+            max_energy: 110.0,
+            repro_cooldown: FISH_REPRO_COOLDOWN,
+            range_base: 120.0,
+            mature_age: 25.0,
+            repro_base_threshold: 0.65,
+            repro_drain_pair: (20.0, 16.0),
+            repro_drain_solo: 46.0,
+            start_energy: (60.0, 18.0),
+            speed_clamp: (1.8, 6.8),
+            mutates_fin_color: true,
+            mutates_deco_eff: false,
+        },
+        KindDef {
+            id: DECO, name: "deco",
+            behavior: BehaviorTemplate::Deco,
+            genome_template: GenomeTemplate::Deco,
+            biome_cap: BiomeCap::Fallback,
+            global_cap: MAX_DECO,
+            max_energy: DECO_MAX_ENERGY,
+            repro_cooldown: DECO_REPRO_COOLDOWN,
+            range_base: DECO_RANGE_BASE,
+            mature_age: 30.0,
+            repro_base_threshold: 0.96,
+            repro_drain_pair: (58.0, 48.0),
+            repro_drain_solo: 45.0,
+            start_energy: (50.0, 20.0),
+            speed_clamp: (3.4, 8.6),
+            mutates_fin_color: false,
+            mutates_deco_eff: true,
+        },
+    ]
+}
 
 pub const GRID_N: u32 = 76;
 pub const GRID_SPAN: f64 = 1080.0;
@@ -142,7 +389,7 @@ pub struct Genome {
 #[derive(Debug)]
 pub struct Agent {
     pub id: u32,
-    pub kind: &'static str,
+    pub kind: SpeciesKind,
     pub x: f64, pub z: f64, pub y: f64,
     pub prev_x: f64, pub prev_z: f64, pub prev_heading: f64,
     pub heading: f64, pub speed: f64, pub desired_speed: f64,
@@ -611,8 +858,10 @@ pub struct Ecology {
     isolated_groups: HashMap<&'static str, IsolatedGroup>,
     isolated_order: Vec<&'static str>,
     isolation_history: Vec<IsolationHistoryPoint>,
-    evolution: [Vec<EvolutionSample>; 6],
-    generation_fitness: [Vec<FitnessRecord>; 6],
+    evolution: Vec<Vec<EvolutionSample>>,
+    generation_fitness: Vec<Vec<FitnessRecord>>,
+    /// Phase 31: species registry — kind identity as runtime data.
+    pub kinds: KindRegistry,
     taken_buf: [f64; GRASS_N],
     spread_buf: Option<Vec<f32>>,
     h_cache: u32,
@@ -668,6 +917,9 @@ pub struct Ecology {
 impl Ecology {
     pub fn new(seed: u32) -> Self {
         let n = (GRID_N * GRID_N) as usize;
+        let kinds = KindRegistry::legacy();
+        let evolution: Vec<Vec<EvolutionSample>> = (0..kinds.len()).map(|_| Vec::new()).collect();
+        let generation_fitness: Vec<Vec<FitnessRecord>> = (0..kinds.len()).map(|_| Vec::new()).collect();
         let mut eco = Ecology {
             rng: Mulberry32::new(seed),
             prng: Mulberry32::new(seed.wrapping_add(101)),
@@ -731,8 +983,9 @@ impl Ecology {
             isolated_groups: HashMap::new(),
             isolated_order: Vec::new(),
             isolation_history: Vec::new(),
-            evolution: [Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()],
-            generation_fitness: [Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+            evolution,
+            generation_fitness,
+            kinds,
             taken_buf: [0.0; GRASS_N],
             spread_buf: None,
             h_cache: 0,
@@ -757,6 +1010,9 @@ impl Ecology {
     /// full-world biome when `biomes` is empty (backward-compatible path).
     pub fn with_biomes(seed: u32, biomes: Vec<Biome>) -> Self {
         let n = (GRID_N * GRID_N) as usize;
+        let kinds = KindRegistry::legacy();
+        let evolution: Vec<Vec<EvolutionSample>> = (0..kinds.len()).map(|_| Vec::new()).collect();
+        let generation_fitness: Vec<Vec<FitnessRecord>> = (0..kinds.len()).map(|_| Vec::new()).collect();
         let mut eco = Ecology {
             rng: Mulberry32::new(seed),
             prng: Mulberry32::new(seed.wrapping_add(101)),
@@ -820,8 +1076,9 @@ impl Ecology {
             isolated_groups: HashMap::new(),
             isolated_order: Vec::new(),
             isolation_history: Vec::new(),
-            evolution: [Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()],
-            generation_fitness: [Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+            evolution,
+            generation_fitness,
+            kinds,
             taken_buf: [0.0; GRASS_N],
             spread_buf: None,
             h_cache: 0,
@@ -870,6 +1127,48 @@ impl Ecology {
         eco
     }
 
+    // ----- kind registry (Phase 31) ------------------------------------
+
+    pub fn kind_def(&self, id: SpeciesKind) -> &KindDef { self.kinds.def(id) }
+
+    pub fn kind_name(&self, id: SpeciesKind) -> &'static str { self.kinds.name(id) }
+
+    /// Register a new species at runtime (ghost kinds in tests now; Phase 34
+    /// kind-forking later). Appends per-kind history/fitness slots so the id
+    /// is always indexable.
+    pub fn register_kind(&mut self, def: KindDef) -> SpeciesKind {
+        let id = self.kinds.register(def);
+        while self.evolution.len() <= id as usize { self.evolution.push(Vec::new()); }
+        while self.generation_fitness.len() <= id as usize { self.generation_fitness.push(Vec::new()); }
+        id
+    }
+
+    // ----- Phase 31 Part B: spatial index (feature-gated, zero default cost) --
+
+    /// Live agents as (Vec index, x, z) in ascending index order — the
+    /// canonical input for `spatial_index::SpatialIndex::rebuild`.
+    #[cfg(feature = "spatial-index")]
+    pub fn live_positions(&self) -> Vec<(usize, f64, f64)> {
+        self.agents
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.alive)
+            .map(|(i, a)| (i, a.x, a.z))
+            .collect()
+    }
+
+    /// One rebuild of the uniform-grid index over the live agent set. Part C
+    /// will call this once per tick (agents move) and route `nearest` through
+    /// it; today it exists only to make the equivalence tests exercise the
+    /// real sim shape.
+    #[cfg(feature = "spatial-index")]
+    pub fn build_spatial_index(&self) -> crate::spatial_index::SpatialIndex {
+        let mut idx = crate::spatial_index::SpatialIndex::new();
+        let live = self.live_positions();
+        idx.rebuild(&live);
+        idx
+    }
+
     // ----- biome helpers -----------------------------------------------
 
     /// The aquatic biome: overlays the central water region (radius =
@@ -895,7 +1194,7 @@ impl Ecology {
     /// Per-biome alive count for a species. Biomes not covering any agent are
     /// naturally zero-counted, and agents outside all biomes use the default
     /// full-world biome (id=0) when present.
-    pub fn biome_count(&self, kind: &'static str, biome_id: u32) -> usize {
+    pub fn biome_count(&self, kind: SpeciesKind, biome_id: u32) -> usize {
         self.agents
             .iter()
             .filter(|a| {
@@ -910,28 +1209,25 @@ impl Ecology {
             .count()
     }
 
+    /// Per-biome capacity of a kind, resolved through its `KindDef`.
+    fn biome_cap_in(&self, kind: SpeciesKind, b: &Biome) -> usize {
+        let def = self.kind_def(kind);
+        match def.biome_cap {
+            BiomeCap::Herb => b.max_herb,
+            BiomeCap::Pred => b.max_pred,
+            BiomeCap::Scav => b.max_scav,
+            BiomeCap::Omn => b.max_omn,
+            BiomeCap::Fish => b.max_fish.unwrap_or(def.global_cap),
+            BiomeCap::Fallback => def.global_cap,
+        }
+    }
+
     /// Effective max for a species at a position. When no biome covers `(x, z)`
-    /// the per-kind global MAX const is used (matches legacy full-world path).
-    pub fn biome_max_for(&self, kind: &'static str, x: f64, z: f64) -> usize {
+    /// the kind's own `global_cap` is used (matches legacy full-world path).
+    pub fn biome_max_for(&self, kind: SpeciesKind, x: f64, z: f64) -> usize {
         match self.biome_reg.find_biome(x, z) {
-            Some(b) => match kind {
-                HERB => b.max_herb,
-                PRED => b.max_pred,
-                SCAV => b.max_scav,
-                OMN => b.max_omn,
-                FISH => b.max_fish.unwrap_or(MAX_FISH),
-                DECO => MAX_DECO,
-                _ => unreachable!(),
-            },
-            None => match kind {
-                HERB => MAX_HERB,
-                PRED => MAX_PRED,
-                SCAV => MAX_SCAV,
-                OMN => MAX_OMN,
-                FISH => MAX_FISH,
-                DECO => MAX_DECO,
-                _ => unreachable!(),
-            },
+            Some(b) => self.biome_cap_in(kind, b),
+            None => self.kind_def(kind).global_cap,
         }
     }
 
@@ -1147,9 +1443,11 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         (hr, ls)
     }
 
-    fn random_genome(&mut self, kind: &'static str) -> Genome {
+    fn random_genome(&mut self, kind: SpeciesKind) -> Genome {
         let (hr, ls) = Self::morpho_pair(self.next_id);
-        if kind == HERB {
+        let template = self.kind_def(kind).genome_template;
+        match template {
+            GenomeTemplate::Herb => {
             Genome {
                 speed: 3.8 + self.rng.next_f64() * 4.2,
                 sense: 24.0 + self.rng.next_f64() * 44.0,
@@ -1167,7 +1465,8 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 deco_efficiency: 1.0,
             hull_ratio: hr, limb_scale: ls,
             }
-        } else if kind == FISH {
+            }
+            GenomeTemplate::Fish => {
             Genome {
                 speed: 3.2 + self.fish_rng.next_f64() * 3.0,
                 sense: 20.0 + self.fish_rng.next_f64() * 30.0,
@@ -1185,7 +1484,8 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 deco_efficiency: 1.0,
             hull_ratio: hr, limb_scale: ls,
             }
-        } else if kind == DECO {
+            }
+            GenomeTemplate::Deco => {
             Genome {
                 speed: 3.0 + self.rng.next_f64() * 2.4,
                 sense: 30.0 + self.rng.next_f64() * 40.0,
@@ -1203,7 +1503,8 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 deco_efficiency: 0.5 + self.rng.next_f64(),
             hull_ratio: hr, limb_scale: ls,
             }
-        } else {
+            }
+            GenomeTemplate::General => {
             Genome {
                 speed: 4.6 + self.rng.next_f64() * 3.4,
                 sense: 34.0 + self.rng.next_f64() * 46.0,
@@ -1221,17 +1522,18 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 deco_efficiency: 1.0,
             hull_ratio: hr, limb_scale: ls,
             }
+            }
         }
     }
 
-    fn mutate(&mut self, g: &Genome, kind: &'static str) -> Genome {
+    fn mutate(&mut self, g: &Genome, kind: SpeciesKind) -> Genome {
         let mut out = g.clone();
         let pop_size = self.count(kind);
+        let (sp_lo, sp_hi) = self.kind_def(kind).speed_clamp;
+        let mut_fin = self.kind_def(kind).mutates_fin_color;
+        let mut_deco = self.kind_def(kind).mutates_deco_eff;
         let drift = if pop_size < 20 { 1.0 + (20.0 - pop_size as f64) / 20.0 } else { 1.0 };
-        out.speed = (g.speed * (1.0 + (self.rng.next_f64() - 0.5) * 0.09 * drift)).clamp(
-            if kind == HERB { 2.0 } else if kind == FISH { 1.8 } else { 3.4 },
-            if kind == HERB { 8.4 } else if kind == FISH { 6.8 } else { 8.6 },
-        );
+        out.speed = (g.speed * (1.0 + (self.rng.next_f64() - 0.5) * 0.09 * drift)).clamp(sp_lo, sp_hi);
         out.sense = (g.sense * (1.0 + (self.rng.next_f64() - 0.5) * 0.1 * drift)).clamp(14.0, 130.0);
         out.size = (g.size * (1.0 + (self.rng.next_f64() - 0.5) * 0.07 * drift)).clamp(0.58, 1.7);
         out.metabolism = (g.metabolism * (1.0 + (self.rng.next_f64() - 0.5) * 0.06 * drift)).clamp(0.62, 1.6);
@@ -1240,10 +1542,10 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         out.bold = (g.bold + (self.prng.next_f64() - 0.5) * 0.14 * drift).clamp(0.0, 1.0);
         out.curious = (g.curious + (self.prng.next_f64() - 0.5) * 0.14 * drift).clamp(0.0, 1.0);
         out.social = (g.social + (self.prng.next_f64() - 0.5) * 0.14 * drift).clamp(0.0, 1.0);
-        if kind == FISH {
+        if mut_fin {
             out.fin_color = (g.fin_color + (self.fish_rng.next_f64() - 0.5) * 0.1 * drift).clamp(0.0, 1.0);
         }
-        if kind == DECO {
+        if mut_deco {
             out.deco_efficiency = (g.deco_efficiency * (1.0 + (self.rng.next_f64() - 0.5) * 0.1 * drift)).clamp(0.5, 1.5);
         }
         if let Some(h) = g.help_thr {
@@ -1258,11 +1560,12 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         out
     }
 
-    fn count(&self, kind: &'static str) -> usize {
+    /// Public for registry / ghost-kind unit tests (see phase31_registry_test).
+    pub fn count(&self, kind: SpeciesKind) -> usize {
         self.agents.iter().filter(|a| a.alive && a.kind == kind).count()
     }
 
-    fn mix_genome(&mut self, a: &Genome, b: &Genome, kind: &'static str) -> Genome {
+    fn mix_genome(&mut self, a: &Genome, b: &Genome, kind: SpeciesKind) -> Genome {
         let mut g = Genome {
             speed: (a.speed + b.speed) * 0.5,
             sense: (a.sense + b.sense) * 0.5,
@@ -1289,8 +1592,11 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
 
     // ----- entity management ------------------------------------------------
 
-    fn spawn(&mut self, kind: &'static str, x: f64, z: f64, genome: Option<Genome>, generation: u32, age: f64) -> Option<&mut Agent> {
+    fn spawn(&mut self, kind: SpeciesKind, x: f64, z: f64, genome: Option<Genome>, generation: u32, age: f64) -> Option<&mut Agent> {
         // Use biome-specific cap when available; otherwise fall back to global.
+        let def_max_e = self.kind_def(kind).max_energy;
+        let def_repro_cd = self.kind_def(kind).repro_cooldown;
+        let (se0, se1) = self.kind_def(kind).start_energy;
         let cap = self.biome_max_for(kind, x, z);
         if self.count(kind) >= cap { return None; }
         let g = match genome {
@@ -1300,16 +1606,9 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 self.mutate(&rg, kind)
             }
         };
-        let max_e = match kind { HERB => 150.0, SCAV => 120.0, OMN => 135.0, FISH => 110.0, DECO => DECO_MAX_ENERGY, _ => 190.0 };
-        let repro_cd = match kind {
-            HERB => HERB_REPRO_COOLDOWN,
-            SCAV => SCAV_REPRO_COOLDOWN,
-            OMN => OMN_REPRO_COOLDOWN,
-            FISH => FISH_REPRO_COOLDOWN,
-            DECO => DECO_REPRO_COOLDOWN,
-            _ => PRED_REPRO_COOLDOWN,
-        };
-        let range_base = match kind { HERB => 170.0, SCAV => 200.0, OMN => 185.0, FISH => 120.0, DECO => DECO_RANGE_BASE, _ => 280.0 };
+        let max_e = def_max_e;
+        let repro_cd = def_repro_cd;
+        let range_base = self.kind_def(kind).range_base;
         let h = terrain_height(x, z);
         let curious_val = g.curious;
         // JS spawn evaluates fields in source order: heading consumes rng FIRST, then energy.
@@ -1326,13 +1625,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             (hv, se, bi, rp, th, ph, cu)
         } else {
             let hv = self.rng.next_f64() * std::f64::consts::PI * 2.0;
-            let se = match kind {
-                HERB => 78.0 + self.rng.next_f64() * 25.0,
-                SCAV => 55.0 + self.rng.next_f64() * 20.0,
-                OMN => 65.0 + self.rng.next_f64() * 22.0,
-                DECO => 50.0 + self.rng.next_f64() * 20.0,
-                _ => 92.0 + self.rng.next_f64() * 30.0,
-            };
+            let se = se0 + self.rng.next_f64() * se1;
             (hv, se, 0.0, 0.0, 0.0, 0.0, 0.0)
         };
         let a = Agent {
@@ -1440,7 +1733,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
 
     // ----- nearest search (skips idx) ---------------------------------------
 
-    fn nearest<F: Fn(&Agent) -> bool>(&self, idx: usize, kind: &'static str, max_dist: f64, pred: Option<F>) -> Option<(usize, f64)> {
+    fn nearest<F: Fn(&Agent) -> bool>(&self, idx: usize, kind: SpeciesKind, max_dist: f64, pred: Option<F>) -> Option<(usize, f64)> {
         let best_d2 = max_dist * max_dist;
         let ai_x = self.agents[idx].x;
         let ai_z = self.agents[idx].z;
@@ -1746,15 +2039,9 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
     }
 
     fn reproduce(&mut self, idx: usize, dt: f64) {
-        let mature = match self.agents[idx].kind { HERB => 30.0, FISH => 25.0, DECO => 30.0, _ => 56.0 };
-        let cooldown = match self.agents[idx].kind {
-            HERB => HERB_REPRO_COOLDOWN,
-            SCAV => SCAV_REPRO_COOLDOWN,
-            OMN => OMN_REPRO_COOLDOWN,
-            PRED => PRED_REPRO_COOLDOWN,
-            FISH => FISH_REPRO_COOLDOWN,
-            DECO => DECO_REPRO_COOLDOWN,
-            _ => unreachable!(),
+        let (mature, cooldown) = {
+            let def = self.kind_def(self.agents[idx].kind);
+            (def.mature_age, def.repro_cooldown)
         };
         if self.agents[idx].repro > 0.0 || self.agents[idx].age < mature { return; }
         // ---- Phase 4-A: biome-driven density-dependent reproduction brake ----
@@ -1765,20 +2052,12 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         let (bi_count, bi_cap) = match bi {
             Some(bm) => (
                 self.count(a_kind), // global count for species present in this biome
-                match a_kind {
-                    HERB => bm.max_herb,
-                    PRED => bm.max_pred,
-                    SCAV => bm.max_scav,
-                    OMN => bm.max_omn,
-                    FISH => bm.max_fish.unwrap_or(MAX_FISH),
-                    DECO => MAX_DECO,
-                    _ => unreachable!(),
-                },
+                self.biome_cap_in(a_kind, bm),
             ),
             None => (self.count(a_kind), usize::MAX),
         };
         let density_factor = if bi_cap > 0 { (bi_count as f64) / (bi_cap as f64) } else { 0.0 };
-        let base_threshold = match a_kind { HERB => 0.86, FISH => 0.65, _ => 0.96 };
+        let base_threshold = self.kind_def(a_kind).repro_base_threshold;
         let mut threshold = base_threshold * (1.0 + density_factor.max(0.0)).min(1.5);
         // FISH density brake ramps at half rate and caps at 0.72 so a healthy
         // school can still breed; the MAX_FISH spawn cap handles overpopulation.
@@ -1881,8 +2160,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             if let Some(child) = self.spawn(a_kind, child_x, child_z, Some(g), max_gen_child, 0.0) {
                 child.lineage = a_lineage.or(b_lineage);
                 child.clade_id = parent_clade;
-                let drain_herb = match self.agents[idx].kind { HERB => 38.0, FISH => 20.0, _ => 58.0 };
-                let drain_pred = match self.agents[idx].kind { HERB => 30.0, FISH => 16.0, _ => 48.0 };
+                let (drain_herb, drain_pred) = self.kind_def(self.agents[idx].kind).repro_drain_pair;
                 self.agents[idx].energy -= drain_herb;
                 self.agents[mate_j].energy -= drain_pred;
                 if HELP_ENABLED && self.agents[idx].kind == HERB {
@@ -1910,7 +2188,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             if let Some(child) = self.spawn(a_kind_a2, cx, cz, Some(g), a_gen_a2 + 1, 0.0) {
                 child.lineage = a_lineage_a2;
                 child.clade_id = parent_clade;
-                let drain = match self.agents[idx].kind { HERB => 52.0, FISH => 46.0, DECO => 45.0, _ => 76.0 };
+                let drain = self.kind_def(self.agents[idx].kind).repro_drain_solo;
                 self.agents[idx].energy -= drain;
                 if HELP_ENABLED && self.agents[idx].kind == HERB {
                     self.drain_e_h += 52.0;
@@ -1930,7 +2208,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         else if cause == "aged" { self.aged += 1; }
         let offspring = self.agents[idx].offspring;
         let lifetime_fitness = (self.agents[idx].age / self.agents[idx].genome.lifespan) * (1.0 + offspring as f64) / self.agents[idx].genome.metabolism;
-        let kind_idx = match self.agents[idx].kind { HERB => 0, PRED => 1, SCAV => 2, OMN => 3, FISH => 4, DECO => 5, _ => unreachable!() };
+        let kind_idx = self.agents[idx].kind as usize;
         self.generation_fitness[kind_idx].push(FitnessRecord { gen: self.agents[idx].generation, age: self.agents[idx].age, offspring, fitness: lifetime_fitness });
         let energy = 4.0 + self.agents[idx].genome.size * 9.0 + self.agents[idx].energy.max(0.0) * 0.16;
         // Phase 8: release any carcass lock held by the dying agent.
@@ -2091,7 +2369,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         let drain = g_metabolism * (0.34 + 0.62 * activity * activity + 0.12 * (g_speed / 8.0).powi(2) + 0.08 * (g_sense / 130.0)) * epistasis;
         let plasticity = 1.0 + if self.daylight < 0.3 { -0.06 } else { 0.0 }
             + if self.agents[idx].hydration < 0.4 { 0.04 } else { 0.0 };
-        let cap_for_kind = match kind { HERB => MAX_HERB as f64, PRED => MAX_PRED as f64, SCAV => MAX_SCAV as f64, OMN => MAX_OMN as f64, _ => unreachable!() };
+        let cap_for_kind = self.kind_def(kind).global_cap as f64;
         let local_crowd = self.count(kind) as f64 / cap_for_kind;
         // Actually MAX_HERB/MAX_PRED etc are u32 consts; casting via match
         let crowd_penalty = if local_crowd > 0.4 { 1.0 + (local_crowd - 0.4) * 0.5 } else { 1.0 };
@@ -3024,13 +3302,14 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                     // handling here (reproduce handles the brake), but the
                     // lookup is kept for downstream spatial features.
                     let _biome_ref = self.biome_reg.find_biome(self.agents[i].x, self.agents[i].z);
-                    match kind {
-                        HERB => self.update_herb(i, h),
-                        SCAV => self.update_scav(i, h),
-                        OMN => self.update_omn(i, h),
-                        FISH => self.update_fish(i, h),
-                        DECO => self.update_deco(i, h),
-                        _ => self.update_pred(i, h),
+                    let beh = self.kind_def(kind).behavior;
+                    match beh {
+                        BehaviorTemplate::Herb => self.update_herb(i, h),
+                        BehaviorTemplate::Scav => self.update_scav(i, h),
+                        BehaviorTemplate::Omn => self.update_omn(i, h),
+                        BehaviorTemplate::Fish => self.update_fish(i, h),
+                        BehaviorTemplate::Deco => self.update_deco(i, h),
+                        BehaviorTemplate::Pred => self.update_pred(i, h),
                     }
                 }
                 i += 1;
@@ -3249,7 +3528,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                             LineageInfo { id: "solitary_slow", name: "缓独", avg_speed: high_avg, count: count_slow },
                         ];
                         self.speciation_event = Some(SpeciationEvent {
-                            t: self.time, parent_kind: HERB, lineages,
+                            t: self.time, parent_kind: self.kind_name(HERB), lineages,
                             cv_speed: (cv * 1000.0).round() / 1000.0,
                             gap_idx,
                             name_suffix: format!("#{}", self.speciation_fired + 1),
@@ -3269,7 +3548,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                         for name in ["迅聚", "缓独"] {
                             if !self.isolated_groups.contains_key(name) {
                                 let code = format!("隔离群-{}", self.isolated_groups.len() + 1);
-                                self.isolated_groups.insert(name, IsolatedGroup { code, kind: HERB, since: self.time });
+                                self.isolated_groups.insert(name, IsolatedGroup { code, kind: self.kind_name(HERB), since: self.time });
                                 self.isolated_order.push(name);
                             }
                         }
@@ -3505,7 +3784,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
 
         // (b) lazy root clade. Id 0 doubles as Agent.clade_id's default, so
         // fresh sims and legacy (pre-Phase-15) saves land here on first pass.
-        let has_root = self.species_clades.iter().any(|c| c.kind == DECO && c.parent_id.is_none());
+        let has_root = self.species_clades.iter().any(|c| c.kind == self.kind_name(DECO) && c.parent_id.is_none());
         if !has_root {
             let refs: Vec<&Agent> = deco_idx.iter().map(|&i| &self.agents[i]).collect();
             let centroid = Self::mean_genome(&refs);
@@ -3514,8 +3793,8 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             self.species_clades.push(SpeciesClade {
                 id,
                 parent_id: None,
-                kind: DECO,
-                name: DECO.to_string(),
+                kind: self.kind_name(DECO),
+                name: self.kind_name(DECO).to_string(),
                 birth_tick: 0,
                 death_tick: None,
                 centroid_genome: centroid,
@@ -3525,7 +3804,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         }
         // Re-point DECOs whose clade id no longer exists to the root.
         let root_id = self.species_clades.iter()
-            .find(|c| c.kind == DECO && c.parent_id.is_none()).unwrap().id;
+            .find(|c| c.kind == self.kind_name(DECO) && c.parent_id.is_none()).unwrap().id;
         for &i in &deco_idx {
             let cid = self.agents[i].clade_id;
             if cid != root_id && !self.species_clades.iter().any(|c| c.id == cid) {
@@ -3647,7 +3926,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 last_parent = Some(parent);
             }
             let kind = self.species_clades.iter().find(|c| c.id == parent)
-                .map(|c| c.kind).unwrap_or(DECO);
+                .map(|c| c.kind).unwrap_or(self.kind_name(DECO));
             let cid = self.next_clade_id;
             self.next_clade_id += 1;
             let refs: Vec<&Agent> = members.iter().map(|&p| &self.agents[deco_idx[p]]).collect();
@@ -3838,7 +4117,26 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         }
     }
 
+    /// v1 golden-checksum contract: mixes the kind NAME's first byte (the
+    /// value every legacy anchor, including `0x790184996f3acefd`, was pinned
+    /// against). Delegates to `checksum_with` with the v1 kind field.
     pub fn checksum(&self) -> String {
+        self.checksum_with(|a| self.kind_name(a.kind).as_bytes()[0] as u64)
+    }
+
+    /// Phase 31 (Q2 ruling: 31 parallel export, 34 switch): identical mix
+    /// stream to v1 except the kind field is the registry id (u32) instead of
+    /// the name's first byte. Six legacy ids (0-5) never collide with the
+    /// first bytes (102/104/111/112/115/100), so v1 and v2 differ by
+    /// construction and each is deterministic on its own.
+    pub fn checksum_v2(&self) -> String {
+        self.checksum_with(|a| a.kind as u32 as u64)
+    }
+
+    /// Shared mix stream. `kind_field` is the only divergence point between
+    /// the v1 (name byte) and v2 (registry id) checksums — keeping it a
+    /// single source prevents the two streams from drifting.
+    fn checksum_with(&self, kind_field: impl Fn(&Agent) -> u64) -> String {
         const MOD: u64 = 0x0000_0100_0000_01B3; // FNV-1a 64 prime 0x100000001B3
         let mut h: u128 = 14695981039346656033;
         let mut mix = |val: u64| {
@@ -3848,7 +4146,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         };
         for a in &self.agents {
             if !a.alive { continue; }
-            mix(a.kind.as_bytes()[0] as u64);
+            mix(kind_field(a));
             mix(a.id as u64);
             // negative floors (x/z) must wrap like BigInt & 0xffffffff, not saturate
             mix((a.x * 100.0).floor() as i64 as u64);
@@ -3885,7 +4183,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
     /// Scenario helper (Phase 4-C test baseline): marks every living agent of
     /// `kind` dead so the species stays extinct for the rest of the run —
     /// used to build a DECO-absent control group in A/B growth comparisons.
-    pub fn kill_kind(&mut self, kind: &'static str) {
+    pub fn kill_kind(&mut self, kind: SpeciesKind) {
         for a in &mut self.agents {
             if a.alive && a.kind == kind { a.alive = false; }
         }
@@ -3931,11 +4229,11 @@ fn genome_from_save(g: save_state::SaveGenome) -> Genome {
     }
 }
 
-fn agent_to_save(a: &Agent) -> save_state::SaveAgent {
+fn agent_to_save(a: &Agent, kinds: &KindRegistry) -> save_state::SaveAgent {
     let g = &a.genome;
     save_state::SaveAgent {
         id: a.id,
-        kind: a.kind.to_string(),
+        kind: kinds.name(a.kind).to_string(),
         x: a.x, z: a.z, y: a.y,
         prev_x: a.prev_x, prev_z: a.prev_z, prev_heading: a.prev_heading,
         heading: a.heading, speed: a.speed, desired_speed: a.desired_speed,
@@ -4079,7 +4377,7 @@ impl Ecology {
             prng_state: save_state::RngSnapshot { state: self.prng.state() },
             fish_rng_state: save_state::RngSnapshot { state: self.fish_rng.state() },
             next_id: self.next_id,
-            agents: self.agents.iter().map(agent_to_save).collect(),
+            agents: self.agents.iter().map(|a| agent_to_save(a, &self.kinds)).collect(),
             carcasses: self.carcasses.iter().map(|c| save_state::SaveCarcass {
                 x: c.x, z: c.z, energy: c.energy, age: c.age,
                 occupied_by: c.occupied_by,
@@ -4227,6 +4525,11 @@ impl Ecology {
         // serde #[serde(default)] and restore legacy Phase 6 behaviour (mode=0).
         let deco_eff_choice_mode = state.DecoEffChoiceMode;
         let carcass_lock_enabled = state.CarcaseLockEnabled;
+        // Phase 31: resolve saved kind names to registry ids (v5 saves only
+        // carry the six legacy names; unknown names get conservative defs).
+        let mut kinds = KindRegistry::legacy();
+        let kind_ids: Vec<SpeciesKind> = state.agents.iter()
+            .map(|a| kinds.resolve_or_register(&a.kind)).collect();
 
         let n = state.grass.len();
         assert_eq!(state.grass_by_species.len(), GRASS_N, "grass_by_species layer count");
@@ -4250,23 +4553,17 @@ impl Ecology {
         let mut se = state.suit_eff_by_species.into_iter();
         let suit_eff_by = [se.next().unwrap(), se.next().unwrap(), se.next().unwrap()];
 
-        let mut evo_it = state.evolution.into_iter();
-        let mut fit_it = state.generation_fitness.into_iter();
-        let evolution = [
-            evo_it.next().unwrap(), evo_it.next().unwrap(), evo_it.next().unwrap(),
-            evo_it.next().unwrap(), evo_it.next().unwrap(), evo_it.next().unwrap(),
-        ].map(|hist| hist.into_iter().map(|e| EvolutionSample {
-            t: e.t, gen: e.gen, count: e.count, speed: e.speed, sense: e.sense,
-            size: e.size, metabolism: e.metabolism, bold: e.bold, curious: e.curious,
-            social: e.social, help_thr: e.help_thr,
-            deco_eff: e.DecoEffMean, deco_eff_std: e.DecoEffStd,
-        }).collect::<Vec<_>>());
-        let generation_fitness = [
-            fit_it.next().unwrap(), fit_it.next().unwrap(), fit_it.next().unwrap(),
-            fit_it.next().unwrap(), fit_it.next().unwrap(), fit_it.next().unwrap(),
-        ].map(|recs| recs.into_iter().map(|r| FitnessRecord {
-            gen: r.gen, age: r.age, offspring: r.offspring, fitness: r.fitness,
-        }).collect::<Vec<_>>());
+        let evolution: Vec<Vec<EvolutionSample>> = state.evolution.into_iter()
+            .map(|hist| hist.into_iter().map(|e| EvolutionSample {
+                t: e.t, gen: e.gen, count: e.count, speed: e.speed, sense: e.sense,
+                size: e.size, metabolism: e.metabolism, bold: e.bold, curious: e.curious,
+                social: e.social, help_thr: e.help_thr,
+                deco_eff: e.DecoEffMean, deco_eff_std: e.DecoEffStd,
+            }).collect::<Vec<_>>()).collect();
+        let generation_fitness: Vec<Vec<FitnessRecord>> = state.generation_fitness.into_iter()
+            .map(|recs| recs.into_iter().map(|r| FitnessRecord {
+                gen: r.gen, age: r.age, offspring: r.offspring, fitness: r.fitness,
+            }).collect::<Vec<_>>()).collect();
 
         let mut isolated_groups: HashMap<&'static str, IsolatedGroup> = HashMap::new();
         let mut isolated_order: Vec<&'static str> = Vec::new();
@@ -4290,7 +4587,7 @@ impl Ecology {
         let species_clades = json_clades.iter().map(|c| {
             let id = c["id"].as_u64().unwrap_or(0) as u32;
             let parent_id = c.get("parentId").and_then(|v| v.as_u64()).map(|v| v as u32);
-            let kind = c["kind"].as_str().unwrap_or(crate::ecology::DECO).to_string();
+            let kind = c["kind"].as_str().unwrap_or("deco").to_string();
             let name = c["name"].as_str().unwrap_or("").to_string();
             let birth_tick = c["birthTick"].as_u64().unwrap_or(0) as u32;
             let death_tick = c.get("deathTick").and_then(|v| v.as_u64()).map(|v| v as u32);
@@ -4438,11 +4735,11 @@ impl Ecology {
             rng: Mulberry32::from_state(state.rng_state.state),
             prng: Mulberry32::from_state(state.prng_state.state),
             fish_rng: Mulberry32::from_state(state.fish_rng_state.state),
-            agents: state.agents.into_iter().map(|a| {
+            agents: state.agents.into_iter().enumerate().map(|(i, a)| {
                 let g = a.genome;
                 Agent {
                     id: a.id,
-                    kind: save_state::intern_str(&a.kind),
+                    kind: kind_ids[i],
                     x: a.x, z: a.z, y: a.y,
                     prev_x: a.prev_x, prev_z: a.prev_z, prev_heading: a.prev_heading,
                     heading: a.heading, speed: a.speed, desired_speed: a.desired_speed,
@@ -4549,6 +4846,7 @@ impl Ecology {
             pool_acc: [0.0; 2],
             seed: state.seed,
             biome_reg,
+            kinds,
             deco_eff_choice_mode,
             carcass_lock_enabled,
         }

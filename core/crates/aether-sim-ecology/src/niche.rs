@@ -87,7 +87,7 @@ impl Ecology {
         let mut burdens: Vec<(u32, f64)> = Vec::new();
         if self.deco_eff_choice_mode == save_state::DECO_CHOICE_SELECTIVE {
             let living: Vec<(u32, f64, f64, usize)> = self.species_clades.iter()
-                .filter(|c| c.death_tick.is_none() && c.kind == DECO)
+                .filter(|c| c.death_tick.is_none() && c.kind == self.kind_name(DECO))
                 .map(|c| (c.id, c.niche_offset, c.centroid_genome.deco_efficiency, c.members.len()))
                 .collect();
             for i in 0..living.len() {
