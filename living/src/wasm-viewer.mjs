@@ -403,12 +403,24 @@ export async function bootWasmViewer(canvasId = 'stage') {
 
   // Census from the flat agent buffer directly — independent of sim_counts's
   // own scratch layout, so it works even if memory grew between calls.
+  // Phase 23: also returns per-kind hue ranges for the diversity HUD line.
+  const censusHueMin = [Infinity, Infinity, Infinity, Infinity, Infinity, Infinity];
+  const censusHueMax = [-Infinity, -Infinity, -Infinity, -Infinity, -Infinity, -Infinity];
   function censusFromFlat(n) {
     const dv = handle.views().agents;
     const c = [0, 0, 0, 0, 0, 0];
+    // Reset hue ranges each call so stale data doesn't accumulate across frames.
+    for (let k = 0; k < 6; k++) { censusHueMin[k] = Infinity; censusHueMax[k] = -Infinity; }
     for (let i = 0; i < n; i++) {
       const k = KIND_BYTE[dv.getUint8(i * AGENT_SLOT_SIZE + SLOT_KIND)];
-      if (k) c[KIND_ORDER.indexOf(k)] += 1;
+      if (!k) continue;
+      const idx = KIND_ORDER.indexOf(k);
+      c[idx] += 1;
+      const h = dv.getFloat32(i * AGENT_SLOT_SIZE + SLOT_HUE, true);
+      if (h > 0) {
+        if (h < censusHueMin[idx]) censusHueMin[idx] = h;
+        if (h > censusHueMax[idx]) censusHueMax[idx] = h;
+      }
     }
     return c;
   }
@@ -1110,6 +1122,19 @@ export async function bootWasmViewer(canvasId = 'stage') {
       fps = fpsN / Math.max(fpsAcc, 1e-6); fpsAcc = 0; fpsN = 0;
       const c = censusFromFlat(handle.readAgents());
       const hh = Math.floor(hourFor(handle.tick()));
+      // Phase 23: per-kind hue spread — shows how far each kind has drifted in
+      // visual-hue space; a wide span means morphological divergence is active.
+      let hueLine = '';
+      for (let k = 0; k < 6; k++) {
+        if (c[k] === 0) continue;
+        const lo = censusHueMin[k], hi = censusHueMax[k];
+        if (!isFinite(lo) || !isFinite(hi) || hi - lo < 0.01) continue;
+        const span = (hi - lo).toFixed(2);
+        hueLine += `${KIND_ORDER[k].slice(0, 3)}:${span} `;
+      }
+      hueLine = hueLine.trim()
+        ? `<span style="opacity:0.7">hue div: ${hueLine}</span><br>`
+        : '';
       // Phase 9: DECO 效率演化读数（相对 warmup 基线的 delta）。
       const effMean = handle.decoEffMean();
       const effStd = handle.decoEffStd();
@@ -1177,6 +1202,7 @@ export async function bootWasmViewer(canvasId = 'stage') {
         `<b>WASM SNAPSHOT v3</b> · tick ${handle.tick()} · D+${hh}h<br>` +
         `牧 ${c[0]} · 掠 ${c[1]} · 腐 ${c[2]} · 杂 ${c[3]} · 鱼 ${c[4]} · 分解 ${c[5]}<br>` +
         countLine +
+        hueLine +
         decoLine +
         cladeLine +
         catLine +
