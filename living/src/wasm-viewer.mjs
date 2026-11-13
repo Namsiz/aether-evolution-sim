@@ -163,6 +163,21 @@ function createSimHandle(instance, seed) {
     cataclysmCount() { return E.sim_cataclysm_count(sim) | 0; },
     getCataclysm(i, outPtr) { return E.sim_get_cataclysm(sim, i, outPtr) | 0; },
     envMods(outPtr) { return E.sim_env_mods(sim, outPtr) | 0; },
+    // Phase 27: geo/environment readouts
+    seaLevel() { return E.sim_sea_level ? E.sim_sea_level(sim) : 0; },
+    epochName(bufPtr, cap = 32) {
+      if (!E.sim_epoch_name) return '?';
+      const n = E.sim_epoch_name(sim, bufPtr, cap) | 0;
+      if (n === 0) return '?';
+      return new TextDecoder().decode(new Uint8Array(E.memory.buffer, bufPtr, n));
+    },
+    nutrientState(bufPtr) {
+      if (!E.sim_nutrient_state) return null;
+      const ret = E.sim_nutrient_state(sim, bufPtr) | 0;
+      if (ret !== 3) return null;
+      const dv = new DataView(E.memory.buffer, bufPtr, 24);
+      return { fast: dv.getFloat64(0, true), slow: dv.getFloat64(8, true), deposit: dv.getFloat64(16, true) };
+    },
     // Diagnostic helpers
     getBufferLen() { return E.memory.buffer.byteLength; },
     rawCountsBytes() {
@@ -342,10 +357,13 @@ export async function bootWasmViewer(canvasId = 'stage') {
   // 时跳过；memory.grow 会使旧视图失效，ensureViews() 按 byteLength 自动重建）。
   const catSupported = typeof instance.exports.sim_trigger_cataclysm === 'function';
   let catBufPtr = 0;
+  // Phase 27: separate scratch buffer for nutrient state readout
+  let envBufPtr = 0;
   if (catSupported) {
     const pagesBefore = instance.exports.memory.buffer.byteLength / 65536;
     instance.exports.memory.grow(1);
     catBufPtr = pagesBefore * 65536;
+    envBufPtr = catBufPtr + 64; // 64 bytes safety margin after cataclysm buf
   }
   const handle = createSimHandle(instance, EXPERIMENT_SEED);
   const v = handle.views();
@@ -1235,6 +1253,17 @@ export async function bootWasmViewer(canvasId = 'stage') {
         loadedLine +
         histLine +
         `mineral peak ${handle.mineralPeak().toFixed(3)} · M 热力层${mineralOn ? ' ON' : ' OFF'}<br>` +
+        // Phase 27: environmental context — epoch, sea level, nutrient state
+        (() => {
+          if (!envBufPtr) return '';
+          const epoch = handle.epochName(envBufPtr);
+          const nut = handle.nutrientState(envBufPtr + 32);
+          const sl = handle.seaLevel();
+          const nutStr = nut
+            ? `nut[${nut.fast.toFixed(2)},${nut.slow.toFixed(2)}] dep=${nut.deposit.toFixed(3)}`
+            : '';
+          return `⟠ ${epoch} · sea ${sl >= 0 ? '+' : ''}${sl.toFixed(0)}m${nutStr ? ' · ' + nutStr : ''}<br>`;
+        })() +
         `${fps.toFixed(0)} fps · mem ${(handle.getBufferLen()/1024).toFixed(0)}KB · ${paused ? 'PAUSED' : _speed_mult + '×'}` +
         pngLine;
     }
