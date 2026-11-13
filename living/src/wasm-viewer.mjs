@@ -18,6 +18,7 @@ import { createMineralHeatmapPlane, updateMineralTexture } from './renderer-mine
 import { createEvolutionHistogramOverlay, createSpectrogramOverlay, DECO_HUE_MIN, DECO_HUE_SPAN, DECO_HUE_BUCKETS, HIST_FRAME_TICKS, getTickFromFrame,
   SPECTROGRAM_HISTORY_FRAMES, SPECTROGRAM_WIDTH } from './renderer-evolution-histogram.mjs';
 import { createPhylogenyOverlay, readPhylogenyState, buildPhylogenyGraph,
+  annotatePunctuatedEquilibrium,
   CLADE_CAP, EVENT_CAP, CLADE_RECORD_SIZE, EVENT_RECORD_SIZE, CLADE_NAME_CAP,
 } from './renderer-phylogeny.mjs';
 import { createNicheOverlay, buildNicheCloud } from './renderer-niche.mjs';
@@ -509,7 +510,8 @@ export async function bootWasmViewer(canvasId = 'stage') {
 
   function renderPhylo() {
     if (!phyloOverlay) return;
-    phyloOverlay.update(buildPhylogenyGraph(phyloClades, phyloEvents, handle.tick(), { fossilHighlight: fossilOn }));
+    phyloOverlay.update(annotatePunctuatedEquilibrium(buildPhylogenyGraph(
+      phyloClades, phyloEvents, handle.tick(), { fossilHighlight: fossilOn })));
   }
 
   // Phase 16: niche 云图渲染（与 cladogram 共享同一份 clade 快照）。
