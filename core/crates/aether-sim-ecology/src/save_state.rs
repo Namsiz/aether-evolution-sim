@@ -33,11 +33,18 @@
 /// All four are `#[serde(default)]`: pre-v5 restores land on empty plates
 /// (geology_step becomes a permanent no-op) and the neutral baseline pools
 /// (fast=snow=0.5, deposit_rate=1.0) — bit-exact continuation.
+/// v5 → v6 (Phase 32): open-locus fields. `SaveAgent.ext_loci` (a variable-
+/// length Locus list; `#[serde(default)]` → pre-v6 saves restore with empty
+/// ext) plus the two sim-level `GenesisOn` / `ExtDupEvents` flags (both
+/// `#[serde(default)]` → legacy restores land on genesis OFF, zero counter).
+/// Restoring `GenesisOn` is required for the Phase 32 save/restore contract:
+/// a genesis-ON world keeps its duplication operator running after a
+/// restore, so the flag rides the schema alongside the per-agent ext list.
 
 use serde::{Deserialize, Serialize};
 
 
-pub const SAVE_STATE_VERSION: u32 = 5;
+pub const SAVE_STATE_VERSION: u32 = 6;
 pub const SAVE_STATE_SCHEMA_NAME: &str = "aether-sim-save-state";
 
 /// DECO selection-pressure mode selector (persisted in SaveState v2).
@@ -74,6 +81,20 @@ pub struct SaveGenome {
     pub hull_ratio: f64,
     #[serde(default)]
     pub limb_scale: f64,
+}
+
+/// Phase 32: one serialized open-locus slot (mirrors `ecology::Locus`).
+/// All five fields are plain scalars; a pre-v6 save that lacks the whole
+/// `ext_loci` array deserializes to an empty `Vec` via the parent's
+/// `#[serde(default)]`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct SaveLocus {
+    pub id: u32,
+    pub value: f64,
+    pub sigma: f64,
+    pub clamp_min: f64,
+    pub clamp_max: f64,
 }
 
 /// Complete agent state (superset of render-packet AgentView: full genome,
@@ -129,6 +150,10 @@ pub struct SaveAgent {
     #[serde(default)]
     pub clade_id: u32,
     pub offspring: u32,
+    /// Phase 32: open-locus slots (variable-length; `#[serde(default)]` →
+    /// pre-v6 saves restore with an empty ext list, i.e. genesis OFF).
+    #[serde(default)]
+    pub ext_loci: Vec<SaveLocus>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -505,6 +530,16 @@ pub struct SaveState {
     pub NutrientSlow: f64,
     #[serde(default)]
     pub NutrientDepositRate: f64,
+    /// Phase 32: whether the open-locus gene-duplication operator is active
+    /// in this sim. `#[serde(default)]` → pre-v6 (legacy) restores land on
+    /// genesis OFF, preserving the pre-Phase-32 bit-exact trajectory.
+    #[serde(default)]
+    pub GenesisOn: bool,
+    /// Phase 32: gene-duplication event counter (bookkeeping only — it never
+    /// feeds the trajectory or any checksum; carried so a restored sim keeps
+    /// the running count). `#[serde(default)]` → 0 on legacy saves.
+    #[serde(default)]
+    pub ExtDupEvents: u64,
 }
 
 /// Map a runtime string back to a `'static str`. Known constants are matched

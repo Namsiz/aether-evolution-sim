@@ -364,6 +364,58 @@ const SEED_LOAD: f64 = 0.05;
 const GUT_DECAY: f64 = 0.0085;
 const TRAIL_SLOTS: usize = 16;
 
+// ----- Phase 32: open loci (variable-length heritable genome) --------------
+//
+// `Locus` is one extra heritable gene beyond the pinned 17-dim core
+// phenotype (which stays bit-exact). A genome's `ext` list is unbounded:
+// loci enter via the gene-duplication operator in `mutate` (de-novo
+// genesis when empty, Ohno-style duplication otherwise) and exit via
+// deletion; `mix_genome` inherits them by id-pairing. No functional
+// semantics are assigned to a locus this phase — value/sigma/clamp are
+// carried data only, wired to behaviour in Phase 33/34.
+//
+// Determinism discipline: with `genesis_on == false` (default) the operator
+// makes zero extra RNG draws, `ext` stays empty, and every trajectory / 
+// checksum is bit-identical to pre-Phase-32. With `genesis_on == true`
+// exactly ONE extra main-stream draw (`dup_roll`) is made per mutate call,
+// independent of `ext` length — locus growth never changes the per-agent
+// mutation draw budget (§4 discipline: no "loci double → draws double").
+/// Add-roll probability mass: `dup_roll < P_DUP` triggers an add (de-novo
+/// genesis when `ext` is empty, gene-duplication of the highest-id locus
+/// when non-empty). The de-novo value is derived from the same roll
+/// (`dup_roll / P_DUP`, uniform on [0,1)) so the draw budget stays constant.
+pub const P_DUP: f64 = 0.06;
+/// Delete-roll probability mass: `P_DUP <= dup_roll < P_DUP + P_DEL` removes
+/// the highest-id locus (only when `ext` is non-empty).
+pub const P_DEL: f64 = 0.02;
+/// Per-locus expression upkeep: each ext locus multiplies the shared
+/// crowding/epistasis drain by `(1 + LOCI_UPKEEP)` — an economic (not
+/// rule) cap that raises the metabolic cost of a long genome and holds
+/// `ext` below an upper bound without a hard size limit. 0 loci ⇒ ×1.0
+/// (bit-exact no-op).
+pub const LOCI_UPKEEP: f64 = 0.002;
+/// Default mutation sigma of a de-novo locus (its future per-locus mutation
+/// step size; carried but unused this phase — reserved for Phase 33/34).
+pub const LOCUS_SIGMA: f64 = 0.05;
+/// Neutral clamp band for a de-novo locus value (semantics-free unit range).
+pub const LOCUS_CLAMP_MIN: f64 = 0.0;
+pub const LOCUS_CLAMP_MAX: f64 = 1.0;
+
+/// One extra heritable gene slot (Phase 32 open loci). See the module
+/// comment above for the determinism discipline and Phase 33/34 handoff.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Locus {
+    /// Monotonic id within the individual (0-based; a new locus = max+1).
+    pub id: u32,
+    /// Locus value (unit band; no behavioural meaning yet this phase).
+    pub value: f64,
+    /// Per-locus mutation sigma (carried data; unused until Phase 33/34).
+    pub sigma: f64,
+    /// Per-locus value clamp band.
+    pub clamp_min: f64,
+    pub clamp_max: f64,
+}
+
 #[derive(Clone, Debug)]
 pub struct Genome {
     pub speed: f64,
@@ -384,6 +436,11 @@ pub struct Genome {
     pub deco_efficiency: f64,
     pub hull_ratio: f64,
     pub limb_scale: f64,
+    /// Phase 32: open-locus extension slots. Default `Vec::new()` (the
+    /// pinned 17-dim core above is bit-exact and always present); the list
+    /// is empty whenever `genesis_on == false` and grows/decays via the
+    /// duplication operator when genesis is on.
+    pub ext: Vec<Locus>,
 }
 
 #[derive(Debug)]
@@ -799,6 +856,7 @@ impl Genome {
             help_thr: None, pref_sig: None, tol_sig: None,
             fin_color: 0.0, deco_efficiency: 1.0,
             hull_ratio: 1.0, limb_scale: 3.0,
+            ext: Vec::new(),
         }
     }
 }
@@ -912,6 +970,14 @@ pub struct Ecology {
     /// commit boundary (fast share scaled by deposit_rate; slow share
     /// unaffected). Pure bookkeeping — ecology only sees it via biochem_step.
     pub(crate) pool_acc: [f64; 2],
+    /// Phase 32: open-locus genesis operator toggle (default `false` = the
+    /// pre-Phase-32 bit-exact trajectory: zero extra RNG draws, `ext` empty).
+    /// Flip with `set_genesis`; persisted in SaveState v6 (`GenesisOn`).
+    pub genesis_on: bool,
+    /// Phase 32: count of gene-duplication events fired (de-novo genesis or
+    /// Ohno duplication of the highest-id locus). Pure bookkeeping — it never
+    /// feeds the trajectory, only observability / determinism cross-checks.
+    pub ext_dup_events: u64,
 }
 
 impl Ecology {
@@ -999,6 +1065,9 @@ impl Ecology {
             biome_reg: BiomeRegistry::default(),
             deco_eff_choice_mode: save_state::DECO_CHOICE_SELECTIVE,
             carcass_lock_enabled: true,
+            // Phase 32: open-locus genesis starts OFF (bit-exact legacy run).
+            genesis_on: false,
+            ext_dup_events: 0,
         };
         eco.init_grass();
         eco.seed_life();
@@ -1120,6 +1189,9 @@ impl Ecology {
             },
             deco_eff_choice_mode: save_state::DECO_CHOICE_SELECTIVE,
             carcass_lock_enabled: true,
+            // Phase 32: open-locus genesis starts OFF (bit-exact legacy run).
+            genesis_on: false,
+            ext_dup_events: 0,
         };
         eco.init_grass();
         eco.seed_life();
@@ -1464,6 +1536,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 fin_color: 0.0,
                 deco_efficiency: 1.0,
             hull_ratio: hr, limb_scale: ls,
+            ext: Vec::new(),
             }
             }
             GenomeTemplate::Fish => {
@@ -1483,6 +1556,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 fin_color: self.fish_rng.next_f64(),
                 deco_efficiency: 1.0,
             hull_ratio: hr, limb_scale: ls,
+            ext: Vec::new(),
             }
             }
             GenomeTemplate::Deco => {
@@ -1502,6 +1576,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 fin_color: 0.0,
                 deco_efficiency: 0.5 + self.rng.next_f64(),
             hull_ratio: hr, limb_scale: ls,
+            ext: Vec::new(),
             }
             }
             GenomeTemplate::General => {
@@ -1521,6 +1596,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 fin_color: 0.0,
                 deco_efficiency: 1.0,
             hull_ratio: hr, limb_scale: ls,
+            ext: Vec::new(),
             }
             }
         }
@@ -1557,6 +1633,57 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         if let Some(t) = g.tol_sig {
             out.tol_sig = Some((t + (self.rng.next_f64() - 0.5) * 2.0 * SIG_MUT_TOL * drift).clamp(SIG_TOL_MIN, SIG_TOL_MAX));
         }
+        // Phase 32: gene-duplication operator. When genesis is ON exactly ONE
+        // extra main-stream draw (`dup_roll`) is made here, at this fixed
+        // position after every core-locus mutation draw, INDEPENDENT of the
+        // current `ext` length (the §4 discipline: locus growth never changes
+        // the per-agent draw budget). When genesis is OFF this block is
+        // skipped entirely: zero draws, `out.ext` stays empty, and the
+        // trajectory is bit-identical to pre-Phase-32.
+        if self.genesis_on {
+            let dup_roll = self.rng.next_f64();
+            if dup_roll < P_DUP {
+                // Add. Highest-id locus = last (the list is id-sorted).
+                match out.ext.last() {
+                    Some(last) => {
+                        // Gene duplication (Ohno): copy the highest-id locus
+                        // verbatim with a fresh id = max+1. The sole legal
+                        // source of a NEW heritable slot once ext is non-empty.
+                        let new_id = last.id + 1;
+                        out.ext.push(Locus {
+                            id: new_id,
+                            value: last.value,
+                            sigma: last.sigma,
+                            clamp_min: last.clamp_min,
+                            clamp_max: last.clamp_max,
+                        });
+                    }
+                    None => {
+                        // De-novo genesis: the first locus of an empty ext.
+                        // Value derived from the same roll — `dup_roll/P_DUP`
+                        // is uniform on [0,1) whenever this branch fires — so
+                        // no second draw is needed and the budget stays
+                        // independent of ext length. This is how a brand-new
+                        // heritable trait can appear (OEE condition ①).
+                        let v = (dup_roll / P_DUP).clamp(LOCUS_CLAMP_MIN, LOCUS_CLAMP_MAX);
+                        out.ext.push(Locus {
+                            id: 0,
+                            value: v,
+                            sigma: LOCUS_SIGMA,
+                            clamp_min: LOCUS_CLAMP_MIN,
+                            clamp_max: LOCUS_CLAMP_MAX,
+                        });
+                    }
+                }
+                self.ext_dup_events += 1;
+            } else if dup_roll < P_DUP + P_DEL {
+                // Deletion: drop the highest-id locus (last). No-op on empty.
+                if !out.ext.is_empty() {
+                    out.ext.pop();
+                }
+            }
+            // else: no-op — `ext` unchanged, no further draws.
+        }
         out
     }
 
@@ -1583,11 +1710,47 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             deco_efficiency: (a.deco_efficiency + b.deco_efficiency) * 0.5,
             hull_ratio: (a.hull_ratio + b.hull_ratio) * 0.5,
             limb_scale: (a.limb_scale + b.limb_scale) * 0.5,
+            ext: Vec::new(),
         };
         if let (Some(x), Some(y)) = (a.help_thr, b.help_thr) { g.help_thr = Some((x + y) * 0.5); }
         if let (Some(x), Some(y)) = (a.pref_sig, b.pref_sig) { g.pref_sig = Some((x + y) * 0.5); }
         if let (Some(x), Some(y)) = (a.tol_sig, b.tol_sig) { g.tol_sig = Some((x + y) * 0.5); }
+        // Phase 32: id-paired ext-locus inheritance (before the duplication
+        // operator, which runs inside the mutate call below). Core-locus
+        // averaging above is unchanged.
+        g.ext = Self::mix_ext(&a.ext, &b.ext);
         self.mutate(&g, kind)
+    }
+
+    /// Phase 32: id-paired ext-locus inheritance. Over the UNION of the two
+    /// parents' ids: present in both → value/sigma/clamp averaged; present
+    /// in only one → that locus copied verbatim (the absent parent's slot is
+    /// dropped, not zero-filled). The result is id-sorted, which keeps
+    /// `ext.last()`/`ext.pop()` in the duplication operator pointing at the
+    /// highest-id locus. Deterministic: pure function of the two inputs.
+    fn mix_ext(a: &[Locus], b: &[Locus]) -> Vec<Locus> {
+        if a.is_empty() && b.is_empty() { return Vec::new(); }
+        let mut ids: Vec<u32> = a.iter().map(|l| l.id).chain(b.iter().map(|l| l.id)).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        let mut out = Vec::with_capacity(ids.len());
+        for &id in &ids {
+            let la = a.iter().find(|l| l.id == id);
+            let lb = b.iter().find(|l| l.id == id);
+            match (la, lb) {
+                (Some(x), Some(y)) => out.push(Locus {
+                    id,
+                    value: (x.value + y.value) * 0.5,
+                    sigma: (x.sigma + y.sigma) * 0.5,
+                    clamp_min: (x.clamp_min + y.clamp_min) * 0.5,
+                    clamp_max: (x.clamp_max + y.clamp_max) * 0.5,
+                }),
+                (Some(x), None) => out.push(x.clone()),
+                (None, Some(y)) => out.push(y.clone()),
+                (None, None) => {}
+            }
+        }
+        out
     }
 
     // ----- entity management ------------------------------------------------
@@ -2366,7 +2529,13 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         self.agents[idx].activity = activity;
 
         let epistasis = 1.0 + (g_speed / 8.0) * (g_size - 1.0) * 0.15 + (g_sense / 100.0) * (g_metabolism - 1.0) * 0.1;
-        let drain = g_metabolism * (0.34 + 0.62 * activity * activity + 0.12 * (g_speed / 8.0).powi(2) + 0.08 * (g_sense / 130.0)) * epistasis;
+        let mut drain = g_metabolism * (0.34 + 0.62 * activity * activity + 0.12 * (g_speed / 8.0).powi(2) + 0.08 * (g_sense / 130.0)) * epistasis;
+        // Phase 32: ext-locus expression upkeep — an ECONOMIC cap (not a
+        // rule cap). Each ext locus multiplies the shared crowding/epistasis
+        // drain by (1 + LOCI_UPKEEP): 0 loci ⇒ ×1.0 (bit-exact no-op), and
+        // as a genome's ext grows its metabolic cost rises, holding `ext`
+        // below an upper bound without a hard size limit.
+        drain *= 1.0 + (self.agents[idx].genome.ext.len() as f64) * LOCI_UPKEEP;
         let plasticity = 1.0 + if self.daylight < 0.3 { -0.06 } else { 0.0 }
             + if self.agents[idx].hydration < 0.4 { 0.04 } else { 0.0 };
         let cap_for_kind = self.kind_def(kind).global_cap as f64;
@@ -3641,6 +3810,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             help_thr: None, pref_sig: None, tol_sig: None,
             fin_color: 0.0, deco_efficiency: 0.0,
             hull_ratio: 0.0, limb_scale: 0.0,
+            ext: Vec::new(),
         };
         let mut opt_sum = [0.0f64; 3];
         let mut opt_cnt = [0usize; 3];
@@ -4198,6 +4368,49 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         }
     }
     pub fn tick_count(&self) -> u32 { self.tick_count }
+
+    /// Phase 32: enable/disable the open-locus gene-duplication operator.
+    /// `false` (default) keeps the pre-Phase-32 bit-exact trajectory (zero
+    /// extra RNG draws, `ext` always empty). `true` adds the single fixed
+    /// `dup_roll` draw per mutate call so new heritable slots can appear,
+    /// inherit, and pay an expression upkeep. Takes effect on the NEXT
+    /// `mutate` call (i.e. at the next birth / asexual split).
+    pub fn set_genesis(&mut self, on: bool) {
+        self.genesis_on = on;
+    }
+
+    /// Phase 32: total number of ext loci across all alive agents (0 when
+    /// genesis is off). Observability for the OEE emergence + upkeep-cap
+    /// acceptance tests; not part of any checksum.
+    pub fn ext_total_loci(&self) -> u32 {
+        self.agents.iter().filter(|a| a.alive)
+            .map(|a| a.genome.ext.len() as u32)
+            .sum()
+    }
+
+    /// Phase 32: fraction of alive agents carrying at least one ext locus
+    /// (0.0 when genesis is off). This is the OEE condition ① readout —
+    /// a nonzero value proves new heritable traits have appeared.
+    pub fn ext_bearer_share(&self) -> f64 {
+        let mut total = 0u32;
+        let mut bearers = 0u32;
+        for a in self.agents.iter() {
+            if !a.alive { continue; }
+            total += 1;
+            if !a.genome.ext.is_empty() { bearers += 1; }
+        }
+        if total == 0 { 0.0 } else { bearers as f64 / total as f64 }
+    }
+
+    /// Phase 32: largest `ext` length observed among alive agents right now
+    /// (0 when genesis is off). The upkeep-cap test samples this over a long
+    /// run and records the typical maximum.
+    pub fn ext_max_len(&self) -> usize {
+        self.agents.iter().filter(|a| a.alive)
+            .map(|a| a.genome.ext.len())
+            .max()
+            .unwrap_or(0)
+    }
 }
 
 // ----- Phase 6: save/restore (aether-sim-save-state v1) -----------------------
@@ -4226,6 +4439,23 @@ fn genome_from_save(g: save_state::SaveGenome) -> Genome {
         help_thr: g.help_thr, pref_sig: g.pref_sig, tol_sig: g.tol_sig,
         fin_color: g.fin_color, deco_efficiency: g.deco_efficiency,
         hull_ratio: g.hull_ratio, limb_scale: g.limb_scale,
+        ext: Vec::new(),
+    }
+}
+
+// Phase 32: open-locus slot <-> save-state roundtrip (lossless; f64 scalars
+// survive the serde_json shortest-repr hop unchanged).
+fn locus_to_save(l: &Locus) -> save_state::SaveLocus {
+    save_state::SaveLocus {
+        id: l.id, value: l.value, sigma: l.sigma,
+        clamp_min: l.clamp_min, clamp_max: l.clamp_max,
+    }
+}
+
+fn locus_from_save(l: save_state::SaveLocus) -> Locus {
+    Locus {
+        id: l.id, value: l.value, sigma: l.sigma,
+        clamp_min: l.clamp_min, clamp_max: l.clamp_max,
     }
 }
 
@@ -4255,6 +4485,7 @@ fn agent_to_save(a: &Agent, kinds: &KindRegistry) -> save_state::SaveAgent {
         lineage: a.lineage.map(|s| s.to_string()),
         clade_id: a.clade_id,
         offspring: a.offspring,
+        ext_loci: a.genome.ext.iter().map(locus_to_save).collect(),
     }
 }
 
@@ -4501,6 +4732,11 @@ impl Ecology {
             NutrientFast: self.nutrients.fast_pool,
             NutrientSlow: self.nutrients.slow_pool,
             NutrientDepositRate: self.nutrients.deposit_rate,
+            // Phase 32: open-locus operator state (genesis toggle + dup
+            // counter) rides the schema so a genesis-ON restore keeps the
+            // duplication operator running (bit-exact continuation).
+            GenesisOn: self.genesis_on,
+            ExtDupEvents: self.ext_dup_events,
         }
     }
 
@@ -4737,6 +4973,14 @@ impl Ecology {
             fish_rng: Mulberry32::from_state(state.fish_rng_state.state),
             agents: state.agents.into_iter().enumerate().map(|(i, a)| {
                 let g = a.genome;
+                // Phase 32: variable-length ext-locus list (empty on pre-v6
+                // saves via the serde default). Rebuilt in save order; the
+                // per-locus scalars roundtrip losslessly.
+                let genome = {
+                    let mut gm = genome_from_save(g);
+                    gm.ext = a.ext_loci.into_iter().map(locus_from_save).collect();
+                    gm
+                };
                 Agent {
                     id: a.id,
                     kind: kind_ids[i],
@@ -4744,7 +4988,7 @@ impl Ecology {
                     prev_x: a.prev_x, prev_z: a.prev_z, prev_heading: a.prev_heading,
                     heading: a.heading, speed: a.speed, desired_speed: a.desired_speed,
                     energy: a.energy, max_energy: a.max_energy, age: a.age,
-                    genome: genome_from_save(g),
+                    genome,
                     generation: a.generation,
                     state: save_state::intern_str(&a.state),
                     bite: a.bite, repro: a.repro,
@@ -4849,6 +5093,11 @@ impl Ecology {
             kinds,
             deco_eff_choice_mode,
             carcass_lock_enabled,
+            // Phase 32: open-locus operator state (defaults keep pre-v6
+            // restores on genesis OFF with a zero counter — bit-exact legacy
+            // continuation; a v6 genesis-ON save keeps the operator running).
+            genesis_on: state.GenesisOn,
+            ext_dup_events: state.ExtDupEvents,
         }
     }
 }

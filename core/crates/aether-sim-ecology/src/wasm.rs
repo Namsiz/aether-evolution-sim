@@ -570,7 +570,9 @@ mod sim_exports {
     #[no_mangle]
     pub unsafe extern "C" fn sim_counts(sim: *mut WasmSimCore) -> u32 {
         let core = &mut *sim;
-        const KINDS: [&str; 6] = [
+        // Phase 31: kind identity is a u16 registry id; the export order
+        // (herb=0 … deco=5) and the count semantics are unchanged.
+        const KINDS: [SpeciesKind; 6] = [
             crate::ecology::HERB,
             crate::ecology::PRED,
             crate::ecology::SCAV,
@@ -712,6 +714,23 @@ mod sim_exports {
     #[no_mangle]
     pub unsafe extern "C" fn sim_agent_count(sim: *mut WasmSimCore) -> u32 {
         (*sim).eco.agents.iter().filter(|a| a.alive).count() as u32
+    }
+    /// Phase 32: read-only observation-layer export — the single allowed
+    /// exception to the observation freeze (it serves core-mechanism
+    /// debugging of the open-locus operator, not a new observation feature).
+    /// Returns the number of ext (open-locus) slots held by the agent with the
+    /// given id, or 0 for a null handle / unknown id. Purely additive: no
+    /// existing export is removed or changed.
+    ///
+    /// # Safety
+    /// `sim` from `sim_new`.
+    #[no_mangle]
+    pub unsafe extern "C" fn sim_agent_loci(sim: *mut WasmSimCore, agent_id: u32) -> u32 {
+        if sim.is_null() { return 0; }
+        (*sim).eco.agents.iter()
+            .find(|a| a.id == agent_id)
+            .map(|a| a.genome.ext.len() as u32)
+            .unwrap_or(0)
     }
     #[no_mangle]
     pub unsafe extern "C" fn sim_deco_eff_std(sim: *mut WasmSimCore) -> f64 {

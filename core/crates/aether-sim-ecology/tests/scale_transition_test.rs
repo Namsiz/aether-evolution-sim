@@ -374,7 +374,7 @@ fn save_restore_v5_roundtrips_geology_state() {
     run_ticks(&mut eco, 0, GEO_TICKS_PER_STEP + 200);
     let json_pre = serde_json::to_string(&eco.to_save_state()).unwrap();
     let val: serde_json::Value = serde_json::from_str(&json_pre).unwrap();
-    assert_eq!(val["Version"], 5, "SaveState version must be v5");
+    assert_eq!(val["Version"], save_state::SAVE_STATE_VERSION, "SaveState version must be the current schema (v6: open loci)");
     assert!(val.get("Geology").is_some(), "v5 save must carry the Geology string");
     assert!(val.get("NutrientFast").is_some(), "v5 save must carry NutrientFast");
     assert!(val.get("NutrientSlow").is_some(), "v5 save must carry NutrientSlow");
