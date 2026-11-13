@@ -14,9 +14,11 @@
 /**
  * GLSL vertex shader injection (prepended to the Lambert vertex main).
  * After the standard `#include <begin_vertex>` block, we add:
- *   1. bob: world Y offset = sin(uTime*2 + aPhase) * 0.15 * aSwayAmp
+ *   1. bob: world Y offset = sin(uTime*2 + aPhase) * 0.30 * aSwayAmp
+ *      (doubled from 0.15 for more visible breathing motion)
  *   2. tail sway: for vertices with z < -0.3 * bodySize, X offset =
- *      sin(uTime*1.5 + aPhase + PI/3) * 0.08 * aSwayAmp
+ *      sin(uTime*1.5 + aPhase + PI/3) * 0.18 * aSwayAmp
+ *      (doubled from 0.08 for more visible undulation)
  */
 export const VERTEX_SHADER_INJECTION = /* glsl */ `
   #ifdef USE_INSTANCING
@@ -28,11 +30,11 @@ export const VERTEX_SHADER_INJECTION = /* glsl */ `
   #include <begin_vertex>
 
   #ifdef USE_INSTANCING
-    // Swim bob (all vertices)
-    transformed.y += sin(uTime * 2.0 + aPhase) * 0.15 * aSwayAmp;
-    // Tail sway (vertices in the rear half: local z < -0.3)
+    // Swim bob — doubled amplitude for visibility
+    transformed.y += sin(uTime * 2.0 + aPhase) * 0.30 * aSwayAmp;
+    // Tail sway — doubled amplitude for visibility
     if (position.z < -0.3) {
-      transformed.x += sin(uTime * 1.5 + aPhase + 3.14159265 * 0.333) * 0.08 * aSwayAmp;
+      transformed.x += sin(uTime * 1.5 + aPhase + 3.14159265 * 0.333) * 0.18 * aSwayAmp;
     }
   #endif
 `;
