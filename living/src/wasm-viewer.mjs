@@ -72,7 +72,10 @@ const SEED = 20261102;
 // alternative runs with slightly perturbed initial conditions.
 let EXPERIMENT_SEED = SEED;
 const WARMUP_TICKS = 300; // 30 sim-seconds of history so the world opens alive
-const TICKS_PER_FRAME = 2; // 12× real-time at 60 fps; sim dt is 0.1 s per tick
+const TICKS_PER_FRAME = 2; // base ticks per frame at 1x speed
+// Phase 24: simulation speed multiplier via keys [1-4]
+let _speed_mult = 2;
+const SPEED_LEVELS = [1, 2, 4, 8];
 const DAY_TICKS = 28800;   // one in-game day = 48 real minutes (matches main.js)
 const GRID_SPAN = 1080;
 
@@ -925,6 +928,13 @@ export async function bootWasmViewer(canvasId = 'stage') {
       seenDeadIds.clear();
       hudSpecRate = 0;
       toast(`实验 #${experimentNum} · seed=${EXPERIMENT_SEED + experimentNum * 7}\n  （overlay 已重置，继续观察新分化）`);
+    } else if (e.code.startsWith('Digit') && !paused) {
+      // Phase 24: Speed keys [1-4] set simulation speed multiplier.
+      const d = parseInt(e.key);
+      if (d >= 1 && d <= 4) {
+        _speed_mult = SPEED_LEVELS[d - 1];
+        toast(`Speed ${_speed_mult}×`);
+      }
     }
   });
 
@@ -1066,10 +1076,11 @@ export async function bootWasmViewer(canvasId = 'stage') {
     controls.update();
 
     if (!paused) {
-      for (let i = 0; i < TICKS_PER_FRAME; i++) {
-        v.daylight[i] = daylightFor(handle.tick() + i);
+      const spf = TICKS_PER_FRAME * _speed_mult;
+      for (let i = 0; i < spf; i++) {
+        v.daylight[i % 64] = daylightFor(handle.tick() + i);
       }
-      handle.step(TICKS_PER_FRAME, TICKS_PER_FRAME);
+      handle.step(spf, spf);
       const n = handle.readAgents();
       if (n === 0 && handle.tick() > 100) {
         console.warn('[agent-debug] readAgents()=0 at tick', handle.tick(),
@@ -1210,7 +1221,7 @@ export async function bootWasmViewer(canvasId = 'stage') {
         loadedLine +
         histLine +
         `mineral peak ${handle.mineralPeak().toFixed(3)} · M 热力层${mineralOn ? ' ON' : ' OFF'}<br>` +
-        `${fps.toFixed(0)} fps · mem ${(handle.getBufferLen()/1024).toFixed(0)}KB · ${paused ? 'PAUSED' : `${TICKS_PER_FRAME} ticks/frame`}` +
+        `${fps.toFixed(0)} fps · mem ${(handle.getBufferLen()/1024).toFixed(0)}KB · ${paused ? 'PAUSED' : _speed_mult + '×'}` +
         pngLine;
     }
   }
