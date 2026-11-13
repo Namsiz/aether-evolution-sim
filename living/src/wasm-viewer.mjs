@@ -23,6 +23,7 @@ import { createPhylogenyOverlay, readPhylogenyState, buildPhylogenyGraph,
 } from './renderer-phylogeny.mjs';
 import { createNicheOverlay, buildNicheCloud } from './renderer-niche.mjs';
 import { createPopulationChartOverlay } from './renderer-population-chart.mjs';
+import { createEventLogOverlay } from './renderer-event-log.mjs';
 import { createDustOverlay, drawCataclysmVline, drawCataclysmHline, drawCataclysmGlyph,
   formatCataclysmHud, CATACLYSM_IMPACT, CATACLYSM_CLIMATE,
 } from './renderer-cataclysm.mjs';
@@ -494,6 +495,9 @@ export async function bootWasmViewer(canvasId = 'stage') {
   // Phase 25: population trend chart — shows per-kind count over last 200 frames.
   const popChart = createPopulationChartOverlay();
   let popOn = !isMobile;
+  // Phase 30: evolution event log overlay (L key to toggle).
+  const eventLog = createEventLogOverlay();
+  let eventLogOn = false;
 
   // Phase 16: 生态位空间 overlay（U 键切换；复用 phylogeny 的 60-tick 拉取节奏）。
   const nicheOverlay = phyloSupported ? createNicheOverlay() : null;
@@ -586,6 +590,7 @@ export async function bootWasmViewer(canvasId = 'stage') {
           const ev = state.events.find((e) => e.childCladeIds.includes(c.id));
           toast(`🧬 ${c.name} born @ t=${c.birthTick}`
             + (ev ? ` · d=${ev.geneticDistance.toFixed(2)} vs parent` : ''));
+          if (eventLog) eventLog.push(c.birthTick, 'speciation', `${c.name} (d=${ev ? ev.geneticDistance.toFixed(2) : '?'})`);
         }
       }
       if (c.extinct && !seenDeadIds.has(c.id)) {
@@ -619,6 +624,7 @@ export async function bootWasmViewer(canvasId = 'stage') {
           toast(xev && xev.kind === 2
             ? `⚔ ${c.name} 竞争排斥灭绝 @ t=${c.deathTick}`
             : `⚰ ${c.name} extinct @ t=${c.deathTick}`);
+          if (eventLog) eventLog.push(c.deathTick ?? handle.tick(), 'extinction', `${c.name} @ t=${c.deathTick ?? '?'}`);
         }
       }
     }
@@ -731,6 +737,9 @@ export async function bootWasmViewer(canvasId = 'stage') {
   if (popChart) {
     popChart.setVisible(popOn);
   }
+  if (eventLog) {
+    eventLog.setVisible(eventLogOn);
+  }
   if (nicheOverlay) {
     nicheOverlay.setVisible(nicheOn);
     renderNiche();
@@ -836,6 +845,11 @@ export async function bootWasmViewer(canvasId = 'stage') {
       popChart.setVisible(popOn);
       if (popOn) popChart.render(null);
       toast(`population chart ${popOn ? 'ON' : 'OFF'}（O 切换）`);
+    } else if (e.code === 'KeyL') {
+      // Phase 30: event log overlay toggle
+      eventLogOn = !eventLogOn;
+      if (eventLog) eventLog.setVisible(eventLogOn);
+      toast(`事件日志 ${eventLogOn ? 'ON' : 'OFF'}（L 切换）`);
     } else if (e.code === 'KeyF' && phyloOverlay) {
       fossilOn = !fossilOn;
       renderPhylo();
@@ -846,6 +860,7 @@ export async function bootWasmViewer(canvasId = 'stage') {
       if (id > 0) {
         pullCataclysms(true);
         toast(`☄ 小行星撞击已注入 (#${id}) · 尘幕 600t`);
+        if (eventLog) eventLog.push(handle.tick(), 'cataclysm', `impact #${id} dust=0.9`);
       } else {
         toast('注入失败（参数无效）');
       }
@@ -855,6 +870,7 @@ export async function bootWasmViewer(canvasId = 'stage') {
       if (id > 0) {
         pullCataclysms(true);
         toast(`🌡 气候突变已注入 (#${id}) · 生长 ×0.5 · 1200t`);
+        if (eventLog) eventLog.push(handle.tick(), 'cataclysm', `climate #${id} grow=0.5`);
       } else {
         toast('注入失败（参数无效）');
       }
