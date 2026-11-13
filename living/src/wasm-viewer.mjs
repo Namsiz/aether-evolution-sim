@@ -1257,12 +1257,20 @@ export async function bootWasmViewer(canvasId = 'stage') {
         ? `<span style="opacity:0.7">hue div: ${hueLine}</span><br>`
         : '';
       // Phase 9: DECO 效率演化读数（相对 warmup 基线的 delta）。
+      // Phase 29: 选择压指示器 — 根据 mean/std 相对基线的变化推断当前选择方向。
       const effMean = handle.decoEffMean();
       const effStd = handle.decoEffStd();
+      let selPressure = '';
+      if (effMean > 0 && decoBaselineMean > 0) {
+        const dMean = effMean - decoBaselineMean;
+        const dStd = effStd - decoBaselineStd;
+        const parts = [];
+        if (Math.abs(dMean) > 0.05) parts.push(dMean > 0 ? '↑选高效' : '↓选低效');
+        if (Math.abs(dStd) > decoBaselineStd * 0.1) parts.push(dStd > 0 ? '◇ diversify' : '⬡ stabilize');
+        selPressure = parts.length > 0 ? ` [${parts.join(' ')}]` : '';
+      }
       const decoLine = effMean > 0
-        ? `DECO eff: ${effMean.toFixed(2)} ± ${effStd.toFixed(2)}`
-          + ` (${effMean >= decoBaselineMean ? '↑' : '↓'} ${(effMean - decoBaselineMean).toFixed(2)}`
-          + ` / σ${effStd <= decoBaselineStd ? '↓' : '↑'} ${Math.abs((effStd - decoBaselineStd) / Math.max(decoBaselineStd, 1e-9) * 100).toFixed(0)}%)<br>`
+        ? `DECO eff: ${effMean.toFixed(2)} ± ${effStd.toFixed(2)}${selPressure}<br>`
         : '';
       // Phase 15: 物种谱系行 —— clade 名单（≤5 个直接列名，否则计数）+ 事件数 + Phase 20 PE 信号。
       let cladeLine = '';
