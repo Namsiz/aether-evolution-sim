@@ -1324,6 +1324,14 @@ export async function bootWasmViewer(canvasId = 'stage') {
         : '';
       const agentTotal = handle.agentCount();
       const speciesTotal = c[0]+c[1]+c[2]+c[3]+c[4]+c[5];
+      // Phase 29: evolutionary activity gauge — composite of speciation rate + sel pressure signal.
+      let actGauge = '';
+      if (hudSpecRate > 0 || selPressure) {
+        const score = Math.min(100, hudSpecRate * 10 + (selPressure.includes('↑') ? 30 : selPressure.includes('↓') ? 20 : 0));
+        const color = score > 60 ? '#ff6b6b' : score > 30 ? '#ffb347' : '#8fd3ff';
+        const bar = '█'.repeat(Math.max(1, Math.round(score / 10))) + '░'.repeat(Math.max(0, 10 - Math.round(score / 10)));
+        actGauge = `<span style="color:${color};font-size:10px">evol: ${bar} ${score}</span><br>`;
+      }
       const countLine = agentTotal > 0
         ? `agent count=${agentTotal} ${speciesTotal===0 ? '· ⚠ flat=0' : ''}<br>`
         : '';
@@ -1331,6 +1339,7 @@ export async function bootWasmViewer(canvasId = 'stage') {
         `<b>WASM SNAPSHOT v3</b> · tick ${handle.tick()} · D+${hh}h<br>` +
         `牧 ${c[0]} · 掠 ${c[1]} · 腐 ${c[2]} · 杂 ${c[3]} · 鱼 ${c[4]} · 分解 ${c[5]}<br>` +
         countLine +
+        actGauge +
         hueLine +
         decoLine +
         cladeLine +
