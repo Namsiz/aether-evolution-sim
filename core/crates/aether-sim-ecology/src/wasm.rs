@@ -214,9 +214,10 @@ fn agent_view(a: &crate::ecology::Agent, kinds: &crate::ecology::KindRegistry) -
         bite: a.bite as f32,
         repro: a.repro as f32,
         cargo: {
-            let mut buf = vec![0.0f32; crate::ecology::GRASS_N];
-            let n = a.cargo.len().min(crate::ecology::GRASS_N);
-            buf[..n].copy_from_slice(&a.cargo[..n]);
+            // Phase 33: the render slot list tracks the agent's actual seed
+            // cargo (= the plant-registry length, 3 by default).
+            let mut buf = vec![0.0f32; a.cargo.len()];
+            buf.copy_from_slice(&a.cargo);
             buf
         },
         hunger,
@@ -248,7 +249,7 @@ fn snapshot_from_ref(eco: &crate::ecology::Ecology) -> Snapshot {
     // Grass/suit/moist/shade — clone from accessor slices into owned Vecs.
     let grass = eco.grass().to_vec();
     let grass_by_species: Vec<Vec<f32>> =
-        (0..crate::ecology::GRASS_N).map(|sp| eco.grass_p(sp).to_vec()).collect();
+        (0..eco.plants.len()).map(|sp| eco.grass_p(sp).to_vec()).collect();
     let suit = eco.suit().to_vec();
     let moist = eco.moist().to_vec();
     let shade = eco.shade().to_vec();

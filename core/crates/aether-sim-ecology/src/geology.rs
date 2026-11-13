@@ -25,7 +25,7 @@
 //! suit grid — only tectonic uplift/subsidence (`elevation_delta`) re-derives
 //! suitability, so a zero-velocity plate world stays bit-exact vs Phase 17.
 
-use crate::ecology::{Ecology, CELL, CATACLYSM_IMPACT, GRASS_N, GRASS_SPECIES, GRID_N, GRID_SPAN};
+use crate::ecology::{Ecology, CELL, CATACLYSM_IMPACT, GRID_N, GRID_SPAN};
 use crate::terrain::{plant_suitability, terrain_height, WATER_LEVEL};
 use aether_rng::Mulberry32;
 
@@ -384,12 +384,12 @@ impl Ecology {
         for idx in 0..(GRID_N * GRID_N) as usize {
             let s = self.suit_mut()[idx] as f64;
             if s <= 0.0 {
-                for sp in 0..GRASS_N { self.suit_eff_by_mut(sp)[idx] = 0.0; }
+                for sp in 0..self.plants.len() { self.suit_eff_by_mut(sp)[idx] = 0.0; }
                 continue;
             }
             let m = self.moist_mut()[idx] as f64;
-            for sp in 0..GRASS_N {
-                let tr = &GRASS_SPECIES[sp];
+            for sp in 0..self.plants.len() {
+                let tr = &self.plants[sp];
                 let exp_arg = -(((m - tr.moist_opt) / tr.moist_w).powi(2));
                 let eff = aether_libm::exp(exp_arg);
                 self.suit_eff_by_mut(sp)[idx] = (s * eff) as f32;

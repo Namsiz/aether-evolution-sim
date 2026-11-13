@@ -501,7 +501,7 @@ fn emit_grass_dump<W: std::io::Write>(eco: &Ecology, tick: u32, w: &mut W) -> st
     field!("moist", eco.moist());
     field!("suit", eco.suit());
     field!("shade", eco.shade());
-    for sp in 0..ecology::GRASS_N {
+    for sp in 0..eco.plants.len() {
         field!(&format!("suit_eff_by_{}", sp), eco.suit_eff_by(sp));
         field!(&format!("grass_p_{}", sp), eco.grass_p(sp));
     }

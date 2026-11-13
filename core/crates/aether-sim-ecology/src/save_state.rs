@@ -40,11 +40,17 @@
 /// Restoring `GenesisOn` is required for the Phase 32 save/restore contract:
 /// a genesis-ON world keeps its duplication operator running after a
 /// restore, so the flag rides the schema alongside the per-agent ext list.
+/// v6 → v7 (Phase 33): open plant registry + variable-length per-plant
+/// layers. `Plants` (the registered `PlantType` list; `#[serde(default)]` →
+/// pre-v7 saves restore to the three legacy entries), `TakenBuf` and
+/// `SaveHistorySample.plant_by` become `Vec` (sized to the plant count
+/// instead of the fixed `GRASS_N`), and `SaveAgent.cargo` backfills to the
+/// plant count on older saves. The default-3 world roundtrips bit-exactly.
 
 use serde::{Deserialize, Serialize};
 
 
-pub const SAVE_STATE_VERSION: u32 = 6;
+pub const SAVE_STATE_VERSION: u32 = 7;
 pub const SAVE_STATE_SCHEMA_NAME: &str = "aether-sim-save-state";
 
 /// DECO selection-pressure mode selector (persisted in SaveState v2).
@@ -95,6 +101,20 @@ pub struct SaveLocus {
     pub sigma: f64,
     pub clamp_min: f64,
     pub clamp_max: f64,
+}
+
+/// Phase 33: one serialized plant type (mirrors `ecology::PlantType`). The
+/// registered-plant list rides `SaveState.plants`; a pre-v7 save that lacks
+/// the whole list deserializes to an empty `Vec` via the parent's
+/// `#[serde(default)]` and is backfilled to the three legacy entries on load.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct SavePlant {
+    pub r_max: f64,
+    pub moist_opt: f64,
+    pub moist_w: f64,
+    pub palatability: f64,
+    pub fruiting: f64,
 }
 
 /// Complete agent state (superset of render-packet AgentView: full genome,
@@ -318,7 +338,9 @@ pub struct SaveHistorySample {
     pub scav: usize,
     pub omn: usize,
     pub plant: f64,
-    pub plant_by: [f64; 3],
+    /// Phase 33: per-plant-layer amount, sized to the plant registry instead
+    /// of the fixed `[f64; 3]` (variable-length `Vec` for v7).
+    pub plant_by: Vec<f64>,
     pub speed_h: f64,
     pub sense_h: f64,
     pub size_h: f64,
@@ -431,6 +453,12 @@ pub struct SaveState {
     pub grass: Vec<f32>,
     pub grass_by_species: Vec<Vec<f32>>,
     pub suit_eff_by_species: Vec<Vec<f32>>,
+    /// Phase 33: the registered plant list. `#[serde(default)]` → pre-v7
+    /// saves (no field) restore with an empty list, backfilled to the three
+    /// legacy entries by `from_save_state`; the per-plant layers
+    /// (`grass_by_species`/`suit_eff_by_species`) are sized to it.
+    #[serde(default)]
+    pub plants: Vec<SavePlant>,
     pub suit: Vec<f32>,
     pub shade: Vec<f32>,
     pub moist: Vec<f32>,
@@ -461,7 +489,8 @@ pub struct SaveState {
     pub generation_fitness: Vec<Vec<SaveFitnessRecord>>,
     pub history: Vec<SaveHistorySample>,
     pub last_sample: u32,
-    pub taken_buf: [f64; 3],
+    /// Phase 33: variable-length per-plant scratch buffer (was `[f64; 3]`).
+    pub taken_buf: Vec<f64>,
     pub spread_buf: Option<Vec<f32>>,
     pub h_cache: u32,
     pub season_meta: f64,

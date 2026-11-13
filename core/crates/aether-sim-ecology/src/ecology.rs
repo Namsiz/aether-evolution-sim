@@ -49,6 +49,46 @@ pub enum GenomeTemplate { Herb, Fish, Deco, General }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BehaviorTemplate { Herb, Pred, Scav, Omn, Fish, Deco }
 
+/// Phase 33: a kind's diet as data (the former C6 "who-eats-whom" hardcoded
+/// branches). Six legacy recipes are precisely expressible here; unknown /
+/// newly-registered kinds fall back to `conservative()` (eat carcass +
+/// plants, no live prey) — never a panic. `prey_kinds` order is the legacy
+/// PRED two-nearest scan order (HERB then FISH), pinned by the equivalence
+/// test; the runtime PRED prey scan itself stays on the legacy path this
+/// phase (matrix-scan is a Phase 34 re-baseline).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Diet {
+    /// Feeds on plant material (grazing / filter-feeding). `true` for the
+    /// legacy HERB/SCAV/OMN/FISH; `false` for PRED/DECO.
+    pub eats_plant: bool,
+    /// Explicit per-type whitelist (indices into `Ecology::plants`). Empty
+    /// = "all registered layers" when `eats_plant` is set; a non-empty list
+    /// restricts to those types. Legacy six use empty lists (they eat every
+    /// plant layer).
+    pub plant_types: Vec<u32>,
+    /// Feeds on carcasses (scavenging / decomposing). `true` for PRED/SCAV/
+    /// OMN/DECO; `false` for HERB/FISH.
+    pub eats_carcass: bool,
+    /// Live prey kinds this kind hunts. Legacy PRED = [HERB, FISH]; every
+    /// other legacy kind = empty.
+    pub prey_kinds: Vec<SpeciesKind>,
+}
+
+impl Diet {
+    /// Conservative unknown-kind default (spec: "only eat carcass + grass"):
+    /// grazes every plant layer, scavenges carcasses, hunts nothing. Used by
+    /// `KindDef::conservative` and any registry entry lacking a diet.
+    pub fn conservative() -> Self {
+        Diet { eats_plant: true, plant_types: Vec::new(), eats_carcass: true, prey_kinds: Vec::new() }
+    }
+}
+
+/// Phase 33: named trophic-transfer-efficiency parameter slot (~0.10
+/// magnitude). Carried as data only; it takes effect against a real energy
+/// ledger in Phase 35. Deliberately NOT wired into the drain/gain dynamics
+/// this phase, so the legacy trajectory stays bit-exact.
+pub const TROPHIC_EFF: f64 = 0.10;
+
 /// One species-role record: every constant that used to live in a
 /// `match kind { … _ => unreachable!() }` arm is data here.
 #[derive(Clone, Debug)]
@@ -75,6 +115,9 @@ pub struct KindDef {
     pub speed_clamp: (f64, f64),
     pub mutates_fin_color: bool,
     pub mutates_deco_eff: bool,
+    /// Phase 33: diet data (who this kind eats). Legacy six are populated in
+    /// `legacy_kind_defs`; unknown kinds get the conservative default.
+    pub diet: Diet,
 }
 
 impl KindDef {
@@ -100,6 +143,7 @@ impl KindDef {
             speed_clamp: (3.4, 8.6),
             mutates_fin_color: false,
             mutates_deco_eff: false,
+            diet: Diet::conservative(),
         }
     }
 }
@@ -176,6 +220,7 @@ fn legacy_kind_defs() -> Vec<KindDef> {
             speed_clamp: (2.0, 8.4),
             mutates_fin_color: false,
             mutates_deco_eff: false,
+            diet: Diet { eats_plant: true, plant_types: Vec::new(), eats_carcass: false, prey_kinds: Vec::new() },
         },
         KindDef {
             id: PRED, name: "pred",
@@ -194,6 +239,7 @@ fn legacy_kind_defs() -> Vec<KindDef> {
             speed_clamp: (3.4, 8.6),
             mutates_fin_color: false,
             mutates_deco_eff: false,
+            diet: Diet { eats_plant: false, plant_types: Vec::new(), eats_carcass: true, prey_kinds: vec![HERB, FISH] },
         },
         KindDef {
             id: SCAV, name: "scav",
@@ -212,6 +258,7 @@ fn legacy_kind_defs() -> Vec<KindDef> {
             speed_clamp: (3.4, 8.6),
             mutates_fin_color: false,
             mutates_deco_eff: false,
+            diet: Diet { eats_plant: true, plant_types: Vec::new(), eats_carcass: true, prey_kinds: Vec::new() },
         },
         KindDef {
             id: OMN, name: "omn",
@@ -230,6 +277,7 @@ fn legacy_kind_defs() -> Vec<KindDef> {
             speed_clamp: (3.4, 8.6),
             mutates_fin_color: false,
             mutates_deco_eff: false,
+            diet: Diet { eats_plant: true, plant_types: Vec::new(), eats_carcass: true, prey_kinds: Vec::new() },
         },
         KindDef {
             id: FISH, name: "fish",
@@ -248,6 +296,7 @@ fn legacy_kind_defs() -> Vec<KindDef> {
             speed_clamp: (1.8, 6.8),
             mutates_fin_color: true,
             mutates_deco_eff: false,
+            diet: Diet { eats_plant: true, plant_types: Vec::new(), eats_carcass: false, prey_kinds: Vec::new() },
         },
         KindDef {
             id: DECO, name: "deco",
@@ -266,6 +315,7 @@ fn legacy_kind_defs() -> Vec<KindDef> {
             speed_clamp: (3.4, 8.6),
             mutates_fin_color: false,
             mutates_deco_eff: true,
+            diet: Diet { eats_plant: false, plant_types: Vec::new(), eats_carcass: true, prey_kinds: Vec::new() },
         },
     ]
 }
@@ -337,28 +387,42 @@ const SIG_TOL_MAX: f64 = 0.25;
 const SIG_TOL_MIN: f64 = 0.05;
 const SIG_PREF_INIT: f64 = 1.03;
 
-#[derive(Clone, Debug)]
-pub struct GrassSpecies {
+/// One registered plant type (Phase 33: the open production layer). The
+/// default world carries the three legacy entries, field-for-field identical
+/// to the former `GRASS_SPECIES` table; `Ecology::register_plant` appends
+/// new types. Registered types only ever ADD a whole extra layer, so they
+/// never perturb the bit-exact legacy-3 trajectory (no re-baseline needed
+/// for the default world).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct PlantType {
     pub r_max: f64,
     pub moist_opt: f64,
     pub moist_w: f64,
     pub palatability: f64,
     pub fruiting: f64,
 }
+// Backward-compatible alias (the struct was `GrassSpecies` through Phase 32).
+pub type GrassSpecies = PlantType;
 
-pub static GRASS_SPECIES: [GrassSpecies; 3] = [
-    GrassSpecies { r_max: 1.4, moist_opt: 0.38, moist_w: 0.18, palatability: 1.3, fruiting: 0.12 },
-    GrassSpecies { r_max: 1.2, moist_opt: 0.05, moist_w: 0.16, palatability: 0.5, fruiting: 0.0 },
-    GrassSpecies { r_max: 1.2, moist_opt: 0.18, moist_w: 0.36, palatability: 0.85, fruiting: 0.06 },
+/// The three default plant types — bit-identical to the former
+/// `GRASS_SPECIES: [GrassSpecies; 3]` (same literal fields, same order).
+pub const LEGACY_PLANTS: [PlantType; 3] = [
+    PlantType { r_max: 1.4, moist_opt: 0.38, moist_w: 0.18, palatability: 1.3, fruiting: 0.12 },
+    PlantType { r_max: 1.2, moist_opt: 0.05, moist_w: 0.16, palatability: 0.5, fruiting: 0.0 },
+    PlantType { r_max: 1.2, moist_opt: 0.18, moist_w: 0.36, palatability: 0.85, fruiting: 0.06 },
 ];
+/// Default (legacy) plant-layer count. The engine organizes itself by the
+/// registry length (`Ecology::plants`, 3 in the default world); this constant
+/// stays as the legacy 3-layer reference and the v6→v7 save backfill target.
 pub const GRASS_N: usize = 3;
 
 const FRUIT_COST: f64 = 0.5;
-static RMAX_EFF: [f64; GRASS_N] = [
-    1.4 * (1.0 - 0.12 * FRUIT_COST),
-    1.2 * (1.0 - 0.0 * FRUIT_COST),
-    1.2 * (1.0 - 0.06 * FRUIT_COST),
-];
+/// Phase 33: per-plant effective r_max = `r_max * (1 - fruiting * FRUIT_COST)`
+/// — the runtime replacement for the former compile-time `RMAX_EFF` table.
+/// For the three legacy entries it reproduces that table bit-exactly (the
+/// operands are the same f64 literals in the same expression order).
+pub fn rmax_eff(p: &PlantType) -> f64 { p.r_max * (1.0 - p.fruiting * FRUIT_COST) }
 const FRUIT_ENERGY: f64 = 0.5;
 const SEED_LOAD: f64 = 0.05;
 const GUT_DECAY: f64 = 0.0085;
@@ -549,7 +613,7 @@ pub struct HistorySample {
     pub scav: usize,
     pub omn: usize,
     pub plant: f64,
-    pub plant_by: [f64; GRASS_N],
+    pub plant_by: Vec<f64>,
     pub speed_h: f64,
     pub sense_h: f64,
     pub size_h: f64,
@@ -803,7 +867,7 @@ pub struct Stats {
     pub season: i32,
     pub h: usize, pub p: usize, pub scav: usize, pub omn: usize,
     pub plant: f64,
-    pub plant_by: [f64; GRASS_N],
+    pub plant_by: Vec<f64>,
     pub speed_h: f64, pub sense_h: f64, pub size_h: f64,
     pub speed_p: f64, pub sense_p: f64,
     pub gap_hp: f64, pub coop_share_h: f64, pub help_thr_h: f64,
@@ -881,8 +945,16 @@ pub struct Ecology {
     // Phase 17: cataclysm.rs mutates the resource fields directly (impact
     // blast); the public accessors remain authoritative for reads.
     pub(crate) grass: Vec<f32>,
-    pub(crate) grass_p: [Vec<f32>; GRASS_N],
-    suit_eff_by: [Vec<f32>; GRASS_N],
+    pub(crate) grass_p: Vec<Vec<f32>>,
+    suit_eff_by: Vec<Vec<f32>>,
+    /// Phase 33: plant registry (open production layer). Default = the three
+    /// legacy entries (`LEGACY_PLANTS.to_vec()`); `register_plant` appends a
+    /// new layer. Every per-species layer (`grass_p`/`suit_eff_by`/
+    /// `Agent.cargo`/`taken_buf`) is organized by `plants.len()`; at the
+    /// default length 3 the numeric path is bit-identical to the former
+    /// fixed `GRASS_N` engine. `pub(crate)` so `geology`/`cataclysm` can
+    /// read the per-plant constants (r_max/moist_opt/moist_w).
+    pub(crate) plants: Vec<PlantType>,
     suit: Vec<f32>,
     shade: Vec<f32>,
     moist: Vec<f32>,
@@ -920,7 +992,7 @@ pub struct Ecology {
     generation_fitness: Vec<Vec<FitnessRecord>>,
     /// Phase 31: species registry — kind identity as runtime data.
     pub kinds: KindRegistry,
-    taken_buf: [f64; GRASS_N],
+    taken_buf: Vec<f64>,
     spread_buf: Option<Vec<f32>>,
     h_cache: u32,
     season_meta: f64,
@@ -986,6 +1058,10 @@ impl Ecology {
         let kinds = KindRegistry::legacy();
         let evolution: Vec<Vec<EvolutionSample>> = (0..kinds.len()).map(|_| Vec::new()).collect();
         let generation_fitness: Vec<Vec<FitnessRecord>> = (0..kinds.len()).map(|_| Vec::new()).collect();
+        // Phase 33: plant registry default = the three legacy entries; the
+        // per-species layers are all sized to `plants.len()` (3 by default).
+        let plants = LEGACY_PLANTS.to_vec();
+        let pn = plants.len();
         let mut eco = Ecology {
             rng: Mulberry32::new(seed),
             prng: Mulberry32::new(seed.wrapping_add(101)),
@@ -1001,8 +1077,9 @@ impl Ecology {
             torch: None,
             rain: 0.0,
             grass: vec![0.0; n],
-            grass_p: [vec![0.0; n], vec![0.0; n], vec![0.0; n]],
-            suit_eff_by: [vec![0.0; n], vec![0.0; n], vec![0.0; n]],
+            grass_p: (0..pn).map(|_| vec![0.0f32; n]).collect(),
+            suit_eff_by: (0..pn).map(|_| vec![0.0f32; n]).collect(),
+            plants,
             suit: vec![0.0; n],
             shade: vec![0.0; n],
             moist: vec![0.0; n],
@@ -1052,7 +1129,7 @@ impl Ecology {
             evolution,
             generation_fitness,
             kinds,
-            taken_buf: [0.0; GRASS_N],
+            taken_buf: vec![0.0f64; pn],
             spread_buf: None,
             h_cache: 0,
             season_meta: 1.0,
@@ -1082,6 +1159,10 @@ impl Ecology {
         let kinds = KindRegistry::legacy();
         let evolution: Vec<Vec<EvolutionSample>> = (0..kinds.len()).map(|_| Vec::new()).collect();
         let generation_fitness: Vec<Vec<FitnessRecord>> = (0..kinds.len()).map(|_| Vec::new()).collect();
+        // Phase 33: plant registry default = the three legacy entries; the
+        // per-species layers are all sized to `plants.len()` (3 by default).
+        let plants = LEGACY_PLANTS.to_vec();
+        let pn = plants.len();
         let mut eco = Ecology {
             rng: Mulberry32::new(seed),
             prng: Mulberry32::new(seed.wrapping_add(101)),
@@ -1097,8 +1178,9 @@ impl Ecology {
             torch: None,
             rain: 0.0,
             grass: vec![0.0; n],
-            grass_p: [vec![0.0; n], vec![0.0; n], vec![0.0; n]],
-            suit_eff_by: [vec![0.0; n], vec![0.0; n], vec![0.0; n]],
+            grass_p: (0..pn).map(|_| vec![0.0f32; n]).collect(),
+            suit_eff_by: (0..pn).map(|_| vec![0.0f32; n]).collect(),
+            plants,
             suit: vec![0.0; n],
             shade: vec![0.0; n],
             moist: vec![0.0; n],
@@ -1148,7 +1230,7 @@ impl Ecology {
             evolution,
             generation_fitness,
             kinds,
-            taken_buf: [0.0; GRASS_N],
+            taken_buf: vec![0.0f64; pn],
             spread_buf: None,
             h_cache: 0,
             season_meta: 1.0,
@@ -1213,6 +1295,54 @@ impl Ecology {
         while self.evolution.len() <= id as usize { self.evolution.push(Vec::new()); }
         while self.generation_fitness.len() <= id as usize { self.generation_fitness.push(Vec::new()); }
         id
+    }
+
+    // ----- plant registry (Phase 33) -------------------------------------
+
+    /// Number of registered plant types (drives every per-plant layer; 3 by
+    /// default).
+    pub fn plant_count(&self) -> usize { self.plants.len() }
+
+    /// Registered plant types, in registration order.
+    pub fn plants(&self) -> &[PlantType] { &self.plants }
+
+    /// A kind's diet data (Phase 33). Unknown ids read the PRED definition
+    /// (the registry contract), whose diet is the conservative default —
+    /// never a panic.
+    pub fn diet_of(&self, id: SpeciesKind) -> &Diet { &self.kind_def(id).diet }
+
+    /// Register a new plant type (Phase 33: the open production layer).
+    /// Appends a whole extra layer to every per-plant structure and pads all
+    /// live agents' seed cargo with a zero slot. The new layer's
+    /// suitability is derived from the current `suit`/`moist` (the
+    /// `init_grass` formula) so the type can actually grow; its grass
+    /// starts at 0 and fills in via the logistic growth loop.
+    ///
+    /// This is a NEW era: it adds a layer to the default trajectory, so it
+    /// must run *after* the golden anchors are captured; on the default-3
+    /// world (no registration) the numeric path stays bit-exact. Returns the
+    /// new plant's index.
+    pub fn register_plant(&mut self, p: PlantType) -> u32 {
+        let idx = self.plants.len();
+        let n = self.grass.len();
+        // Suitability of the new layer from the current suit/moist (the
+        // init_grass formula) so the new plant can grow.
+        let mut eff = vec![0.0f32; n];
+        for i in 0..n {
+            let s = self.suit[i] as f64;
+            if s <= 0.0 { continue; }
+            let m = self.moist[i] as f64;
+            let exp_arg = -(((m - p.moist_opt) / p.moist_w).powi(2));
+            eff[i] = (s * aether_libm::exp(exp_arg)) as f32;
+        }
+        self.plants.push(p);
+        self.grass_p.push(vec![0.0f32; n]);
+        self.suit_eff_by.push(eff);
+        self.taken_buf.push(0.0);
+        for a in &mut self.agents {
+            if a.cargo.len() < idx + 1 { a.cargo.resize(idx + 1, 0.0); }
+        }
+        idx as u32
     }
 
     // ----- Phase 31 Part B: spatial index (feature-gated, zero default cost) --
@@ -1344,6 +1474,7 @@ impl Ecology {
             d += 1;
         }
         // Initial grass allocation: total split by rMax x moisture suitability
+        let pn = self.plants.len();
         for j in 0..GRID_N as usize {
             for i in 0..GRID_N as usize {
                 let x = -half + (i as f64 + 0.5) * CELL;
@@ -1354,14 +1485,14 @@ impl Ecology {
                 let patch = 0.55 + 0.45 * aether_libm::sin(x * 0.031 + z * 0.017) * aether_libm::sin(z * 0.023 - x * 0.011);
                 let total_init = (suit as f64) * (patch * 0.88 + self.rng.next_f64() * 0.18).clamp(0.0, 1.0);
                 let mut wsum = 0.0f64;
-                for s in 0..GRASS_N {
-                    let tr = &GRASS_SPECIES[s];
+                for s in 0..pn {
+                    let tr = &self.plants[s];
                     let exp_arg = -(((self.moist[idx] as f64 - tr.moist_opt) / tr.moist_w).powi(2));
                     wsum += tr.r_max * aether_libm::exp(exp_arg);
                 }
                 if wsum <= 0.0 { wsum = 1.0; }
-                for s in 0..GRASS_N {
-                    let tr = &GRASS_SPECIES[s];
+                for s in 0..pn {
+                    let tr = &self.plants[s];
                     let exp_arg = -(((self.moist[idx] as f64 - tr.moist_opt) / tr.moist_w).powi(2));
                     let eff = aether_libm::exp(exp_arg);
                     self.suit_eff_by[s][idx] = ((suit as f64) * eff) as f32;
@@ -1811,7 +1942,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             alive: true,
             activity: 0.5,
             hydration: 1.0,
-            cargo: vec![0.0f32; GRASS_N],
+            cargo: vec![0.0f32; self.plants.len()],
             trail_t: vec![0.0; TRAIL_SLOTS],
             trail_x: vec![0.0; TRAIL_SLOTS],
             trail_z: vec![0.0; TRAIL_SLOTS],
@@ -1958,18 +2089,19 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
     fn take_grass(&mut self, a_idx: usize, ci: usize, want: f64) -> f64 {
         let take = want.min(self.grass[ci] as f64);
         if take <= 0.0 { return 0.0; }
+        let pn = self.plants.len();
         let mut wsum = 0.0f64;
-        let mut w = [0.0f64; GRASS_N];
-        for s in 0..GRASS_N {
-            w[s] = self.grass_p[s][ci] as f64 * GRASS_SPECIES[s].palatability;
+        let mut w = vec![0.0f64; pn];
+        for s in 0..pn {
+            w[s] = self.grass_p[s][ci] as f64 * self.plants[s].palatability;
             wsum += w[s];
         }
         if wsum <= 0.0 { return 0.0; }
         self.taken_buf.fill(0.0);
         let mut actual = 0.0f64;
         let mut remaining = take;
-        let mut open: Vec<usize> = (0..GRASS_N).collect();
-        for _round in 0..GRASS_N {
+        let mut open: Vec<usize> = (0..pn).collect();
+        for _round in 0..pn {
             if remaining <= 1e-9 || open.is_empty() { break; }
             let wsum_open: f64 = open.iter().map(|&s| w[s]).sum();
             if wsum_open <= 0.0 { break; }
@@ -1991,8 +2123,8 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         self.grass[ci] = ((self.grass[ci] as f64) - actual) as f32;
         // fruiting path — kept for checksum parity even though Phase 2 excludes fruiting behavior
         let mut fruit = 0.0f64;
-        for s in 0..GRASS_N {
-            let f = self.taken_buf[s] * GRASS_SPECIES[s].fruiting;
+        for s in 0..pn {
+            let f = self.taken_buf[s] * self.plants[s].fruiting;
             if f <= 0.0 { continue; }
             fruit += f;
             if self.agents[a_idx].cargo.len() > s {
@@ -2126,13 +2258,14 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
     fn gut_transit(&mut self, idx: usize, dt: f64) {
         let agent_cargo = self.agents[idx].cargo.clone();
         if agent_cargo.is_empty() { return; }
+        let pn = self.plants.len();
         let keep = aether_libm::exp(-GUT_DECAY * dt);
         let ci = self.cell_index(self.agents[idx].x, self.agents[idx].z);
         let ok = ci >= 0 && (ci as usize) < self.suit.len() && self.suit[ci as usize] > 0.02;
         let st = &mut self.deposit_stats;
         let mut deposited = false;
         let mut new_cargo = agent_cargo.clone();
-        for s in 0..GRASS_N {
+        for s in 0..pn {
             let c = agent_cargo[s] as f64;
             if c <= 1e-12 { continue; }
             let out = c * (1.0 - keep);
@@ -2177,7 +2310,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         if deposited && ci >= 0 {
             let idx_ci = ci as usize;
             let mut gsum = 0.0f64;
-            for s in 0..GRASS_N { gsum += self.grass_p[s][idx_ci] as f64; }
+            for s in 0..pn { gsum += self.grass_p[s][idx_ci] as f64; }
             self.grass[idx_ci] = gsum as f32;
         }
     }
@@ -2386,6 +2519,11 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
 
     fn update_herb(&mut self, idx: usize, h: f64) {
         let kind = self.agents[idx].kind;
+        // Phase 33: diet gate — HERB feeds on plants (eats_plant = true). Read
+        // from the registry so a future registered herb-kind with a different
+        // diet behaves correctly; for the legacy six it is a guaranteed-true
+        // no-op (bit-exact).
+        let herb_eats_plant = self.diet_of(kind).eats_plant;
         self.agents[idx].age += h;
         let g_speed = self.agents[idx].genome.speed;
         let g_sense = self.agents[idx].genome.sense;
@@ -2548,7 +2686,8 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         self.agents[idx].energy -= total_drain;
 
         let ci_val = self.cell_index(self.agents[idx].x, self.agents[idx].z);
-        if ci_val >= 0 && (ci_val as usize) < self.grass.len() && (self.grass[ci_val as usize] as f64) > 0.1
+        if herb_eats_plant
+            && ci_val >= 0 && (ci_val as usize) < self.grass.len() && (self.grass[ci_val as usize] as f64) > 0.1
             && self.agents[idx].bite <= 0.0 && self.agents[idx].speed < g_speed * 0.45 {
             let helped = self.try_help(idx, ci_val as usize);
             if !helped {
@@ -2583,6 +2722,14 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
     // ----- predator behaviour -----------------------------------------------
 
     fn update_pred(&mut self, idx: usize, h: f64) {
+        let p_kind = self.agents[idx].kind;
+        // Phase 33: diet gates — PRED hunts live prey (prey_kinds = [HERB,
+        // FISH], the legacy two-nearest scan order) and scavenges carcasses.
+        // Both read from the registry; for the legacy PRED they are true
+        // (bit-exact), and the prey scan itself stays on the legacy path this
+        // phase (a data-driven matrix scan is a Phase 34 re-baseline).
+        let pred_has_prey = !self.diet_of(p_kind).prey_kinds.is_empty();
+        let pred_eats_carcass = self.diet_of(p_kind).eats_carcass;
         self.agents[idx].age += h;
         let g_speed = self.agents[idx].genome.speed;
         let g_sense = self.agents[idx].genome.sense;
@@ -2606,7 +2753,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             // We pick the nearest prey of either kind, but fish in water are
             // reachable only from shallow water (predator stays on land edge).
             let mut prey_opt: Option<(usize, f64)> = None;
-            if hungry {
+            if hungry && pred_has_prey {
                 let my_x = self.agents[idx].x;
                 let my_z = self.agents[idx].z;
                 let my_ground = terrain_height(my_x, my_z);
@@ -2631,14 +2778,16 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 }
             }
             let mut best_carcass: Option<usize> = None;
-            let mut bd = (g_sense * 1.2).powi(2);
-            let ax = self.agents[idx].x;
-            let az = self.agents[idx].z;
-            for (j, c) in self.carcasses.iter().enumerate() {
-                let dx = c.x - ax;
-                let dz = c.z - az;
-                let d2 = dx * dx + dz * dz;
-                if d2 < bd { bd = d2; best_carcass = Some(j); }
+            if pred_eats_carcass {
+                let mut bd = (g_sense * 1.2).powi(2);
+                let ax = self.agents[idx].x;
+                let az = self.agents[idx].z;
+                for (j, c) in self.carcasses.iter().enumerate() {
+                    let dx = c.x - ax;
+                    let dz = c.z - az;
+                    let d2 = dx * dx + dz * dz;
+                    if d2 < bd { bd = d2; best_carcass = Some(j); }
+                }
             }
             if let Some(bc) = best_carcass {
                 self.agents[idx].target_x = self.carcasses[bc].x;
@@ -2778,6 +2927,11 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
     // ----- scavenger / omnivore behaviour ------------------------------------
 
     fn update_scav(&mut self, idx: usize, h: f64) {
+        let s_kind = self.agents[idx].kind;
+        // Phase 33: diet gates — SCAV scavenges carcasses and grazes grass
+        // (eats_carcass / eats_plant both true for the legacy kind, bit-exact;
+        // read from the registry so a registered variant can drop a source).
+        let scav_eats_carcass = self.diet_of(s_kind).eats_carcass;
         self.agents[idx].age += h;
         let g_speed = self.agents[idx].genome.speed;
         let g_sense = self.agents[idx].genome.sense;
@@ -2845,10 +2999,12 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
 
         // Scavenge carcass if close (Phase 8: skip carcasses locked by another agent)
         let self_id = self.agents[idx].id;
-        let ci = self.carcasses.iter().position(|c|
-            js_hypot(c.x - self.agents[idx].x, c.z - self.agents[idx].z) < 1.8
-            && c.energy > 0.2
-            && self.carcass_claimable(c, self_id));
+        let ci = if scav_eats_carcass {
+            self.carcasses.iter().position(|c|
+                js_hypot(c.x - self.agents[idx].x, c.z - self.agents[idx].z) < 1.8
+                && c.energy > 0.2
+                && self.carcass_claimable(c, self_id))
+        } else { None };
         if let Some(ci) = ci {
             if self.agents[idx].bite <= 0.0 {
                 let take = 4.0f64.min(self.carcasses[ci].energy);
@@ -2879,6 +3035,10 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
     }
 
     fn update_omn(&mut self, idx: usize, h: f64) {
+        let o_kind = self.agents[idx].kind;
+        // Phase 33: diet gate — OMN scavenges carcasses (eats_carcass = true
+        // for the legacy kind, bit-exact; a registered variant can drop it).
+        let omn_eats_carcass = self.diet_of(o_kind).eats_carcass;
         self.agents[idx].age += h;
         let g_speed = self.agents[idx].genome.speed;
         let g_sense = self.agents[idx].genome.sense;
@@ -2959,7 +3119,9 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         self.agents[idx].z += aether_libm::cos(self.agents[idx].heading) * self.agents[idx].speed * h;
         self.agents[idx].y = terrain_height(self.agents[idx].x, self.agents[idx].z);
 
-        let ci = self.carcasses.iter().position(|c| js_hypot(c.x - self.agents[idx].x, c.z - self.agents[idx].z) < 1.8 && c.energy > 0.2);
+        let ci = if omn_eats_carcass {
+            self.carcasses.iter().position(|c| js_hypot(c.x - self.agents[idx].x, c.z - self.agents[idx].z) < 1.8 && c.energy > 0.2)
+        } else { None };
         if let Some(ci) = ci {
             if self.agents[idx].bite <= 0.0 {
                 let take = 3.0f64.min(self.carcasses[ci].energy);
@@ -2986,6 +3148,10 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
     // ----- fish behaviour (Phase 4-B) ---------------------------------------
 
     fn update_fish(&mut self, idx: usize, h: f64) {
+        let f_kind = self.agents[idx].kind;
+        // Phase 33: diet gate — FISH grazes aquatic plants (eats_plant = true
+        // for the legacy kind, bit-exact; a registered variant can drop it).
+        let fish_eats_plant = self.diet_of(f_kind).eats_plant;
         self.agents[idx].age += h;
         let g_speed = self.agents[idx].genome.speed;
         let g_sense = self.agents[idx].genome.sense;
@@ -3092,7 +3258,11 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         self.agents[idx].activity = activity;
 
         let epistasis = 1.0 + (g_speed / 8.0) * (g_size - 1.0) * 0.15 + (g_sense / 100.0) * (g_metabolism - 1.0) * 0.1;
-        let drain = g_metabolism * (0.12 + 0.25 * activity) * epistasis;
+        let mut drain = g_metabolism * (0.12 + 0.25 * activity) * epistasis;
+        // Phase 33: ext-locus expression upkeep (matches update_herb). No-op
+        // when `ext` is empty (the default genesis-OFF world, ×1.0 bit-exact);
+        // only takes effect when genesis is ON and loci are present.
+        drain *= 1.0 + (self.agents[idx].genome.ext.len() as f64) * LOCI_UPKEEP;
         let cap_for_kind = MAX_FISH as f64;
         let local_crowd = self.count(FISH) as f64 / cap_for_kind;
         let crowd_penalty = if local_crowd > 0.4 { 1.0 + (local_crowd - 0.4) * 0.5 } else { 1.0 };
@@ -3128,7 +3298,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 None => in_water,
             };
             let want = if in_aquatic { 0.12 * 1.5 } else { 0.0 };
-            if want > 0.0 && gi >= 0 && (gi as usize) < self.grass.len() && (self.grass[gi as usize] as f64) > 0.1 {
+            if fish_eats_plant && want > 0.0 && gi >= 0 && (gi as usize) < self.grass.len() && (self.grass[gi as usize] as f64) > 0.1 {
                 let take = self.take_grass(idx, gi as usize, want);
                 self.agents[idx].energy = (self.agents[idx].energy + take * 62.0 * 1.5).min(self.agents[idx].max_energy);
                 self.agents[idx].bite = FISH_BITE_INTERVAL;
@@ -3158,6 +3328,10 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         // Phase 16: the agent's clade niche modulates foraging direction and
         // mineral-deposit bias below (0.0 for root / unassigned agents).
         let clade_niche = self.clade_niche_of(self.agents[idx].clade_id);
+        // Phase 33: diet gate — DECO is a carcass-only decomposer
+        // (eats_carcass = true for the legacy kind, bit-exact; a registered
+        // variant can drop the source and fall back to wander).
+        let deco_eats_carcass = self.diet_of(self.agents[idx].kind).eats_carcass;
         self.agents[idx].bite -= h;
         self.agents[idx].repro -= h;
         self.agents[idx].think -= h;
@@ -3176,13 +3350,15 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             let ax = self.agents[idx].x;
             let az = self.agents[idx].z;
             let self_id = self.agents[idx].id;
-            for (j, c) in self.carcasses.iter().enumerate() {
-                // Phase 8: skip carcasses whose occupancy lock is held by another agent.
-                if !self.carcass_claimable(c, self_id) { continue; }
-                let dx = c.x - ax;
-                let dz = c.z - az;
-                let d2 = dx * dx + dz * dz;
-                if d2 < bd { bd = d2; best = Some(j); }
+            if deco_eats_carcass {
+                for (j, c) in self.carcasses.iter().enumerate() {
+                    // Phase 8: skip carcasses whose occupancy lock is held by another agent.
+                    if !self.carcass_claimable(c, self_id) { continue; }
+                    let dx = c.x - ax;
+                    let dz = c.z - az;
+                    let d2 = dx * dx + dz * dz;
+                    if d2 < bd { bd = d2; best = Some(j); }
+                }
             }
             if let Some(b) = best {
                 self.agents[idx].target_x = self.carcasses[b].x;
@@ -3345,7 +3521,12 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         // Phase 17: impact-dust metabolic stress also hits DECO (its drain
         // path uses its own season table, bypassing self.season_meta).
         let cat_stress = 1.0 + self.cataclysm_stress_scale();
-        let total_drain = g_metabolism * (0.12 + 0.25 * activity) * crowd_penalty * season_meta_deco * h * eff_metab_mod * (1.0 + niche_burden) * cat_stress;
+        let mut drain = g_metabolism * (0.12 + 0.25 * activity);
+        // Phase 33: ext-locus expression upkeep (matches update_herb). No-op
+        // when `ext` is empty (default genesis-OFF world, ×1.0 bit-exact);
+        // only takes effect when genesis is ON and loci are present.
+        drain *= 1.0 + (self.agents[idx].genome.ext.len() as f64) * LOCI_UPKEEP;
+        let total_drain = drain * crowd_penalty * season_meta_deco * h * eff_metab_mod * (1.0 + niche_burden) * cat_stress;
         self.agents[idx].energy -= total_drain;
 
         if self.agents[idx].energy <= 0.0 {
@@ -3396,29 +3577,30 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             // 增长的 baseline rate", centered on FAST_BASELINE so existing
             // calibration absorbs the multiplier naturally).
             let fert_mult = self.biochem_growth_mult();
+            let pn = self.plants.len();
             for i in 0..self.grass.len() {
                 let suit = self.suit[i];
                 if suit <= 0.02 { continue; }
                 let mut total = 0.0f64;
-                for s in 0..GRASS_N { total += self.grass_p[s][i] as f64; }
+                for s in 0..pn { total += self.grass_p[s][i] as f64; }
                 if total >= 1.0 { continue; }
                 let shade_f = 1.0 - self.shade[i] as f64 * 0.55;
                 let cell_grow = grow * (1.0 + self.mineral_field[i] as f64 * GROWTH_BONUS_PER_MINERAL)
                     * fert_mult;
-                for sp in 0..GRASS_N {
+                for sp in 0..pn {
                     let b = self.grass_p[sp][i] as f64;
-                    let nb = b + self.suit_eff_by[sp][i] as f64 * cell_grow * RMAX_EFF[sp] * (1.0 - total) * (0.42 + b) * shade_f * h;
+                    let nb = b + self.suit_eff_by[sp][i] as f64 * cell_grow * rmax_eff(&self.plants[sp]) * (1.0 - total) * (0.42 + b) * shade_f * h;
                     self.grass_p[sp][i] = if nb > 1.0 { 1.0 } else { nb } as f32;
                 }
                 let mut gsum = 0.0f64;
-                for s in 0..GRASS_N { gsum += self.grass_p[s][i] as f64; }
+                for s in 0..pn { gsum += self.grass_p[s][i] as f64; }
                 self.grass[i] = gsum as f32;
             }
 
             // Grass spread (Phase 2: kept for checksum parity)
             if self.tick_count % 40 == 0 {
                 let mut buf = self.spread_buf.take().unwrap_or_else(|| vec![0.0f32; self.grass.len()]);
-                for sp in 0..GRASS_N {
+                for sp in 0..pn {
                     buf.copy_from_slice(&self.grass_p[sp]);
                     for j in 1..(GRID_N as usize) - 1 {
                         for i in 1..(GRID_N as usize) - 1 {
@@ -3437,7 +3619,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 }
                 for i in 0..self.grass.len() {
                     let mut gsum = 0.0f64;
-                    for s in 0..GRASS_N { gsum += self.grass_p[s][i] as f64; }
+                    for s in 0..pn { gsum += self.grass_p[s][i] as f64; }
                     self.grass[i] = gsum as f32;
                 }
                 self.spread_buf = Some(buf);
@@ -3786,16 +3968,17 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         if w > 0 { s / w as f64 } else { 0.0 }
     }
 
-    fn plant_amount_by(&self) -> [f64; GRASS_N] {
-        let mut out = [0.0f64; GRASS_N];
+    fn plant_amount_by(&self) -> Vec<f64> {
+        let pn = self.plants.len();
+        let mut out = vec![0.0f64; pn];
         let mut w = 0usize;
         for i in 0..self.grass.len() {
             if self.suit[i] > 0.02 {
-                for s in 0..GRASS_N { out[s] += self.grass_p[s][i] as f64; }
+                for s in 0..pn { out[s] += self.grass_p[s][i] as f64; }
                 w += 1;
             }
         }
-        if w > 0 { [out[0]/w as f64, out[1]/w as f64, out[2]/w as f64] } else { out }
+        if w > 0 { out.into_iter().map(|v| v / w as f64).collect() } else { out }
     }
 
     // ----- Phase 15: speciation engine ---------------------------------------
@@ -4172,7 +4355,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
     pub fn stats(&self) -> Stats {
         let last = self.history.last().cloned().unwrap_or(HistorySample {
             t: 0.0, season: 0, h: 0, p: 0, scav: 0, omn: 0,
-            plant: 0.0, plant_by: [0.0; GRASS_N],
+            plant: 0.0, plant_by: vec![0.0; self.plants.len()],
             speed_h: 0.0, sense_h: 0.0, size_h: 0.0,
             speed_p: 0.0, sense_p: 0.0, gap_hp: 0.0,
             coop_share_h: 0.0, help_thr_h: 0.0,
@@ -4255,7 +4438,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 IsolatedGroupStat { name: g.code.clone(), kind: g.kind, since: g.since, count: cnt }
             }).collect(),
             isolation_history: self.isolation_history.clone(),
-            grass_species: GRASS_SPECIES.to_vec(),
+            grass_species: self.plants.clone(),
             cargo_total: (cargo_total * 10000.0).round() / 10000.0,
             fruit_energy_share_h: if fruit_e + leaf_e > 0.0 { (fruit_e / (fruit_e + leaf_e) * 10000.0).round() / 10000.0 } else { 0.0 },
             deposit: deposit_summary,
@@ -4501,7 +4684,7 @@ fn evo_to_save(e: &EvolutionSample) -> save_state::SaveEvolutionSample {
 fn hist_to_save(h: &HistorySample) -> save_state::SaveHistorySample {
     save_state::SaveHistorySample {
         t: h.t, season: h.season, h: h.h, p: h.p, scav: h.scav, omn: h.omn,
-        plant: h.plant, plant_by: h.plant_by,
+        plant: h.plant, plant_by: h.plant_by.clone(),
         speed_h: h.speed_h, sense_h: h.sense_h, size_h: h.size_h,
         speed_p: h.speed_p, sense_p: h.sense_p, gap_hp: h.gap_hp,
         coop_share_h: h.coop_share_h, help_thr_h: h.help_thr_h,
@@ -4616,6 +4799,12 @@ impl Ecology {
             grass: self.grass.clone(),
             grass_by_species: self.grass_p.iter().cloned().collect(),
             suit_eff_by_species: self.suit_eff_by.iter().cloned().collect(),
+            // Phase 33: the registered plant list (default = the three
+            // legacy entries). Sized to drive the per-plant layers on restore.
+            plants: self.plants.iter().map(|p| save_state::SavePlant {
+                r_max: p.r_max, moist_opt: p.moist_opt, moist_w: p.moist_w,
+                palatability: p.palatability, fruiting: p.fruiting,
+            }).collect(),
             suit: self.suit.clone(),
             shade: self.shade.clone(),
             moist: self.moist.clone(),
@@ -4660,7 +4849,7 @@ impl Ecology {
                 .collect(),
             history: self.history.iter().map(hist_to_save).collect(),
             last_sample: self.last_sample,
-            taken_buf: self.taken_buf,
+            taken_buf: self.taken_buf.clone(),
             spread_buf: self.spread_buf.clone(),
             h_cache: self.h_cache,
             season_meta: self.season_meta,
@@ -4768,8 +4957,21 @@ impl Ecology {
             .map(|a| kinds.resolve_or_register(&a.kind)).collect();
 
         let n = state.grass.len();
-        assert_eq!(state.grass_by_species.len(), GRASS_N, "grass_by_species layer count");
-        assert_eq!(state.suit_eff_by_species.len(), GRASS_N, "suit_eff_by_species layer count");
+        // Phase 33: restore the plant registry. Pre-v7 saves carry no list
+        // (`#[serde(default)]` → empty), so they land on the three legacy
+        // entries (bit-exact legacy continuation); the per-plant layers are
+        // sized to this count.
+        let plants: Vec<PlantType> = if state.plants.is_empty() {
+            LEGACY_PLANTS.to_vec()
+        } else {
+            state.plants.iter().map(|p| PlantType {
+                r_max: p.r_max, moist_opt: p.moist_opt, moist_w: p.moist_w,
+                palatability: p.palatability, fruiting: p.fruiting,
+            }).collect()
+        };
+        let pn = plants.len();
+        assert_eq!(state.grass_by_species.len(), pn, "grass_by_species layer count");
+        assert_eq!(state.suit_eff_by_species.len(), pn, "suit_eff_by_species layer count");
         for (name, v) in state.grass_by_species.iter().chain(state.suit_eff_by_species.iter())
             .enumerate()
             .map(|(i, v)| (i, v))
@@ -4784,10 +4986,13 @@ impl Ecology {
         assert_eq!(state.evolution.len(), 6, "evolution history slot count");
         assert_eq!(state.generation_fitness.len(), 6, "generation_fitness slot count");
 
-        let mut gb = state.grass_by_species.into_iter();
-        let grass_p = [gb.next().unwrap(), gb.next().unwrap(), gb.next().unwrap()];
-        let mut se = state.suit_eff_by_species.into_iter();
-        let suit_eff_by = [se.next().unwrap(), se.next().unwrap(), se.next().unwrap()];
+        let grass_p = state.grass_by_species;
+        let suit_eff_by = state.suit_eff_by_species;
+        // Phase 33: per-plant scratch buffer sized to the plant registry
+        // (a valid save already carries the right length; resize guards a
+        // shorter list so `take_grass` never indexes out of bounds).
+        let mut taken_buf = state.taken_buf;
+        taken_buf.resize(pn, 0.0);
 
         let evolution: Vec<Vec<EvolutionSample>> = state.evolution.into_iter()
             .map(|hist| hist.into_iter().map(|e| EvolutionSample {
@@ -4981,6 +5186,11 @@ impl Ecology {
                     gm.ext = a.ext_loci.into_iter().map(locus_from_save).collect();
                     gm
                 };
+                // Phase 33: backfill seed cargo to the plant-registry length
+                // (pre-v7 saves carry exactly 3; a shorter/corrupt list pads
+                // with 0.0 so per-layer indices stay in bounds).
+                let mut cargo = a.cargo;
+                if cargo.len() < pn { cargo.resize(pn, 0.0); }
                 Agent {
                     id: a.id,
                     kind: kind_ids[i],
@@ -4996,7 +5206,7 @@ impl Ecology {
                     think: a.think, phase: a.phase,
                     alive: a.alive,
                     activity: a.activity, hydration: a.hydration,
-                    cargo: a.cargo,
+                    cargo,
                     trail_t: a.trail_t, trail_x: a.trail_x, trail_z: a.trail_z,
                     trail_head: a.trail_head, trail_n: a.trail_n, trail_slot: a.trail_slot,
                     fatigue: a.fatigue, fear: a.fear, image: a.image,
@@ -5022,6 +5232,7 @@ impl Ecology {
             grass: state.grass,
             grass_p,
             suit_eff_by,
+            plants,
             suit: state.suit,
             shade: state.shade,
             moist: state.moist,
@@ -5064,7 +5275,7 @@ impl Ecology {
             }).collect(),
             evolution,
             generation_fitness,
-            taken_buf: state.taken_buf,
+            taken_buf,
             spread_buf: state.spread_buf,
             h_cache: state.h_cache,
             season_meta: state.season_meta,

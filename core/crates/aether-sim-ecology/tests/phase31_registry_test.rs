@@ -10,8 +10,8 @@
 //!    bit-identical to an unregistered twin (registry growth is inert).
 
 use aether_sim_ecology::ecology::{
-    BehaviorTemplate, BiomeCap, Ecology, GenomeTemplate, KindDef, KindRegistry, DECO, FISH, HERB,
-    OMN, PRED, SCAV, SpeciesKind,
+    BehaviorTemplate, BiomeCap, Diet, Ecology, GenomeTemplate, KindDef, KindRegistry, DECO, FISH,
+    HERB, OMN, PRED, SCAV, SpeciesKind,
 };
 
 fn daylight(t: u32) -> f64 {
@@ -89,6 +89,7 @@ fn ghost_kind_registration_is_inert() {
         speed_clamp: (3.4, 8.6),
         mutates_fin_color: false,
         mutates_deco_eff: false,
+        diet: Diet::conservative(),
     };
 
     let mut with_ghost = Ecology::new(20261102);

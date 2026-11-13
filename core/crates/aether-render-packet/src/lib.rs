@@ -169,7 +169,9 @@ pub struct AgentView {
     pub bite: f32,
     #[serde(default)]
     pub repro: f32,
-    /// Seed cargo — fixed GRASS_N(=3)-element FRUITY slot array.
+    /// Seed cargo — one slot per registered plant (default 3 = the legacy
+    /// `GRASS_N`; a registered 4th plant widens it, and JS reads at most its
+    /// known slots, so a default-3 world is unaffected).
     #[serde(default = "empty_cargo")]
     pub cargo: Vec<f32>,
     /// Derived: `energy / max_energy`, clamped to [0, 1]. Health-bar fill.

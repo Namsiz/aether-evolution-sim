@@ -31,7 +31,7 @@
 
 use crate::ecology::{
     Cataclysm, CELL, Ecology, CATACLYSM_CLIMATE, CATACLYSM_DAMAGE, CATACLYSM_IMPACT,
-    CATACLYSM_STRESS_SCALE, GRASS_N, GRID_N, GRID_SPAN,
+    CATACLYSM_STRESS_SCALE, GRID_N, GRID_SPAN,
 };
 
 impl Ecology {
@@ -95,7 +95,7 @@ impl Ecology {
             let dx = cx - x;
             let dz = cz - z;
             if dx * dx + dz * dz > r2 { continue; }
-            for sp in 0..GRASS_N { self.grass_p[sp][idx] *= keep; }
+            for sp in 0..self.plants.len() { self.grass_p[sp][idx] *= keep; }
             self.grass[idx] *= keep;
             self.mineral_field[idx] *= keep;
         }
