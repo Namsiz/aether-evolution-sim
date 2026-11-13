@@ -22,6 +22,7 @@ import { createPhylogenyOverlay, readPhylogenyState, buildPhylogenyGraph,
   CLADE_CAP, EVENT_CAP, CLADE_RECORD_SIZE, EVENT_RECORD_SIZE, CLADE_NAME_CAP,
 } from './renderer-phylogeny.mjs';
 import { createNicheOverlay, buildNicheCloud } from './renderer-niche.mjs';
+import { createPopulationChartOverlay } from './renderer-population-chart.mjs';
 import { createDustOverlay, drawCataclysmVline, drawCataclysmHline, drawCataclysmGlyph,
   formatCataclysmHud, CATACLYSM_IMPACT, CATACLYSM_CLIMATE,
 } from './renderer-cataclysm.mjs';
@@ -472,6 +473,10 @@ export async function bootWasmViewer(canvasId = 'stage') {
   const SPEC_RATE_WINDOW = 500;
   let hudSpecRate = 0;
 
+  // Phase 25: population trend chart — shows per-kind count over last 200 frames.
+  const popChart = createPopulationChartOverlay();
+  let popOn = !isMobile;
+
   // Phase 16: 生态位空间 overlay（U 键切换；复用 phylogeny 的 60-tick 拉取节奏）。
   const nicheOverlay = phyloSupported ? createNicheOverlay() : null;
   let nicheOn = !isMobile;
@@ -682,6 +687,9 @@ export async function bootWasmViewer(canvasId = 'stage') {
     phyloOverlay.setVisible(phyloOn);
     pullPhylogeny(true); // 预热后首次拉取（root clade 已在 t≈60 诞生）
   }
+  if (popChart) {
+    popChart.setVisible(popOn);
+  }
   if (nicheOverlay) {
     nicheOverlay.setVisible(nicheOn);
     renderNiche();
@@ -782,6 +790,11 @@ export async function bootWasmViewer(canvasId = 'stage') {
       phyloOverlay.setVisible(phyloOn);
       if (phyloOn) renderPhylo();
       toast(`species phylogeny ${phyloOn ? 'ON' : 'OFF'}（T 切换）`);
+    } else if (e.code === 'KeyO' && popChart) {
+      popOn = !popOn;
+      popChart.setVisible(popOn);
+      if (popOn) popChart.render(null);
+      toast(`population chart ${popOn ? 'ON' : 'OFF'}（O 切换）`);
     } else if (e.code === 'KeyF' && phyloOverlay) {
       fossilOn = !fossilOn;
       renderPhylo();
@@ -1132,6 +1145,7 @@ export async function bootWasmViewer(canvasId = 'stage') {
       lastHud = elapsed;
       fps = fpsN / Math.max(fpsAcc, 1e-6); fpsAcc = 0; fpsN = 0;
       const c = censusFromFlat(handle.readAgents());
+      if (popChart) popChart.pushFrame(c);
       const hh = Math.floor(hourFor(handle.tick()));
       // Phase 23: per-kind hue spread — shows how far each kind has drifted in
       // visual-hue space; a wide span means morphological divergence is active.
