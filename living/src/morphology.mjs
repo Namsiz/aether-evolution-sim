@@ -284,3 +284,15 @@ export function createMorphologyCompareMode(scene, THREE) {
     },
   };
 }
+
+/**
+ * Remap the raw hull_ratio from deriveMorphology ([0.6, 1.4]) to a wider
+ * visual range ([0.5, 1.5]) so individual shape diversity is clearly visible
+ * in the InstancedMesh render (Phase 21).
+ * @param {{ hull_ratio: number, limb_scale: number, aPhase: number, aSwayAmp: number }} morph
+ * @returns {typeof morph}
+ */
+export function morphoScaleForVisual(morph) {
+  const hr = 0.5 + (morph.hull_ratio - 0.6) / 0.8 * 1.0;
+  return { ...morph, hull_ratio: hr };
+}

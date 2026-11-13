@@ -30,7 +30,8 @@ import { encodeEvolutionHistory } from './evolution-export.mjs';
 import { createSessionMeta } from './session-meta.mjs';
 import { terrainHeight, WATER_LEVEL, clamp } from './world.js';
 import { deriveMorphology, buildSpeciesBaseGeometry, addAnimAttributes, updateAnimAttributes,
-  applyHullRatioToScale, createMorphologyCompareMode, lodLevelForDist } from './morphology.mjs';
+  applyHullRatioToScale, createMorphologyCompareMode, lodLevelForDist,
+  morphoScaleForVisual } from './morphology.mjs';
 import { createMorphologyMaterial, updateMorphoTime, getLODLevel, setLODLevel } from './morphology-shader.mjs';
 import { createMobileToolbar } from './mobile-controls.mjs';
 
@@ -82,6 +83,8 @@ const SPECIES = {
   deco: { cap: 80,  yOff: (s) => 0.4 * s, geo: 'deco' },
 };
 
+// Phase 21: morphology diversity — expand the hull_ratio visual range so agents
+// of the same kind look meaningfully different (wider ellipsoid spread).
 // ─── wasm loading ─────────────────────────────────────────────────────────────
 
 async function loadWasmModule() {
@@ -230,7 +233,8 @@ function updateInstancedMeshes(meshes, handle, agentCount) {
       : terrainHeight(x, z) + spec.yOff(scale);
     _pos.set(x, y, z);
     // Phase 19: anisotropic scale from hull_ratio (volume-preserving)
-    const { hull_ratio } = deriveMorphology(agentId);
+    // Phase 21: remap hull_ratio to wider range for more visible shape diversity
+    const { hull_ratio } = morphoScaleForVisual(deriveMorphology(agentId));
     applyHullRatioToScale(_scale, scale, hull_ratio);
     _matrix.compose(_pos, _quat, _scale);
     mesh.setMatrixAt(mesh.count, _matrix);
@@ -441,6 +445,10 @@ export async function bootWasmViewer(canvasId = 'stage') {
   const seenCladeIds = new Set();
   const seenDeadIds = new Set();
   let lastPhyloPull = -Infinity;
+  // Phase 21: speciation rate tracker — counts new clades born in the last
+  // SPEC_RATE_WINDOW ticks; Hud reads it every frame.
+  const SPEC_RATE_WINDOW = 500;
+  let hudSpecRate = 0;
 
   // Phase 16: 生态位空间 overlay（U 键切换；复用 phylogeny 的 60-tick 拉取节奏）。
   const nicheOverlay = phyloSupported ? createNicheOverlay() : null;
@@ -550,6 +558,18 @@ export async function bootWasmViewer(canvasId = 'stage') {
     phyloEvents = state.events;
     renderPhylo();
     renderNiche();
+    // Phase 21: track recent speciation events for HUD rate display.
+    const tNow = handle.tick();
+    for (const c of state.clades) {
+      if (!c.birthSeen) {
+        c.birthSeen = true;
+        c.birthTickRecorded = c.birthTick;
+      }
+    }
+    // Count clades born within the last SPEC_RATE_WINDOW ticks.
+    const windowStart = tNow - SPEC_RATE_WINDOW;
+    const recentBirths = state.clades.filter(c => c.birthTick >= windowStart).length;
+    hudSpecRate = recentBirths;
   }
   let pngReadyUntil = -Infinity; // S 键下载提示行的消失时刻（clock.elapsedTime 域）
   let pngReadyTick = 0;
@@ -1093,7 +1113,9 @@ export async function bootWasmViewer(canvasId = 'stage') {
         const peBadge = pe && +pe.pctBurst >= 50
           ? ` <span style="color:#ffb347">· PE active (${pe.pctBurst}% burst)</span>`
           : '';
-        cladeLine = `<span style="color:#c9a0ff">clades: ${list} · ${phyloEvents.length} event${phyloEvents.length === 1 ? '' : 's'}${peBadge}</span><br>`;
+        cladeLine = `<span style="color:#c9a0ff">clades: ${list} · ${phyloEvents.length} event${phyloEvents.length === 1 ? '' : 's'}${peBadge}</span>`
+          + (hudSpecRate > 0 ? ` <span style="color:#8fd3ff">· ⚡ ${hudSpecRate}/500t</span>` : '')
+          + `<br>`;
       }
       // Phase 17: 活跃灾变徽标 + 最近 5 条历史。
       let catLine = '';
