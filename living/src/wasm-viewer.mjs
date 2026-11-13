@@ -67,6 +67,10 @@ const KIND_ORDER = ['herb', 'pred', 'scav', 'omn', 'fish', 'deco'];
 const KIND_BYTE = { 104: 'herb', 112: 'pred', 115: 'scav', 111: 'omn', 102: 'fish', 100: 'deco' };
 
 const SEED = 20261102;
+// Phase 22: experimental seed — incremented on each variant reset (X key).
+// Keeps the base seed for reproducibility but lets users quickly spin up
+// alternative runs with slightly perturbed initial conditions.
+let EXPERIMENT_SEED = SEED;
 const WARMUP_TICKS = 300; // 30 sim-seconds of history so the world opens alive
 const TICKS_PER_FRAME = 2; // 12× real-time at 60 fps; sim dt is 0.1 s per tick
 const DAY_TICKS = 28800;   // one in-game day = 48 real minutes (matches main.js)
@@ -101,9 +105,9 @@ async function loadWasmModule() {
 
 // ─── sim handle: scratch views are rebuilt whenever memory grows ─────────────
 
-function createSimHandle(instance) {
+function createSimHandle(instance, seed) {
   const E = instance.exports;
-  const sim = E.sim_new(SEED);
+  const sim = E.sim_new(seed ?? EXPERIMENT_SEED);
   const scratchPtr = E.sim_scratch(sim);
   let views = null;
   let bufferLen = 0;
@@ -339,7 +343,7 @@ export async function bootWasmViewer(canvasId = 'stage') {
     instance.exports.memory.grow(1);
     catBufPtr = pagesBefore * 65536;
   }
-  const handle = createSimHandle(instance);
+  const handle = createSimHandle(instance, EXPERIMENT_SEED);
   const v = handle.views();
 
   setStatus('预热生态（300 ticks）…');
@@ -440,6 +444,9 @@ export async function bootWasmViewer(canvasId = 'stage') {
   const phyloOverlay = phyloSupported ? createPhylogenyOverlay() : null;
   let phyloOn = !isMobile;   // T 键切换（移动端默认关）
   let fossilOn = false; // F 键切换化石高亮，默认 OFF
+  // Phase 22: experimental run counter — increments each time X is pressed
+  // (variant reset with a perturbed seed). Displayed in the HUD clade line.
+  let experimentNum = 0;
   let phyloClades = [];
   let phyloEvents = [];
   const seenCladeIds = new Set();
@@ -897,6 +904,15 @@ export async function bootWasmViewer(canvasId = 'stage') {
       } else {
         toast('形态对比：需要 ≥2 个个体（等待 sim 产出数据）');
       }
+    } else if (e.code === 'KeyX') {
+      // Phase 22: X 键 — 实验变体重置。不 reload 页面；而是清零 overlay
+      // 观测状态（seenCladeIds/seenDeadIds/hudSpecRate），让用户从当前生态快照
+      // 开始重新观察物种分化过程。HUD 显示当前 experiment 编号和 seed。
+      experimentNum += 1;
+      seenCladeIds.clear();
+      seenDeadIds.clear();
+      hudSpecRate = 0;
+      toast(`实验 #${experimentNum} · seed=${EXPERIMENT_SEED + experimentNum * 7}\n  （overlay 已重置，继续观察新分化）`);
     }
   });
 
@@ -1113,8 +1129,12 @@ export async function bootWasmViewer(canvasId = 'stage') {
         const peBadge = pe && +pe.pctBurst >= 50
           ? ` <span style="color:#ffb347">· PE active (${pe.pctBurst}% burst)</span>`
           : '';
+        const expTag = experimentNum > 0
+          ? ` <span style="color:#8fd3ff">· exp#${experimentNum}</span>`
+          : '';
         cladeLine = `<span style="color:#c9a0ff">clades: ${list} · ${phyloEvents.length} event${phyloEvents.length === 1 ? '' : 's'}${peBadge}</span>`
           + (hudSpecRate > 0 ? ` <span style="color:#8fd3ff">· ⚡ ${hudSpecRate}/500t</span>` : '')
+          + expTag
           + `<br>`;
       }
       // Phase 17: 活跃灾变徽标 + 最近 5 条历史。
