@@ -591,6 +591,29 @@ export async function bootWasmViewer(canvasId = 'stage') {
       if (c.extinct && !seenDeadIds.has(c.id)) {
         seenDeadIds.add(c.id);
         if (!initial) {
+          // Phase 28: drop a fossil ring at the centroid of this clade's last positions.
+          // We approximate using all agents whose IDs are no longer alive and that have
+          // position history — pick those with the highest IDs (youngest born = likely same clade).
+          const agentIds = [...current.keys()];
+          const deadWithHistory = [...lastSeenPositions.entries()]
+            .filter(([id]) => !current.has(id) && lastSeenPositions.get(id).length > 0)
+            .sort((a, b) => b[0] - a[0]); // newest IDs first
+          const sampleSize = Math.min(8, deadWithHistory.length);
+          if (sampleSize > 0) {
+            let cx = 0, cz = 0, cy = 0, n = 0;
+            for (const [, posList] of deadWithHistory.slice(0, sampleSize)) {
+              const last = posList[posList.length - 1];
+              cx += last.x; cz += last.z;
+              cy += terrainHeight(last.x, last.z);
+              n++;
+            }
+            if (n > 0) {
+              cx /= n; cz /= n; cy /= n;
+              if (fossils.length < FOSSIL_CAP) {
+                fossils.push({ x: cx, y: cy + 0.5, z: cz, born: clock.elapsedTime, count: c.aliveCount });
+              }
+            }
+          }
           // Phase 16: 竞争排斥灭绝（event kind 2）用 ⚔ 标记，区分普通死亡 ⚰。
           const xev = state.events.find((e) => e.parentCladeId === c.id && (e.kind ?? 0) >= 1);
           toast(xev && xev.kind === 2
@@ -1046,6 +1069,27 @@ export async function bootWasmViewer(canvasId = 'stage') {
   const ghosts = []; // { x, y, z, born }
   let prevAgents = new Map(); // id → { x, z, kind }（上一帧快照）
 
+  // Phase 28: clade extinction fossil markers — persistent ghostly rings at
+  // the centroid of a clade's last known positions, visible when F is pressed.
+  const FOSSIL_CAP = 32;
+  const FOSSIL_TTL = 60; // seconds — long enough to see the pattern
+  const fossilMat = new THREE.MeshBasicMaterial({
+    color: 0x9fb3a8,
+    transparent: true,
+    opacity: 0.35,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+  const fossilGeo = new THREE.RingGeometry(0.5, 1.2, 16);
+  const fossilMesh = new THREE.InstancedMesh(fossilGeo, fossilMat, FOSSIL_CAP);
+  fossilMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  fossilMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(FOSSIL_CAP * 3), 3);
+  fossilMesh.frustumCulled = false;
+  fossilMesh.count = 0;
+  scene.add(fossilMesh);
+  const fossils = []; // { x, y, z, born, count }
+  const lastSeenPositions = new Map(); // id → [{x,z}]
+
   function trackDeaths(agentCount) {
     const dv = handle.views().agents;
     const current = new Map();
@@ -1068,8 +1112,15 @@ export async function bootWasmViewer(canvasId = 'stage') {
         z: prev.z,
         born: clock.elapsedTime,
       });
+      // Phase 28: accumulate position for potential fossil marker
+      if (!lastSeenPositions.has(id)) lastSeenPositions.set(id, []);
+      lastSeenPositions.get(id).push({ x: prev.x, z: prev.z });
     }
     prevAgents = current;
+    // Phase 28: prune old position history (keep last 100 frames per agent)
+    for (const arr of lastSeenPositions.values()) {
+      if (arr.length > 100) arr.splice(0, arr.length - 100);
+    }
   }
 
   function updateGhosts(now) {
@@ -1091,6 +1142,32 @@ export async function bootWasmViewer(canvasId = 'stage') {
     ghostMesh.count = w;
     ghostMesh.instanceMatrix.needsUpdate = true;
     ghostMesh.instanceColor.needsUpdate = true;
+  }
+
+  // Phase 28: fossil markers for extinct clades — slow-fade rings at extinction centroid.
+  function updateFossils(now) {
+    if (!fossilOn || fossils.length === 0) { fossilMesh.count = 0; return; }
+    // Prune expired
+    for (let f = fossils.length - 1; f >= 0; f--) {
+      if (now - fossils[f].born > FOSSIL_TTL) fossils.splice(f, 1);
+    }
+    let w = 0;
+    for (const fos of fossils) {
+      const t = (now - fos.born) / FOSSIL_TTL; // 0..1
+      if (t >= 1) continue;
+      const scale = 1.0 + t * 2.5; // expand outward as it fades
+      _pos.set(fos.x, fos.y, fos.z);
+      _scale.setScalar(scale);
+      _matrix.compose(_pos, _quat, _scale);
+      fossilMesh.setMatrixAt(w, _matrix);
+      const ca = fossilMesh.instanceColor.array;
+      const alpha = (1 - t) * 0.35;
+      ca[w * 3] = alpha; ca[w * 3 + 1] = alpha; ca[w * 3 + 2] = alpha;
+      w++;
+    }
+    fossilMesh.count = w;
+    fossilMesh.instanceMatrix.needsUpdate = true;
+    fossilMesh.instanceColor.needsUpdate = true;
   }
 
   function tick() {
@@ -1156,6 +1233,7 @@ export async function bootWasmViewer(canvasId = 'stage') {
     }
 
     updateGhosts(clock.elapsedTime);
+    updateFossils(clock.elapsedTime);
     if (catSupported) drawCataclysmMarks(); // overlay 自绘之后补画灾变标记
     renderer.render(scene, camera);
 
