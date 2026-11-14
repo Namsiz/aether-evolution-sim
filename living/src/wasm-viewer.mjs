@@ -66,7 +66,13 @@ const OFF_CLADE_NAME = OFF_EVENTS + EVENT_CAP * EVENT_RECORD_SIZE;
 const KIND_ORDER = ['herb', 'pred', 'scav', 'omn', 'fish', 'deco'];
 // Keyed by the raw u8 kind byte the WASM writes (h=104, p=112, s=115, o=111, f=102, d=100),
 // because the readers index with dv.getUint8() — numeric, not char.
+// Phase 34: the six ancestor bytes above are unchanged. Derived (forked)
+// kinds are written by the engine as the b'?' byte (0x3F, "unknown kind");
+// that byte has no entry here, so it falls through to KIND_BYTE_FALLBACK
+// (a default species) instead of dropping the agent — new species render
+// with default geometry and keep their own genome-derived color.
 const KIND_BYTE = { 104: 'herb', 112: 'pred', 115: 'scav', 111: 'omn', 102: 'fish', 100: 'deco' };
+const KIND_BYTE_FALLBACK = 'herb';
 
 const SEED = 20261102;
 // Phase 22: experimental seed — incremented on each variant reset (X key).
@@ -240,8 +246,7 @@ function updateInstancedMeshes(meshes, handle, agentCount) {
   for (let i = 0; i < agentCount; i++) {
     const base = i * AGENT_SLOT_SIZE;
     const kindChar = dv.getUint8(base + SLOT_KIND);
-    const kind = KIND_BYTE[kindChar];
-    if (!kind) continue;
+    const kind = KIND_BYTE[kindChar] ?? KIND_BYTE_FALLBACK;
     const mesh = meshes[kind];
     if (mesh.count >= SPECIES[kind].cap) continue;
     const x = dv.getFloat32(base + SLOT_X, true);
@@ -1111,8 +1116,7 @@ export async function bootWasmViewer(canvasId = 'stage') {
     const current = new Map();
     for (let i = 0; i < agentCount; i++) {
       const base = i * AGENT_SLOT_SIZE;
-      const kind = KIND_BYTE[dv.getUint8(base + SLOT_KIND)];
-      if (!kind) continue;
+      const kind = KIND_BYTE[dv.getUint8(base + SLOT_KIND)] ?? KIND_BYTE_FALLBACK;
       current.set(dv.getUint32(base + SLOT_ID, true), {
         x: dv.getFloat32(base + SLOT_X, true),
         z: dv.getFloat32(base + SLOT_Z, true),

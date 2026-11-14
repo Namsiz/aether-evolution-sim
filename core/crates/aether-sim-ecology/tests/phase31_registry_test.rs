@@ -90,6 +90,7 @@ fn ghost_kind_registration_is_inert() {
         mutates_fin_color: false,
         mutates_deco_eff: false,
         diet: Diet::conservative(),
+        parent_kind: None,
     };
 
     let mut with_ghost = Ecology::new(20261102);

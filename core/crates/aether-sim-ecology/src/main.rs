@@ -651,15 +651,16 @@ fn main() {
         }
         if debug || i % 300 == 0 {
             let s = eco.stats();
-            let _ = writeln!(out, "SNAPSHOT {} {} {} {}", i, s.h, s.p, eco.checksum());
-            // Phase 31 Part B: v2 (registry-id kind field) runs in parallel;
-            // Phase 34 promotes it to primary and records the re-baseline.
+            // Phase 34: dual output — the historical v1 anchor (name-byte
+            // kind field) plus the v2 primary (registry id + ext-locus hash).
+            let _ = writeln!(out, "SNAPSHOT {} {} {} {}", i, s.h, s.p, eco.checksum_v1());
             let _ = writeln!(out, "SNAPSHOT_V2 {} {} {} {}", i, s.h, s.p, eco.checksum_v2());
         }
     }
     if !buf.is_empty() {
         let _ = out.write_all(buf.as_bytes());
     }
+    let _ = writeln!(out, "CHECKSUM_FINAL_V1 {}", eco.checksum_v1());
     let _ = writeln!(out, "CHECKSUM_FINAL {}", eco.checksum());
     let _ = writeln!(out, "CHECKSUM_FINAL_V2 {}", eco.checksum_v2());
 }

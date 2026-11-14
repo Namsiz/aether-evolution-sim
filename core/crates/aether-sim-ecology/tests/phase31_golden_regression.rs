@@ -1,17 +1,25 @@
-//! Phase 31 golden regression anchors.
+//! Phase 31+ golden regression anchors — Phase 34 re-baselined.
 //!
-//! The Phase 31 generalization refactor (KindDef registry, `unreachable!()`
-//! retirement, per-kind Vec stats, spatial index) must be a bit-exact no-op:
-//! every checksum below is computed with the CURRENT engine at the pinned
-//! (seed, tick-count) checkpoints and must not change as constants move from
-//! `match` arms into `KindDef` data.
+//! Phase 31 pinned the v1 checksum (kind field = the kind NAME's first byte).
+//! Phase 34 (Q2 ruling) promotes the v2 checksum to primary: the kind field
+//! is the registry id (u32) and the per-agent ext-locus hash is mixed in.
+//! `Ecology::checksum()` now returns the v2 value; `checksum_v1()` is kept as
+//! the read-only historical accessor.
 //!
-//! `0x790184996f3acefd` (the Phase 16/17/18 historical anchor) — recipe
-//! recovered during Phase 31 baseline capture: seed 20261102, 300 ticks,
-//! diurnal daylight below. The long-run and alt-seed anchors re-pin the
-//! contract at additional documented checkpoints. Values are printed on
-//! failure so a re-baseline is a one-line edit with the new value recorded in
-//! the phase report.
+//! RE-BASELINE (recorded in the Phase 34 report + commit): the approved
+//! dynamics changes (神之手 retirement, the legacy HERB script retirement,
+//! kind-forking's density-brake feedback) shift the long-run trajectory, so
+//! the pinned anchors move to the v2 values below. The OLD v1 anchors are
+//! kept in the comments as the historical record:
+//!   seed 20261102 @300  v1 0x790184996f3acefd  (Phase 16/17/18 anchor)
+//!   seed 20261102 @3000 v1 0x58733db4ab0c3ca0
+//!   seed 20261105 @300  v1 0x48d66bf801a9f827
+//!
+//! A key Phase 34 invariant the 300-tick run pins: the *trajectory* up to
+//! tick 300 is bit-exact to the pre-Phase-34 engine (v1 unchanged), so the
+//! v2 value there differs from v1 only by the kind-field + ext-hash
+//! definition, not by dynamics. The 3000-tick run is where the re-baseline
+//! (a genuinely different trajectory) shows up.
 
 use aether_sim_ecology::ecology::Ecology;
 
@@ -25,6 +33,7 @@ fn run_ticks(eco: &mut Ecology, to: u32) {
     }
 }
 
+/// Primary (v2) checksum — the Phase 34 re-baseline anchor.
 fn checksum_at(seed: u32, ticks: u32) -> String {
     let mut eco = Ecology::new(seed);
     run_ticks(&mut eco, ticks);
@@ -33,23 +42,40 @@ fn checksum_at(seed: u32, ticks: u32) -> String {
 
 #[test]
 fn golden_seed_20261102_300_ticks() {
+    // NEW v2 anchor (Phase 34). Old v1 anchor: 0x790184996f3acefd.
     let ck = checksum_at(20261102, 300);
-    assert_eq!(ck, "0x790184996f3acefd",
-        "300-tick checksum drifted (the Phase 16/17/18 historical anchor): {} — see file docs", ck);
+    assert_eq!(ck, "0x785889bb1ec0737f",
+        "300-tick v2 checksum drifted: {} — see file docs + Phase 34 report", ck);
 }
 
 #[test]
 fn golden_seed_20261102_3000_ticks() {
+    // NEW v2 anchor (Phase 34 re-baseline: the long-run trajectory shifted).
+    // Old v1 anchor: 0x58733db4ab0c3ca0.
     let ck = checksum_at(20261102, 3000);
-    assert_eq!(ck, "0x58733db4ab0c3ca0",
-        "3000-tick long-run checksum drifted: {} — if this change is an approved re-baseline, pin the new value here and record it in the phase report", ck);
+    assert_eq!(ck, "0x6dbb8f6fd216f353",
+        "3000-tick v2 long-run checksum drifted: {} — if this change is an approved re-baseline, pin the new value here and record it in the phase report", ck);
 }
 
 #[test]
 fn golden_seed_20261105_300_ticks() {
+    // NEW v2 anchor (Phase 34). Old v1 anchor: 0x48d66bf801a9f827.
     let ck = checksum_at(20261105, 300);
-    assert_eq!(ck, "0x48d66bf801a9f827",
-        "alt-seed checksum drifted: {} — if this change is an approved re-baseline, pin the new value here and record it in the phase report", ck);
+    assert_eq!(ck, "0xf53762eefd0cf3d2",
+        "alt-seed v2 checksum drifted: {} — if this change is an approved re-baseline, pin the new value here and record it in the phase report", ck);
+}
+
+/// Phase 34 invariant: the 300-tick TRAJECTORY is bit-exact to the
+/// pre-Phase-34 engine. The v1 checksum (name-byte kind field, no ext hash)
+/// still reads the historical anchor — proving the 300-tick dynamics are
+/// unchanged and only the checksum DEFINITION (v1→v2) moved the 300-tick
+/// value. This is the "300-tick v1 unchanged" evidence for the report.
+#[test]
+fn golden_300_tick_trajectory_bit_exact_to_v1() {
+    let mut eco = Ecology::new(20261102);
+    for t in 1..=300 { eco.update(0.1, daylight(t)); }
+    assert_eq!(eco.checksum_v1(), "0x790184996f3acefd",
+        "the 300-tick v1 trajectory must remain bit-exact to the historical anchor");
 }
 
 /// Determinism guard: same seed + same ticks must be bit-identical across
@@ -62,19 +88,20 @@ fn golden_double_run_bit_identical() {
     assert_eq!(a, b, "double run diverged");
 }
 
-/// Phase 31 Part B: v2 checksum (kind field = registry id instead of the
-/// name's first byte) is a parallel export — deterministic on its own and
-/// distinct from v1 for a populated world. v1 stays the pinned anchor;
-/// Phase 34 promotes v2 (plus locus hashes) to primary.
+/// Phase 34 (Q2 ruling): v2 is now PRIMARY. `checksum()` and
+/// `checksum_v2()` are the same value; v2 is deterministic on its own and
+/// differs from the historical v1 (registry-id kind field + ext hash vs the
+/// name-byte kind field).
 #[test]
-fn checksum_v2_parallel_deterministic() {
+fn checksum_v2_is_primary_and_deterministic() {
     let mut a = Ecology::new(20261102);
     let mut b = Ecology::new(20261102);
     for t in 1..=300 { a.update(0.1, daylight(t)); b.update(0.1, daylight(t)); }
     assert_eq!(a.checksum_v2(), b.checksum_v2(), "v2 double run diverged");
-    assert_ne!(a.checksum_v2(), a.checksum(), "v2 must differ from v1 on a populated world");
-    // v1 stays pinned: the 300-tick anchor is unchanged by the parallel export.
-    assert_eq!(a.checksum(), "0x790184996f3acefd");
+    // v2 promoted to primary: checksum() == checksum_v2().
+    assert_eq!(a.checksum(), a.checksum_v2(), "checksum() must equal checksum_v2() (v2 is primary)");
+    // v2 differs from the historical v1 on a populated world.
+    assert_ne!(a.checksum_v2(), a.checksum_v1(), "v2 must differ from v1 on a populated world");
 }
 
 /// Phase 31 Part B: tick cost baseline for the Phase 38 measurement gate.

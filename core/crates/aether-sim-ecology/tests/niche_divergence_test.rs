@@ -120,8 +120,17 @@ fn clade<'a>(eco: &'a Ecology, id: u32) -> &'a SpeciesClade {
 }
 
 fn root_id_of(eco: &Ecology) -> u32 {
-    eco.species_clades.iter().find(|c| c.parent_id.is_none())
-        .expect("root clade must exist").id
+    // Phase 34: the tree now carries one root per kind; the DECO tests care
+    // about the DECO family's root (kind_id == DECO), not the first root.
+    eco.species_clades.iter()
+        .find(|c| c.parent_id.is_none() && c.kind_id == DECO as u32)
+        .expect("DECO root clade must exist").id
+}
+
+/// Phase 34: does clade `c` belong to the DECO family (the DECO root plus
+/// any derived DECO forks)?
+fn deco_family(eco: &Ecology, c: &SpeciesClade) -> bool {
+    if c.kind_id == u32::MAX { c.kind == "deco" } else { eco.root_kind(c.kind_id as u16) == DECO }
 }
 
 fn alive_members(eco: &Ecology, id: u32) -> usize {
@@ -162,8 +171,9 @@ fn setup_split() -> (Ecology, u32, [(f64, f64); 2]) {
         run_ticks(&mut eco, t - 1, t);
     }
     let ev = eco.speciation_events.iter()
-        .find(|e| e.event_kind == EVENT_KIND_SPECIATION)
-        .expect("seeded split must fire by t=500 (Phase 15 baseline)");
+        .find(|e| e.event_kind == EVENT_KIND_SPECIATION
+            && eco.species_clades.iter().any(|c| c.id == e.parent_clade_id && deco_family(&eco, c)))
+        .expect("seeded DECO split must fire by t=500 (Phase 15 baseline)");
     let child = ev.child_clade_ids[0];
     (eco, child, anchors)
 }
@@ -185,8 +195,9 @@ fn clade_niche_diverges_from_parent() {
         run_ticks(&mut eco, t - 1, t);
     }
     let ev = eco.speciation_events.iter()
-        .find(|e| e.event_kind == EVENT_KIND_SPECIATION)
-        .expect("seeded split must fire by t=600");
+        .find(|e| e.event_kind == EVENT_KIND_SPECIATION
+            && eco.species_clades.iter().any(|c| c.id == e.parent_clade_id && deco_family(&eco, c)))
+        .expect("seeded DECO split must fire by t=600");
     let child_id = ev.child_clade_ids[0];
     let root = clade(&eco, root_id_of(&eco));
     let child = clade(&eco, child_id);
@@ -302,8 +313,11 @@ fn competitive_exclusion_extincts_loser() {
     assert!(eco.clade_burdens.iter().any(|(id, b)| *id == child_id && *b > 0.0),
         "child must carry the burden before the kill-off, got {:?}", eco.clade_burdens);
 
+    // Phase 34: a daughter clade's members include both the original-kind
+    // agents AND the derived-kind children born into it (kind-fork). Wipe the
+    // whole clade by clade_id, not by kind.
     for a in eco.agents.iter_mut() {
-        if a.alive && a.kind == DECO && a.clade_id == child_id {
+        if a.alive && a.clade_id == child_id {
             a.alive = false;
         }
     }
@@ -339,11 +353,26 @@ fn competitive_exclusion_extincts_loser() {
 #[test]
 fn non_overlapping_clades_coexist() {
     let (mut eco, child_id, anchors) = setup_split();
-    // Both effs repro-able in SELECTIVE mode (need eff > ~1.04) and niche gap
-    // (1.3 - 1.1) * 2 = 0.4 > NICHE_OVERLAP_THRESHOLD — real coexistence test.
+    let root_id = root_id_of(&eco);
+    // Phase 34: the multi-axis metric can spawn SEVERAL DECO daughters, and
+    // the extra daughters would pile into the root's niche and manufacture
+    // spurious overlap burdens. So pin the DECO family into three separated
+    // niches: root = 1.1, the target child = 1.3, every OTHER DECO-family
+    // clade = 0.9. All pairwise niche gaps then exceed the overlap window,
+    // so a clean coexistence (zero burdens) is what the test asserts.
     for t in 501..=2500u32 {
         if t % 60 == 0 {
-            pin_effs(&mut eco, 1.1, 1.3, child_id);
+            // Snapshot the DECO-family clade ids (immutable borrow) before
+            // the mutable pinning pass (avoids a borrow conflict).
+            let deco_clade_ids: Vec<u32> = eco.species_clades.iter()
+                .filter(|c| deco_family(&eco, c))
+                .map(|c| c.id).collect();
+            for a in eco.agents.iter_mut() {
+                if !a.alive || !deco_clade_ids.contains(&a.clade_id) { continue; }
+                a.genome.deco_efficiency = if a.clade_id == child_id { 1.3 }
+                    else if a.clade_id == root_id { 1.1 }
+                    else { 0.9 };
+            }
         }
         feed_anchors(&mut eco, &anchors, t, [true, true]);
         run_ticks(&mut eco, t - 1, t);
@@ -355,17 +384,27 @@ fn non_overlapping_clades_coexist() {
             c.id, c.name, c.birth_tick, c.death_tick, c.members.len(), c.niche_offset);
     }
 
-    assert!(eco.speciation_events.iter().all(|e| e.event_kind == EVENT_KIND_SPECIATION),
-        "no extinction events expected, got {:?}", eco.speciation_events);
-    let root = clade(&eco, root_id_of(&eco));
+    // Phase 34: other kinds may legitimately go extinct in a 2500-tick run;
+    // this DECO coexistence test forbids DECO-FAMILY extinctions only.
+    assert!(eco.speciation_events.iter().all(|e| {
+        if e.event_kind == EVENT_KIND_SPECIATION { return true; }
+        e.kind_id == u32::MAX || eco.root_kind(e.kind_id as u16) != DECO
+    }),
+        "no DECO-family extinction events expected, got {:?}", eco.speciation_events);
+    let root = clade(&eco, root_id);
     let child = clade(&eco, child_id);
     assert!(root.death_tick.is_none() && !root.members.is_empty(), "root clade alive");
     assert!(child.death_tick.is_none() && !child.members.is_empty(), "child clade alive");
     // Their niches really are separated (no silent overlap).
     assert!((child.niche_offset - root.niche_offset).abs() >= NICHE_OVERLAP_THRESHOLD,
         "pinned niches must stay outside the overlap window");
-    assert!(eco.clade_burdens.is_empty(),
-        "no burdens without niche overlap, got {:?}", eco.clade_burdens);
+    // Phase 34: with the family pinned into separated niches, no DECO-family
+    // pair overlaps, so no competitive burden may be active on any clade.
+    assert!(eco.clade_burdens.iter().all(|(id, b)| {
+        let c = eco.species_clades.iter().find(|c| c.id == *id).unwrap();
+        !(deco_family(&eco, c) && *b > 0.0)
+    }),
+        "no DECO-family burdens without niche overlap, got {:?}", eco.clade_burdens);
 }
 
 // ---------------------------------------------------------------------------

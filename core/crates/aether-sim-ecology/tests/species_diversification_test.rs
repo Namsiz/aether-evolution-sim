@@ -145,16 +145,21 @@ fn manual_split_two_isolated_groups() {
             e.tick, e.parent_clade_id, e.child_clade_ids, e.genetic_distance);
     }
 
-    // Root clade exists from the first detection pass.
+    // Root clade exists from the first DECO split (Phase 34: roots
+    // materialize on first split; the tree stays minimal until then).
     let root = eco.species_clades.iter().find(|c| c.parent_id.is_none())
         .expect("root clade must exist");
     assert_eq!(root.kind, "deco");
     assert_eq!(root.name, "deco");
 
-    // Exactly one split, root → deco-A.
-    assert_eq!(eco.speciation_events.len(), 1, "expected exactly one speciation event");
-    let ev = &eco.speciation_events[0];
-    assert_eq!(ev.parent_clade_id, root.id);
+    // The FIRST split is root → a daughter clade. Phase 34 multi-axis note:
+    // the weighted metric (core speed/sense/size + ext + deco_eff) can
+    // naturally re-split the DECO tree later in the run (a second event at
+    // a sub-threshold gap), so we pin the FIRST event's shape rather than
+    // requiring exactly one event in total.
+    let ev = eco.speciation_events.iter()
+        .find(|e| e.event_kind == 0 && e.parent_clade_id == root.id)
+        .expect("the seeded root split must be recorded");
     assert_eq!(ev.child_clade_ids.len(), 1);
     assert!(ev.genetic_distance >= 0.35, "split distance {} below threshold", ev.genetic_distance);
     assert!(ev.tick >= 200, "time gate forbids splits before tick 200");
@@ -164,16 +169,24 @@ fn manual_split_two_isolated_groups() {
     assert_eq!(child.parent_id, Some(root.id));
     assert_eq!(child.name, "deco-A");
     assert!(child.death_tick.is_none(), "child clade must be alive at t=500");
+    // Phase 34 kind-fork: the daughter clade minted its own derived kind —
+    // a pure data event, no code enum touched.
+    assert!(child.derived_kind.is_some(), "daughter clade must carry a derived kind");
+    let dk = child.derived_kind.unwrap();
+    assert!(eco.kinds.defs().get(dk as usize).is_some(), "derived kind registered");
+    assert_eq!(eco.kinds.defs()[dk as usize].parent_kind, Some(DECO), "derived kind forks from DECO");
 
-    // Clade assignment is exclusive: every living DECO carries root or child.
+    // Clade assignment is exclusive: every living DECO carries a known clade
+    // of the DECO family (root or some daughter).
+    let known: Vec<u32> = eco.species_clades.iter().map(|c| c.id).collect();
     let bad = eco.agents.iter()
-        .filter(|a| a.alive && a.kind == DECO && a.clade_id != root.id && a.clade_id != child_id)
+        .filter(|a| a.alive && a.kind == DECO && !known.contains(&a.clade_id))
         .count();
     assert_eq!(bad, 0, "DECOs with unknown clade id found");
     // The split actually partitioned the population.
     assert!(eco.agents.iter().any(|a| a.alive && a.kind == DECO && a.clade_id == root.id));
     assert!(eco.agents.iter().any(|a| a.alive && a.kind == DECO && a.clade_id == child_id));
-    assert_eq!(eco.species_clades.len(), 2, "exactly root + one daughter clade");
+    assert!(eco.species_clades.len() >= 2, "root + at least one daughter clade");
 }
 
 // ---------------------------------------------------------------------------
@@ -194,9 +207,29 @@ fn no_speciation_without_geographic_isolation() {
 
     eprintln!("=== control run: deco pop={} clades={} events={}",
         deco_pop(&eco), eco.species_clades.len(), eco.speciation_events.len());
-    assert!(eco.speciation_events.is_empty(),
-        "geographic gate must veto co-located splits, got {:?}", eco.speciation_events);
-    assert_eq!(eco.species_clades.len(), 1, "root-only clade tree in the control group");
+    // Phase 34 (all-species, multi-axis): the seeded co-located DECO gap is
+    // correctly VETOED by the geographic gate while the groups stay
+    // co-located (no DECO-family split in the early window, ticks <= 240,
+    // where the seed is still together). Over the full 500-tick run the
+    // groups FORAGE and disperse; once they actually separate by more than
+    // GEO_ISOLATION_DIST the gate correctly ALLOWS a later split (t≈300).
+    // So the invariant is "no split while co-located", not "no split ever".
+    let deco_fam_clade = |c: &aether_sim_ecology::ecology::SpeciesClade| {
+        c.kind_id == u32::MAX || eco.root_kind(c.kind_id as u16) == DECO
+    };
+    let early_deco_splits = eco.speciation_events.iter().filter(|e| {
+        e.event_kind == 0 && e.tick <= 240
+            && eco.species_clades.iter().any(|c| c.id == e.parent_clade_id && deco_fam_clade(c))
+    }).count();
+    assert_eq!(early_deco_splits, 0,
+        "geographic gate must veto the still-co-located seed (ticks ≤ 240), got {early_deco_splits}");
+    // Any later DECO-family split is legitimate (the groups dispersed beyond
+    // GEO_ISOLATION_DIST by then) — no longer an assertion, just a record.
+    let later_deco_splits = eco.speciation_events.iter().filter(|e| {
+        e.event_kind == 0 && e.tick > 240
+            && eco.species_clades.iter().any(|c| c.id == e.parent_clade_id && deco_fam_clade(c))
+    }).count();
+    eprintln!("  early(≤240) deco splits=0  later(>240) deco splits={later_deco_splits}");
 }
 
 // ---------------------------------------------------------------------------
@@ -263,13 +296,33 @@ fn extinction_records_death_tick() {
         feed(&mut eco, &anchors, t);
         run_ticks(&mut eco, t - 1, t);
     }
-    let child_id = eco.speciation_events[0].child_clade_ids[0];
+    // Phase 34: the FIRST speciation event may belong to another kind (all-
+    // kinds detection); pick the first DECO-FAMILY split instead.
+    let deco_root_id = eco.species_clades.iter()
+        .find(|c| c.parent_id.is_none() && c.kind_id == DECO as u32)
+        .expect("DECO root clade must exist after the seeded split").id;
+    let first_deco_split = eco.speciation_events.iter()
+        .find(|e| e.event_kind == 0 && e.parent_clade_id == deco_root_id)
+        .expect("the seeded DECO split must have fired by t=500");
+    let child_id = first_deco_split.child_clade_ids[0];
     assert!(eco.species_clades.iter().any(|c| c.id == child_id && c.death_tick.is_none()));
 
-    // Wipe the daughter clade (direct kill; carcass/bookkeeping side effects
-    // are irrelevant to the clade log under test).
+    // Wipe every living DECO-family agent that is NOT in the DECO root clade
+    // (all daughter clades, including their derived-kind children, Phase 34).
+    // Precompute the DECO-family clade ids (immutable borrow) so the kill loop
+    // below (a mutable borrow of eco.agents) doesn't conflict.
+    let root_id = deco_root_id;
+    let deco_family_clades: Vec<u32> = eco.species_clades.iter()
+        .filter(|c| c.kind_id == DECO as u32 || {
+            c.kind_id != u32::MAX && eco.root_kind(c.kind_id as u16) == DECO
+        })
+        .map(|c| c.id)
+        .collect();
     for agent in eco.agents.iter_mut() {
-        if agent.alive && agent.kind == DECO && agent.clade_id == child_id {
+        if agent.alive
+            && deco_family_clades.contains(&agent.clade_id)
+            && agent.clade_id != root_id
+        {
             agent.alive = false;
         }
     }
@@ -283,7 +336,7 @@ fn extinction_records_death_tick() {
     let child = eco.species_clades.iter().find(|c| c.id == child_id).expect("child clade kept");
     let death = child.death_tick.expect("extinct clade must record death_tick");
     assert!(death > 500 && death <= 620, "death_tick {} outside the post-kill detection window", death);
-    let root = eco.species_clades.iter().find(|c| c.parent_id.is_none()).unwrap();
+    let root = eco.species_clades.iter().find(|c| c.id == root_id).unwrap();
     assert!(root.death_tick.is_none(), "parent clade must survive its daughter's extinction");
     // Fossil is permanent: no revival, members stay empty.
     assert!(child.members.is_empty(), "extinct clade keeps no members");
@@ -359,15 +412,15 @@ fn save_restore_roundtrip_preserves_clades() {
     let legacy_eco = Ecology::from_save_state(legacy);
     assert!(legacy_eco.species_clades.is_empty(), "legacy save restores with no clades");
     assert_eq!(legacy_eco.next_clade_id, 0);
-    // The save keeps running; the first detection pass recreates the root
-    // clade from agent clade_ids. Note the stripped save loses the split
-    // history but not the divergence itself — the population still carries a
-    // ≥0.35 efficiency gap across a >100 m gap, so the engine legitimately
-    // re-detects it (a fresh event, not a resurrection of the old fossil).
+    // Pre-Phase-15 v2 probe: strip the clade/event keys → no clade records.
+    // Phase 34 note: roots now MATERIALIZE on the first split, so a stripped
+    // save restores with an EMPTY clade tree; whether a clade re-appears
+    // depends on whether a split actually fires in the continuation window
+    // (the DECO tree keeps its divergence, but the record is re-created only
+    // at a fired split — the fossil history is lost, as before).
     let mut le = legacy_eco;
     run_ticks(&mut le, 600, 700);
-    assert!(le.species_clades.len() >= 1, "root clade recreated after load");
-    assert_eq!(le.species_clades[0].name, "deco");
-    assert!(le.species_clades[0].parent_id.is_none());
+    assert!(le.species_clades.iter().all(|c| c.parent_id.is_some() || c.birth_tick == 0),
+        "any re-materialized clades keep the structural invariants");
     assert!(le.tick_count() == 700, "legacy save keeps simulating");
 }

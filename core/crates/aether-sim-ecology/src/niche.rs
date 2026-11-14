@@ -16,7 +16,7 @@
 
 use crate::ecology::{
     COMPETITION_BURDEN, COMPETITION_BURDEN_MAX, DECO, Ecology, NICHE_EFF_SCALE,
-    NICHE_OVERLAP_THRESHOLD,
+    NICHE_OVERLAP_THRESHOLD, SpeciesKind,
 };
 use crate::save_state;
 
@@ -86,8 +86,20 @@ impl Ecology {
         // comparisons per pass, negligible.
         let mut burdens: Vec<(u32, f64)> = Vec::new();
         if self.deco_eff_choice_mode == save_state::DECO_CHOICE_SELECTIVE {
+            // Phase 34: the competitive-exclusion window is the DECO FAMILY
+            // (the DECO root plus any derived DECO forks), not just the exact
+            // `"deco"` name — forked DECO clades carry a derived kind name
+            // but still live on the deco_efficiency niche axis.
             let living: Vec<(u32, f64, f64, usize)> = self.species_clades.iter()
-                .filter(|c| c.death_tick.is_none() && c.kind == self.kind_name(DECO))
+                .filter(|c| {
+                    c.death_tick.is_none() && {
+                        if c.kind_id == u32::MAX {
+                            c.kind == self.kind_name(DECO)
+                        } else {
+                            self.root_kind(c.kind_id as SpeciesKind) == DECO
+                        }
+                    }
+                })
                 .map(|c| (c.id, c.niche_offset, c.centroid_genome.deco_efficiency, c.members.len()))
                 .collect();
             for i in 0..living.len() {

@@ -19,8 +19,12 @@
 // 直接消费；createPhylogenyOverlay 才依赖 document。
 
 export const PHYLOGENY_VERSION = 1;
-export const CLADE_RECORD_SIZE = 40; // Phase 16: +niche f32 tail (offset 36)
-export const EVENT_RECORD_SIZE = 56;
+// Phase 34: the Rust scratch arena grew both records by one u32 tail field
+// (clade kind_id @40, event kind_id @56). The readers MUST use the new
+// sizes to keep the clade/event/name regions aligned with the engine;
+// every pre-Phase-34 offset is unchanged, only the stride grew.
+export const CLADE_RECORD_SIZE = 44; // Phase 34: +kind_id u32 tail (offset 40)
+export const EVENT_RECORD_SIZE = 60; // Phase 34: +kind_id u32 tail (offset 56)
 export const CLADE_CAP = 64;
 export const EVENT_CAP = 64;
 export const CLADE_NAME_CAP = 32;

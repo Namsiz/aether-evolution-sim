@@ -118,6 +118,10 @@ pub struct KindDef {
     /// Phase 33: diet data (who this kind eats). Legacy six are populated in
     /// `legacy_kind_defs`; unknown kinds get the conservative default.
     pub diet: Diet,
+    /// Phase 34: the kind this one forked from (`None` for the six legacy
+    /// ancestors — they are the roots of the kind tree). Pure data event:
+    /// every other field is copied from the parent at mint time.
+    pub parent_kind: Option<SpeciesKind>,
 }
 
 impl KindDef {
@@ -144,6 +148,7 @@ impl KindDef {
             mutates_fin_color: false,
             mutates_deco_eff: false,
             diet: Diet::conservative(),
+            parent_kind: None,
         }
     }
 }
@@ -221,6 +226,7 @@ fn legacy_kind_defs() -> Vec<KindDef> {
             mutates_fin_color: false,
             mutates_deco_eff: false,
             diet: Diet { eats_plant: true, plant_types: Vec::new(), eats_carcass: false, prey_kinds: Vec::new() },
+            parent_kind: None,
         },
         KindDef {
             id: PRED, name: "pred",
@@ -240,6 +246,7 @@ fn legacy_kind_defs() -> Vec<KindDef> {
             mutates_fin_color: false,
             mutates_deco_eff: false,
             diet: Diet { eats_plant: false, plant_types: Vec::new(), eats_carcass: true, prey_kinds: vec![HERB, FISH] },
+            parent_kind: None,
         },
         KindDef {
             id: SCAV, name: "scav",
@@ -259,6 +266,7 @@ fn legacy_kind_defs() -> Vec<KindDef> {
             mutates_fin_color: false,
             mutates_deco_eff: false,
             diet: Diet { eats_plant: true, plant_types: Vec::new(), eats_carcass: true, prey_kinds: Vec::new() },
+            parent_kind: None,
         },
         KindDef {
             id: OMN, name: "omn",
@@ -278,6 +286,7 @@ fn legacy_kind_defs() -> Vec<KindDef> {
             mutates_fin_color: false,
             mutates_deco_eff: false,
             diet: Diet { eats_plant: true, plant_types: Vec::new(), eats_carcass: true, prey_kinds: Vec::new() },
+            parent_kind: None,
         },
         KindDef {
             id: FISH, name: "fish",
@@ -297,6 +306,7 @@ fn legacy_kind_defs() -> Vec<KindDef> {
             mutates_fin_color: true,
             mutates_deco_eff: false,
             diet: Diet { eats_plant: true, plant_types: Vec::new(), eats_carcass: false, prey_kinds: Vec::new() },
+            parent_kind: None,
         },
         KindDef {
             id: DECO, name: "deco",
@@ -316,6 +326,7 @@ fn legacy_kind_defs() -> Vec<KindDef> {
             mutates_fin_color: false,
             mutates_deco_eff: true,
             diet: Diet { eats_plant: false, plant_types: Vec::new(), eats_carcass: true, prey_kinds: Vec::new() },
+            parent_kind: None,
         },
     ]
 }
@@ -666,10 +677,20 @@ pub struct SpeciationEvent {
 /// Detector cadence in ticks (sample() runs on the 20-tick grid, so the
 /// effective cadence is exactly 60 ticks).
 const SPECIATION_CHECK_TICKS: u32 = 60;
-/// MST cut threshold on the 1-D deco_efficiency distance. deco_efficiency is
-/// clamped to [0.5, 1.5] by mutate, so 0.35 is roughly a third of the legal
-/// band — a real bimodal split, not mutation noise.
+/// MST cut threshold on the weighted multi-axis trait distance (Phase 34:
+/// core speed/sense/size + ext loci + the DECO efficiency axis). All axes are
+/// normalized to roughly unit scale (see `pair_mst_distance`), so 0.35 is a
+/// real bimodal split, not mutation noise.
+///
+/// INSTRUMENT, NOT SCRIPT (Phase 34 ruling): this constant and the gates
+/// below are measurement parameters of the detector — they are applied
+/// identically to every kind (no per-species script, no directional bias).
 pub const SPECIATION_DISTANCE_THRESHOLD: f64 = 0.35;
+/// Per-paired-ext-locus contribution to the MST edge weight: the mean over
+/// id-paired loci of |Δvalue| (unit [0,1] band, already normalized) times
+/// this static weight. Unpaired (one-sided) loci contribute 0 — symmetric,
+/// no bias toward gaining or losing loci.
+pub const EXT_LOCUS_WEIGHT: f64 = 0.5;
 /// Geographic isolation gate: the nearest cross-cluster pair must be farther
 /// apart than this (DECO home range is ≈150-180 world units).
 pub const GEO_ISOLATION_DIST: f64 = 100.0;
@@ -773,6 +794,19 @@ pub struct SpeciesClade {
     /// Phase 16: 1-D niche position in [-1, 1]. Living daughters re-derive it
     /// every pass (parent position + centroid eff gap); fossils freeze it.
     pub niche_offset: f64,
+    /// Phase 34: registry kind id of this clade's family (root clades carry
+    /// the ancestor kind 0-5; daughter clades carry the kind minted at fork
+    /// time). `u32::MAX` only appears on clades restored from pre-v8 saves
+    /// whose kind could not be resolved (backfilled from the name).
+    pub kind_id: u32,
+    /// Phase 34: the derived kind id minted when this clade forked off its
+    /// parent (`None` for root clades and for clades restored from pre-v8
+    /// saves, where no kind fork existed). Identity source: existing members
+    /// keep their old kind; births INTO this clade carry this kind id.
+    pub derived_kind: Option<u32>,
+    /// Phase 34: trait axes active for this clade's detection pass
+    /// ("speed", "sense", "size", optionally "ext", "deco_eff").
+    pub axes: Vec<&'static str>,
 }
 
 /// One clade-based speciation event (parent clade → one or more daughter
@@ -787,6 +821,10 @@ pub struct CladeSpeciationEvent {
     /// exclusion (the losing clade carried a nonzero burden when its members
     /// emptied). Appended at the tail; JSON key "kind" defaults to 0.
     pub event_kind: u8,
+    /// Phase 34: registry kind id of the affected clade (speciation: the
+    /// minted derived kind; extinction/exclusion: the dying clade's kind).
+    /// Additive C-ABI tail; defaults to u32::MAX on pre-Phase-34 records.
+    pub kind_id: u32,
 }
 
 /// Tiny union-find over MST vertex slots (n ≤ MAX_DECO = 80; no rank or
@@ -1050,6 +1088,16 @@ pub struct Ecology {
     /// Ohno duplication of the highest-id locus). Pure bookkeeping — it never
     /// feeds the trajectory, only observability / determinism cross-checks.
     pub ext_dup_events: u64,
+    /// Phase 34: per-kind speciation time gate (index = registry kind id).
+    /// Replaces the single `last_clade_spec_tick` (kept for save compat) so
+    /// each kind's detector runs on its own clock; padded in `register_kind`.
+    pub last_spec_tick_by_kind: Vec<u32>,
+    /// Phase 34: lineage labels of the most recent legacy HERB speciation
+    /// event (side "a" = the low-speed cluster, side "b" = the high-speed
+    /// cluster). The drain/bite instrument keys on these (the retired
+    /// 迅聚/缓独 constants' dynamics, now deterministically derived names).
+    pub herb_lineage_a: Option<String>,
+    pub herb_lineage_b: Option<String>,
 }
 
 impl Ecology {
@@ -1145,6 +1193,12 @@ impl Ecology {
             // Phase 32: open-locus genesis starts OFF (bit-exact legacy run).
             genesis_on: false,
             ext_dup_events: 0,
+            // Phase 34: per-kind time gate (padded in register_kind to the
+            // registry length) + retired-script lineage labels (empty until the
+            // first legacy HERB speciation event).
+            last_spec_tick_by_kind: Vec::new(),
+            herb_lineage_a: None,
+            herb_lineage_b: None,
         };
         eco.init_grass();
         eco.seed_life();
@@ -1274,6 +1328,12 @@ impl Ecology {
             // Phase 32: open-locus genesis starts OFF (bit-exact legacy run).
             genesis_on: false,
             ext_dup_events: 0,
+            // Phase 34: per-kind time gate (padded in register_kind to the
+            // registry length) + retired-script lineage labels (empty until the
+            // first legacy HERB speciation event).
+            last_spec_tick_by_kind: Vec::new(),
+            herb_lineage_a: None,
+            herb_lineage_b: None,
         };
         eco.init_grass();
         eco.seed_life();
@@ -1287,14 +1347,65 @@ impl Ecology {
 
     pub fn kind_name(&self, id: SpeciesKind) -> &'static str { self.kinds.name(id) }
 
-    /// Register a new species at runtime (ghost kinds in tests now; Phase 34
-    /// kind-forking later). Appends per-kind history/fitness slots so the id
-    /// is always indexable.
+    /// Register a new species at runtime (kind-forking in Phase 34). Appends
+    /// per-kind history/fitness/speciation-gate slots so the id is always
+    /// indexable.
     pub fn register_kind(&mut self, def: KindDef) -> SpeciesKind {
         let id = self.kinds.register(def);
         while self.evolution.len() <= id as usize { self.evolution.push(Vec::new()); }
         while self.generation_fitness.len() <= id as usize { self.generation_fitness.push(Vec::new()); }
+        while self.last_spec_tick_by_kind.len() <= id as usize { self.last_spec_tick_by_kind.push(0); }
         id
+    }
+
+    /// Phase 34: the ancestor kind at the root of `kind`'s fork lineage
+    /// (walks `KindDef.parent_kind` to the first `None` — one of the six
+    /// legacy ancestors). Pure registry read; used to keep a daughter clade
+    /// attached to its family's root.
+    pub fn root_kind(&self, kind: SpeciesKind) -> SpeciesKind {
+        let mut k = kind;
+        for _ in 0..self.kinds.len() {
+            match self.kind_def(k).parent_kind {
+                Some(p) => k = p,
+                None => return k,
+            }
+        }
+        k
+    }
+
+    /// Phase 34: the registry kind id that births INTO `clade_id` should
+    /// carry. Daughter clades fork a derived kind (`derived_kind`); root and
+    /// pre-fork clades fall back to the caller's kind. Unknown clades
+    /// (pre-first-detection sentinel 0) also fall back.
+    pub fn clade_kind(&self, clade_id: u32, fallback: SpeciesKind) -> SpeciesKind {
+        if let Some(c) = self.species_clades.iter().find(|c| c.id == clade_id) {
+            if let Some(dk) = c.derived_kind { return dk as SpeciesKind; }
+            if c.kind_id != u32::MAX { return c.kind_id as SpeciesKind; }
+        }
+        fallback
+    }
+
+    /// Phase 34: the HERB lineage-bite instrument for the feeding/help paths.
+    /// The retired preset names (迅聚/缓独) are gone; the modifiers key on
+    /// the most recent HERB divergence event's derived labels (side "a" = the
+    /// low-speed cluster, side "b" = the high-speed cluster). Any other
+    /// lineage reads neutral 1.0.
+    fn herb_lineage_bite(&self, lineage: Option<&'static str>) -> f64 {
+        match (lineage, self.herb_lineage_a.as_deref(), self.herb_lineage_b.as_deref()) {
+            (Some(l), Some(a), Some(_)) if l == a => 1.4,
+            (Some(l), Some(a), Some(b)) if l == b => 0.7,
+            _ => 1.0,
+        }
+    }
+
+    /// Phase 34: the HERB lineage-drain instrument (update_herb total
+    /// drain), same keying as `herb_lineage_bite`.
+    fn herb_lineage_drain(&self, lineage: Option<&'static str>) -> f64 {
+        match (lineage, self.herb_lineage_a.as_deref(), self.herb_lineage_b.as_deref()) {
+            (Some(l), Some(a), Some(_)) if l == a => 1.15,
+            (Some(l), Some(a), Some(b)) if l == b => 0.85,
+            _ => 1.0,
+        }
     }
 
     // ----- plant registry (Phase 33) -------------------------------------
@@ -2187,7 +2298,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         }
         if needy.is_none() { return false; }
         let line_a = self.agents[a_idx].lineage;
-        let lineage_bite = match line_a { Some("迅聚") => 1.4, Some("缓独") => 0.7, _ => 1.0 };
+        let lineage_bite = self.herb_lineage_bite(line_a);
         if let Some(w_idx) = willing {
             // Help path: transfer this mouthful to willing neighbor
             self.agents[a_idx].help_cd = HELP_CD_MIN + self.rng.next_f64() * HELP_CD_RAND;
@@ -2453,13 +2564,16 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             let child_z = (a_z + b_z) * 0.5 + jz;
             let max_gen_child = a_gen.max(b_gen) + 1;
             let parent_clade = self.agents[idx].clade_id;
-            if let Some(child) = self.spawn(a_kind, child_x, child_z, Some(g), max_gen_child, 0.0) {
+            // Phase 34 kind-fork: births INTO a forked clade carry the clade's
+            // derived kind; root-clade births keep the parent's kind.
+            let child_kind = self.clade_kind(parent_clade, a_kind);
+            if let Some(child) = self.spawn(child_kind, child_x, child_z, Some(g), max_gen_child, 0.0) {
                 child.lineage = a_lineage.or(b_lineage);
                 child.clade_id = parent_clade;
                 let (drain_herb, drain_pred) = self.kind_def(self.agents[idx].kind).repro_drain_pair;
                 self.agents[idx].energy -= drain_herb;
                 self.agents[mate_j].energy -= drain_pred;
-                if HELP_ENABLED && self.agents[idx].kind == HERB {
+                if HELP_ENABLED && self.root_kind(self.agents[idx].kind) == HERB {
                     self.drain_e_h += 68.0;
                 }
                 self.agents[idx].repro = cooldown;
@@ -2481,12 +2595,14 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             let cx = self.agents[idx].x + aether_libm::cos(ang) * 3.0;
             let cz = self.agents[idx].z + aether_libm::sin(ang) * 3.0;
             let parent_clade = self.agents[idx].clade_id;
-            if let Some(child) = self.spawn(a_kind_a2, cx, cz, Some(g), a_gen_a2 + 1, 0.0) {
+            // Phase 34 kind-fork (asexual path): same clade-derived kind rule.
+            let child_kind_a2 = self.clade_kind(parent_clade, a_kind_a2);
+            if let Some(child) = self.spawn(child_kind_a2, cx, cz, Some(g), a_gen_a2 + 1, 0.0) {
                 child.lineage = a_lineage_a2;
                 child.clade_id = parent_clade;
                 let drain = self.kind_def(self.agents[idx].kind).repro_drain_solo;
                 self.agents[idx].energy -= drain;
-                if HELP_ENABLED && self.agents[idx].kind == HERB {
+                if HELP_ENABLED && self.root_kind(self.agents[idx].kind) == HERB {
                     self.drain_e_h += 52.0;
                 }
                 self.agents[idx].repro = cooldown * 1.4;
@@ -2540,8 +2656,8 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         self.agents[idx].hydration = (self.agents[idx].hydration - 0.0025 * h + if y_val < WATER_LEVEL + 1.5 { 0.10 * h } else { 0.0 }).min(1.0);
 
         let lineage_a = self.agents[idx].lineage;
-        let lineage_drain = match lineage_a { Some("迅聚") => 1.15, Some("缓独") => 0.85, _ => 1.0 };
-        let lineage_bite = match lineage_a { Some("迅聚") => 1.4, Some("缓独") => 0.7, _ => 1.0 };
+        let lineage_drain = self.herb_lineage_drain(lineage_a);
+        let lineage_bite = self.herb_lineage_bite(lineage_a);
 
         self.agents[idx].fatigue = (self.agents[idx].fatigue + self.agents[idx].activity * 0.06 * h
             - if self.agents[idx].activity < 0.15 { 0.22 * h } else { 0.0 }).clamp(0.0, 1.0);
@@ -2723,11 +2839,10 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
 
     fn update_pred(&mut self, idx: usize, h: f64) {
         let p_kind = self.agents[idx].kind;
-        // Phase 33: diet gates — PRED hunts live prey (prey_kinds = [HERB,
-        // FISH], the legacy two-nearest scan order) and scavenges carcasses.
-        // Both read from the registry; for the legacy PRED they are true
-        // (bit-exact), and the prey scan itself stays on the legacy path this
-        // phase (a data-driven matrix scan is a Phase 34 re-baseline).
+        // Phase 33/34: diet gates — PRED hunts live prey (prey_kinds, the
+        // legacy PRED scans [HERB, FISH] in that order) and scavenges
+        // carcasses. Both read from the registry; the prey scan is
+        // data-driven since Phase 34 (bit-equivalent under the default diet).
         let pred_has_prey = !self.diet_of(p_kind).prey_kinds.is_empty();
         let pred_eats_carcass = self.diet_of(p_kind).eats_carcass;
         self.agents[idx].age += h;
@@ -2757,24 +2872,29 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 let my_x = self.agents[idx].x;
                 let my_z = self.agents[idx].z;
                 let my_ground = terrain_height(my_x, my_z);
-                let h_opt = self.nearest(idx, HERB, g_sense, None::<fn(&Agent) -> bool>);
-                let f_opt = self.nearest(idx, FISH, g_sense, None::<fn(&Agent) -> bool>);
-                // Choose prey: when near shore (my_ground < WATER_LEVEL + 3.0)
-                // the predator is a fish specialist — fish are slower to flee
-                // (no fear response) and concentrated, so they are preferred
-                // whenever reachable. Inland predators hunt herb only.
+                // Phase 34: data-driven prey scan — the prey KIND LIST comes
+                // from the registry (`KindDef.diet.prey_kinds`; legacy PRED =
+                // [HERB, FISH], the same two `nearest` calls in the same
+                // order, so the scan is bit-equivalent under the default
+                // diet). Reachability stays a physical constraint: aquatic
+                // prey (the `Fish` behavior template) are reachable only from
+                // the water's edge. Selection: a reachable FISH candidate is
+                // preferred (the legacy near-shore fish-specialist rule);
+                // otherwise the first reachable candidate in scan order.
                 let fish_reachable = my_ground < WATER_LEVEL + 3.0;
-                match (h_opt, f_opt) {
-                    (Some((hj, hd)), Some((fj, _fd))) => {
-                        if fish_reachable {
-                            prey_opt = Some((fj, _fd));
-                        } else {
-                            prey_opt = Some((hj, hd));
+                let mut candidates: Vec<(usize, f64, SpeciesKind)> = Vec::new();
+                for &pk in &self.diet_of(p_kind).prey_kinds {
+                    if let Some(cand) = self.nearest(idx, pk, g_sense, None::<fn(&Agent) -> bool>) {
+                        let aquatic = self.kind_def(pk).behavior == BehaviorTemplate::Fish;
+                        if !aquatic || fish_reachable {
+                            candidates.push((cand.0, cand.1, pk));
                         }
                     }
-                    (Some(x), None) => prey_opt = Some(x),
-                    (None, Some(x)) => { if fish_reachable { prey_opt = Some(x); } else { prey_opt = None; } }
-                    (None, None) => prey_opt = None,
+                }
+                if let Some(fish) = candidates.iter().find(|c| c.2 == FISH) {
+                    prey_opt = Some((fish.0, fish.1));
+                } else if let Some(first) = candidates.first() {
+                    prey_opt = Some((first.0, first.1));
                 }
             }
             let mut best_carcass: Option<usize> = None;
@@ -3698,22 +3818,12 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 self.agents.retain(|a| a.alive);
             }
 
-            // Endangered predator immigration
-            if (self.count(PRED) as u32) < 5 {
-                let imm_roll = self.rng.next_f64();
-                if imm_roll < 0.002 {
-                    let ang = self.rng.next_f64() * std::f64::consts::PI * 2.0;
-                    let r = 350.0 + self.rng.next_f64().sqrt() * 200.0;
-                    let x = aether_libm::cos(ang) * r;
-                    let z = aether_libm::sin(ang) * r;
-                    let th = terrain_height(x, z);
-                    if th > WATER_LEVEL + 1.5 && th < 80.0 && slope_at(x, z) < 0.7 {
-                        let age_imm = 30.0 + self.rng.next_f64() * 80.0;
-                        let g_imm = self.random_genome(PRED);
-                        self.spawn(PRED, x, z, Some(g_imm), 0, age_imm);
-                    }
-                }
-            }
+            // Phase 34: the "hand of god" endangered-predator immigration is
+            // RETIRED — extinction is now a real evolutionary outcome, and
+            // the main RNG stream no longer draws here (re-baseline covered).
+            // The experimenter injection interface is the public
+            // `spawn_agent` method (off by default; nothing in the engine
+            // calls it on its own).
 
             // Safety valve: prune oldest when over cap
             let total_cap = MAX_HERB + MAX_PRED + MAX_SCAV + MAX_OMN + MAX_FISH + MAX_DECO;
@@ -3845,7 +3955,11 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 });
                 if self.evolution[*kind_idx].len() > 100 { self.evolution[*kind_idx].remove(0); }
 
-                // Speciation detection for HERB only
+                // HERB lineage divergence (Phase 34: the legacy script retired —
+                // no `speciation_fired < 3` throttle, no 迅聚/缓独 preset names.
+                // The two sides get deterministic derived labels
+                // "<kind>-L<n><side>" (no semantic preset); the CV/social gates
+                // and the 60-tick spacing remain static instruments.)
                 if *kind == HERB && alive.len() >= 30 {
                     let speeds: Vec<f64> = alive.iter().map(|a| a.genome.speed).collect();
                     let avg_spd = speeds.iter().sum::<f64>() / speeds.len() as f64;
@@ -3874,9 +3988,17 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                         // JS Math.round — truncation via `as usize` would be wrong.
                         let count_fast = (social_high * speeds.len() as f64 + 0.5) as usize;
                         let count_slow = (social_low * speeds.len() as f64 + 0.5) as usize;
+                        // Deterministic derived labels: event number + neutral
+                        // side letter. Side "a" = the low-speed cluster, side
+                        // "b" = the high-speed cluster (matches the marking
+                        // below; no preset meaning in the letters).
+                        let label_a = format!("{}-L{}a", self.kind_name(HERB), self.speciation_fired + 1);
+                        let label_b = format!("{}-L{}b", self.kind_name(HERB), self.speciation_fired + 1);
+                        let name_a = save_state::intern_str(&label_a);
+                        let name_b = save_state::intern_str(&label_b);
                         let lineages = vec![
-                            LineageInfo { id: "social_fast", name: "迅聚", avg_speed: low_avg, count: count_fast },
-                            LineageInfo { id: "solitary_slow", name: "缓独", avg_speed: high_avg, count: count_slow },
+                            LineageInfo { id: "lineage-a", name: name_a, avg_speed: low_avg, count: count_fast },
+                            LineageInfo { id: "lineage-b", name: name_b, avg_speed: high_avg, count: count_slow },
                         ];
                         self.speciation_event = Some(SpeciationEvent {
                             t: self.time, parent_kind: self.kind_name(HERB), lineages,
@@ -3884,25 +4006,33 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                             gap_idx,
                             name_suffix: format!("#{}", self.speciation_fired + 1),
                         });
-                        if self.speciation_fired < 3 && self.time - self.last_speciation > 60.0 {
+                        // Phase 34: the `< 3` throttle is retired — the
+                        // counter keeps counting (it still feeds the checksum
+                        // stream), the time spacing stays the instrument.
+                        if self.time - self.last_speciation > 60.0 {
                             self.last_speciation = self.time;
                             self.speciation_fired += 1;
                         }
-                        // 谱系标记：每次 speciation event 都重打标（不受 speciationFired 节流）；
-                        // 已隔离谱系的个体不重划（保持隔离群成员稳定）。打标不消耗 RNG。
+                        // 谱系标记：每次 speciation event 都重打标；已隔离谱系
+                        // 的个体不重划（保持隔离群成员稳定）。打标不消耗 RNG。
                         for (i, &idx) in sorted_idx.iter().enumerate() {
                             let cur = self.agents[idx].lineage.unwrap_or("");
                             if self.isolated_groups.contains_key(cur) { continue; }
-                            self.agents[idx].lineage = Some(if i < gap_idx { "迅聚" } else { "缓独" });
+                            self.agents[idx].lineage = Some(if i < gap_idx { name_a } else { name_b });
                         }
-                        // 隔离登记：分化群之间生殖隔离；code 按 JS 的 keys().length + 1 递增
-                        for name in ["迅聚", "缓独"] {
+                        // 隔离登记：分化群之间生殖隔离；code 按 keys().length + 1 递增
+                        for name in [name_a, name_b] {
                             if !self.isolated_groups.contains_key(name) {
                                 let code = format!("隔离群-{}", self.isolated_groups.len() + 1);
                                 self.isolated_groups.insert(name, IsolatedGroup { code, kind: self.kind_name(HERB), since: self.time });
                                 self.isolated_order.push(name);
                             }
                         }
+                        // The drain/bite instruments now key on the MOST RECENT
+                        // event's derived labels (the retired script keyed the
+                        // 迅聚/缓独 constants forever).
+                        self.herb_lineage_a = Some(label_a);
+                        self.herb_lineage_b = Some(label_b);
                     }
                 }
             }
@@ -4035,18 +4165,66 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         acc
     }
 
-    /// Prim's MST over the complete graph with 1-D |Δdeco_efficiency| weights.
-    /// Returns n−1 edges (weight, from, to) with vertex = position in `eff`.
-    /// Deterministic: the lowest-index frontier vertex wins distance ties.
-    fn mst_edges_1d(eff: &[f64]) -> Vec<(f64, usize, usize)> {
-        let n = eff.len();
+    /// Phase 34: weighted multi-axis trait distance between two agents — the
+    /// MST edge metric replacing the 1-D |Δdeco_efficiency| distance. Core
+    /// axes follow the `pair_trait_distance` normalization style
+    /// (speed/6.4, sense/116, size/1.12, L1 mean); the ext-locus
+    /// contribution is `EXT_LOCUS_WEIGHT × mean(|Δvalue|)` over id-paired
+    /// loci (unit [0,1] band, symmetric, unpaired = 0); kinds whose genome
+    /// mutates `deco_efficiency` add the raw |Δeff| (the [0.5, 1.5] band ⇒
+    /// ≤ 1.0, same unit scale). Pure function of two genomes + the kind's
+    /// `KindDef`: zero RNG, zero state — a detector instrument, not a script.
+    fn pair_mst_distance(&self, ia: usize, ib: usize, kind: SpeciesKind) -> f64 {
+        let ga = &self.agents[ia].genome;
+        let gb = &self.agents[ib].genome;
+        let core = ((ga.speed - gb.speed).abs() / 6.4
+            + (ga.sense - gb.sense).abs() / 116.0
+            + (ga.size - gb.size).abs() / 1.12) / 3.0;
+        let mut d = core + Self::ext_locus_distance(&ga.ext, &gb.ext);
+        if self.kind_def(kind).mutates_deco_eff {
+            d += (ga.deco_efficiency - gb.deco_efficiency).abs();
+        }
+        d
+    }
+
+    /// Phase 34: the ext-locus contribution to the MST edge weight. Mean
+    /// |Δvalue| over the id-paired loci (the lists are id-sorted — the Phase
+    /// 32 invariant — so a two-pointer merge pairs them deterministically),
+    /// scaled by the static `EXT_LOCUS_WEIGHT`. 0 when no locus is paired.
+    fn ext_locus_distance(a: &[Locus], b: &[Locus]) -> f64 {
+        if a.is_empty() || b.is_empty() { return 0.0; }
+        let (mut i, mut j) = (0usize, 0usize);
+        let mut sum = 0.0f64;
+        let mut paired = 0usize;
+        while i < a.len() && j < b.len() {
+            match a[i].id.cmp(&b[j].id) {
+                std::cmp::Ordering::Equal => {
+                    sum += (a[i].value - b[j].value).abs();
+                    paired += 1;
+                    i += 1;
+                    j += 1;
+                }
+                std::cmp::Ordering::Less => i += 1,
+                std::cmp::Ordering::Greater => j += 1,
+            }
+        }
+        if paired == 0 { 0.0 } else { EXT_LOCUS_WEIGHT * sum / paired as f64 }
+    }
+
+    /// Prim's MST over the complete graph with the Phase 34 weighted
+    /// multi-axis metric (edge weights computed on demand through `dist`).
+    /// Returns n−1 edges (weight, from, to) with vertex = population
+    /// position. Same deterministic tie-breaking as the retired 1-D variant:
+    /// the lowest-index frontier vertex wins distance ties, and relaxation
+    /// keeps the first (lowest-index) predecessor on equal weights.
+    fn mst_edges_weighted(n: usize, dist: &dyn Fn(usize, usize) -> f64) -> Vec<(f64, usize, usize)> {
         if n < 2 { return Vec::new(); }
         let mut in_tree = vec![false; n];
         let mut best_w = vec![f64::INFINITY; n];
         let mut best_from = vec![usize::MAX; n];
         in_tree[0] = true;
         for k in 1..n {
-            best_w[k] = (eff[k] - eff[0]).abs();
+            best_w[k] = dist(0, k);
             best_from[k] = 0;
         }
         let mut edges = Vec::with_capacity(n - 1);
@@ -4064,7 +4242,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             edges.push((pick_w, best_from[pick], pick));
             for k in 0..n {
                 if !in_tree[k] {
-                    let d = (eff[k] - eff[pick]).abs();
+                    let d = dist(pick, k);
                     if d < best_w[k] { best_w[k] = d; best_from[k] = pick; }
                 }
             }
@@ -4073,12 +4251,12 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
     }
 
     /// Minimum Euclidean distance (world units) between two agent groups.
-    fn min_cross_dist(agents: &[Agent], deco_idx: &[usize], ga: &[usize], gb: &[usize]) -> f64 {
+    fn min_cross_dist(agents: &[Agent], pop_idx: &[usize], ga: &[usize], gb: &[usize]) -> f64 {
         let mut best = f64::INFINITY;
         for &p in ga {
-            let a = &agents[deco_idx[p]];
+            let a = &agents[pop_idx[p]];
             for &q in gb {
-                let b = &agents[deco_idx[q]];
+                let b = &agents[pop_idx[q]];
                 let d = (a.x - b.x).hypot(a.z - b.z);
                 if d < best { best = d; }
             }
@@ -4086,113 +4264,189 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         best
     }
 
-    /// Phase 15 speciation detector; fires every SPECIATION_CHECK_TICKS from
-    /// sample(). Consumes no RNG draws, so checksums are unaffected.
+    /// Phase 34 generalized speciation detector: every kind's population is
+    /// screened on the weighted multi-axis metric (Phase 15-33 ran DECO only).
+    /// Fires every SPECIATION_CHECK_TICKS from sample(). Consumes no RNG
+    /// draws; thresholds/gates are static instruments applied uniformly to
+    /// all kinds (measuring devices, not per-species scripts).
     /// `#[inline(never)]`: inlining this (plus detect_splits) into the hot
     /// sample() monomorphizes multi-KB of engine into one wasm function and
     /// starves LLVM's shared-code passes — measured +11 KB on the binary.
     #[inline(never)]
     fn check_speciation(&mut self) {
         let now = self.tick_count;
-        let deco_idx: Vec<usize> = self.agents.iter().enumerate()
-            .filter(|(_, a)| a.alive && a.kind == DECO)
-            .map(|(i, _)| i)
-            .collect();
 
-        // (a) rebuild cached member lists + extinction bookkeeping.
+        // (a) rebuild cached member lists + extinction bookkeeping (all
+        // clades of all kinds, Phase 34). Family guard: an agent counts
+        // toward a clade record only when that record belongs to the agent's
+        // own kind family — unassigned sentinel-0 strays that transiently
+        // point at another family's root never contaminate its cache.
         for clade in self.species_clades.iter_mut() { clade.members.clear(); }
-        let known: Vec<u32> = self.species_clades.iter().map(|c| c.id).collect();
-        for &i in &deco_idx {
-            let cid = self.agents[i].clade_id;
-            if let Some(pos) = known.iter().position(|&k| k == cid) {
-                self.species_clades[pos].members.push(self.agents[i].id);
+        for a in self.agents.iter() {
+            if !a.alive { continue; }
+            if self.clade_belongs_to_family(a.clade_id, a.kind) {
+                let pos = self.species_clades.iter().position(|c| c.id == a.clade_id).unwrap();
+                self.species_clades[pos].members.push(a.id);
             }
         }
         // Phase 16: a clade whose member count hits zero freezes its record
         // AND logs an extinction event in the unified log. kind 2 = the clade
         // carried a competitive burden in the previous pass (Gause exclusion),
-        // kind 1 = plain death (resource loss / old age).
-        let mut extinct: Vec<(u32, u8)> = Vec::new();
+        // kind 1 = plain death (resource loss / old age). A root clade
+        // emptying is a TRUE species extinction — no rescue exists anymore
+        // (the Phase 34 神之手 retirement makes this the real record).
+        let mut extinct: Vec<(u32, u8, u32)> = Vec::new();
         for clade in self.species_clades.iter_mut() {
             if clade.members.is_empty() && clade.death_tick.is_none() {
                 clade.death_tick = Some(now);
-                let kind = if self.clade_burdens.iter().any(|(id, b)| *id == clade.id && *b > 0.0) {
+                let ek = if self.clade_burdens.iter().any(|(id, b)| *id == clade.id && *b > 0.0) {
                     EVENT_KIND_COMPETITIVE_EXCLUSION
                 } else {
                     EVENT_KIND_EXTINCTION
                 };
-                extinct.push((clade.id, kind));
+                extinct.push((clade.id, ek, clade.kind_id));
             }
         }
-        for (id, kind) in extinct {
+        for (id, ek, kid) in extinct {
             self.speciation_events.push(CladeSpeciationEvent {
                 tick: now,
                 parent_clade_id: id,
                 child_clade_ids: Vec::new(),
                 genetic_distance: 0.0,
-                event_kind: kind,
+                event_kind: ek,
+                kind_id: kid,
             });
         }
-        if deco_idx.is_empty() { return; }
 
-        // (b) lazy root clade. Id 0 doubles as Agent.clade_id's default, so
-        // fresh sims and legacy (pre-Phase-15) saves land here on first pass.
-        let has_root = self.species_clades.iter().any(|c| c.kind == self.kind_name(DECO) && c.parent_id.is_none());
-        if !has_root {
-            let refs: Vec<&Agent> = deco_idx.iter().map(|&i| &self.agents[i]).collect();
-            let centroid = Self::mean_genome(&refs);
-            let id = self.next_clade_id;
-            self.next_clade_id += 1;
-            self.species_clades.push(SpeciesClade {
-                id,
-                parent_id: None,
-                kind: self.kind_name(DECO),
-                name: self.kind_name(DECO).to_string(),
-                birth_tick: 0,
-                death_tick: None,
-                centroid_genome: centroid,
-                members: deco_idx.iter().map(|&i| self.agents[i].id).collect(),
-                niche_offset: 0.0,
-            });
+        // (b/c) per-kind: population → lazy root clade → repoint strays →
+        // time-gated multi-axis split detection. Registry id order keeps the
+        // pass deterministic.
+        let n_kinds = self.kinds.len();
+        while self.last_spec_tick_by_kind.len() < n_kinds {
+            self.last_spec_tick_by_kind.push(0);
         }
-        // Re-point DECOs whose clade id no longer exists to the root.
-        let root_id = self.species_clades.iter()
-            .find(|c| c.kind == self.kind_name(DECO) && c.parent_id.is_none()).unwrap().id;
-        for &i in &deco_idx {
-            let cid = self.agents[i].clade_id;
-            if cid != root_id && !self.species_clades.iter().any(|c| c.id == cid) {
-                self.agents[i].clade_id = root_id;
+        for k in 0..n_kinds {
+            let kind = k as SpeciesKind;
+            let idxs: Vec<usize> = self.agents.iter().enumerate()
+                .filter(|(_, a)| a.alive && a.kind == kind)
+                .map(|(i, _)| i)
+                .collect();
+            if idxs.is_empty() { continue; }
+            // (b) Strays repoint to the FAMILY's root record when one exists
+            // (the ancestor kind's root; a derived kind's lineage roots at its
+            // ancestor's root). An agent with clade_id 0 (unassigned) is
+            // repointed the same way. Kinds that never split have no root
+            // record and their agents keep the 0 sentinel — the tree stays
+            // minimal until a split materializes the root (Phase 34).
+            if let Some(root_id) = self.kind_root_clade_id(kind) {
+                for &i in &idxs {
+                    let cid = self.agents[i].clade_id;
+                    if !self.clade_belongs_to_family(cid, kind) {
+                        self.agents[i].clade_id = root_id;
+                    }
+                }
+            }
+            // (c) split detection behind the per-kind time gate.
+            if idxs.len() >= 2
+                && now.saturating_sub(self.last_spec_tick_by_kind[k]) >= MIN_SPEC_TIME_TICKS
+            {
+                self.detect_splits(now, kind, &idxs);
             }
         }
 
-        // (c) split detection behind the time gate.
-        if deco_idx.len() >= 2 && now.saturating_sub(self.last_clade_spec_tick) >= MIN_SPEC_TIME_TICKS {
-            self.detect_splits(now, &deco_idx);
-        }
-
         // (d) refresh cached members + centroids from live agents.
-        self.refresh_clade_stats(&deco_idx);
+        self.refresh_clade_stats();
 
         // (e) Phase 16: niche re-derivation + competitive-exclusion burdens
         // (impl in niche.rs; pure bookkeeping — consumes no RNG draws).
         self.update_niches_and_competition();
     }
 
-    /// MST gap detection + clade split. `deco_idx` holds the agent slots of
-    /// all alive DECOs; vertex positions below index into it. Deliberately
-    /// HashMap/std-sort free: n ≤ MAX_DECO = 80, and every generic sort or
-    /// hash-map instantiation would monomorphize multi-KB machinery into the
-    /// wasm binary (insertion sorts over tiny vecs are both smaller and fast).
+    /// Phase 34: the trait axes the detector measures for `kind` (recorded on
+    /// every clade as the SaveState v8 `axes` field): the three core axes
+    /// (always active, pair_trait_distance normalization) + the ext-locus
+    /// contribution (always active; zero when no locus is carried) + the
+    /// efficiency axis for kinds whose genome mutates `deco_efficiency`.
+    fn detection_axes(&self, kind: SpeciesKind) -> Vec<&'static str> {
+        let mut axes: Vec<&'static str> = vec!["speed", "sense", "size", "ext"];
+        if self.kind_def(kind).mutates_deco_eff { axes.push("deco_eff"); }
+        axes
+    }
+
+    /// Phase 34: the family's root clade record id — the ancestor kind's
+    /// root (walking the fork lineage up). `None` when the family has no
+    /// root record yet (no split has fired for it, and no derived kind can
+    /// exist in that case).
+    fn kind_root_clade_id(&self, kind: SpeciesKind) -> Option<u32> {
+        let root_k = self.root_kind(kind);
+        self.species_clades.iter()
+            .find(|c| c.parent_id.is_none() && c.kind_id == root_k as u32)
+            .map(|c| c.id)
+    }
+
+    /// Phase 34: is clade record `cid` a valid home for an agent of `kind`?
+    /// Missing records are invalid; the family check walks the fork lineage
+    /// (`root_kind`) so a daughter clade of this kind's family is kept and a
+    /// clade of another kind's family is repointed. Pre-v8 saves carry
+    /// `kind_id = u32::MAX` — those fall back to the recorded kind NAME.
+    fn clade_belongs_to_family(&self, cid: u32, kind: SpeciesKind) -> bool {
+        let Some(c) = self.species_clades.iter().find(|c| c.id == cid) else { return false; };
+        if c.kind_id == u32::MAX {
+            return c.kind == self.kind_name(kind);
+        }
+        self.root_kind(c.kind_id as SpeciesKind) == self.root_kind(kind)
+    }
+
+    /// MST gap detection + clade split + Phase 34 kind-fork. `idxs` holds
+    /// the agent slots of all alive agents of `kind`; vertex positions
+    /// below index into it. Deliberately HashMap/std-sort free: every
+    /// generic sort or hash-map instantiation would monomorphize multi-KB
+    /// machinery into the wasm binary (insertion sorts over tiny vecs are
+    /// both smaller and fast).
     #[inline(never)]
-    fn detect_splits(&mut self, now: u32, deco_idx: &[usize]) {
-        let n = deco_idx.len();
-        let eff: Vec<f64> = deco_idx.iter().map(|&i| self.agents[i].genome.deco_efficiency).collect();
-        let all_edges = Self::mst_edges_1d(&eff);
+    fn detect_splits(&mut self, now: u32, kind: SpeciesKind, idxs: &[usize]) {
+        let n = idxs.len();
+        // Phase 34: weighted multi-axis metric (core + ext + the DECO
+        // family's efficiency axis). `pair_mst_distance` is a pure function
+        // of two genomes — zero RNG, zero state.
+        let dist = |pa: usize, pb: usize| self.pair_mst_distance(idxs[pa], idxs[pb], kind);
+        let all_edges = Self::mst_edges_weighted(n, &dist);
         let cut: Vec<(f64, usize, usize)> = all_edges.iter()
             .filter(|(w, _, _)| *w >= SPECIATION_DISTANCE_THRESHOLD)
             .copied()
             .collect();
         if cut.is_empty() { return; }
+
+        // Phase 34: materialize this lineage's root clade if the split fired
+        // before any root record existed. A kind that never splits never
+        // grows a root record (the tree stays minimal); the root is
+        // "born" at tick 0 but MATERIALIZED at its first split, and every
+        // unassigned member (clade_id 0 sentinel) is assigned to it here.
+        if self.kind_root_clade_id(kind).is_none() {
+            let refs: Vec<&Agent> = idxs.iter().map(|&i| &self.agents[i]).collect();
+            let centroid = Self::mean_genome(&refs);
+            let id = self.next_clade_id;
+            self.next_clade_id += 1;
+            self.species_clades.push(SpeciesClade {
+                id,
+                parent_id: None,
+                kind: self.kind_name(kind),
+                name: self.kind_name(kind).to_string(),
+                birth_tick: 0,
+                death_tick: None,
+                centroid_genome: centroid,
+                members: idxs.iter().map(|&i| self.agents[i].id).collect(),
+                niche_offset: 0.0,
+                kind_id: kind as u32,
+                derived_kind: None,
+                axes: self.detection_axes(kind),
+            });
+            for &i in idxs {
+                if self.agents[i].clade_id == 0 {
+                    self.agents[i].clade_id = id;
+                }
+            }
+        }
 
         // Forest of genomic clusters: union only the sub-threshold MST edges.
         // comp_root[p] = union-find root; roots[] dedupes them in first-seen
@@ -4216,7 +4470,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         for members in &comp_members {
             let mut tally: Vec<(u32, usize)> = Vec::new();
             for &p in members {
-                let cid = self.agents[deco_idx[p]].clade_id;
+                let cid = self.agents[idxs[p]].clade_id;
                 match tally.iter_mut().find(|(c, _)| *c == cid) {
                     Some((_, cnt)) => *cnt += 1,
                     None => tally.push((cid, 1)),
@@ -4249,13 +4503,13 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 continue;
             }
             let dist = Self::min_cross_dist(
-                &self.agents, deco_idx,
+                &self.agents, idxs,
                 &comp_members[parent_side], &comp_members[child_side],
             );
             if dist <= GEO_ISOLATION_DIST { continue; }
             used_as_child[child_side] = true;
             let min_id = comp_members[child_side].iter()
-                .map(|&p| self.agents[deco_idx[p]].id).min().unwrap();
+                .map(|&p| self.agents[idxs[p]].id).min().unwrap();
             splits.push((comp_clade[parent_side], min_id, comp_members[child_side].clone(), w));
         }
         if splits.is_empty() { return; }
@@ -4275,18 +4529,35 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                     child_clade_ids: Vec::new(),
                     genetic_distance: 0.0,
                     event_kind: EVENT_KIND_SPECIATION,
+                    // The forking species: the parent clade's own kind
+                    // (root ancestor or an earlier derived fork).
+                    kind_id: self.clade_kind(parent, kind) as u32,
                 });
                 last_parent = Some(parent);
             }
-            let kind = self.species_clades.iter().find(|c| c.id == parent)
-                .map(|c| c.kind).unwrap_or(self.kind_name(DECO));
             let cid = self.next_clade_id;
             self.next_clade_id += 1;
-            let refs: Vec<&Agent> = members.iter().map(|&p| &self.agents[deco_idx[p]]).collect();
+            // Phase 34 kind-fork: the daughter clade mints a derived
+            // KindDef — the parent's constants table verbatim (diet,
+            // behavior, caps), a deterministic name
+            // "<parent-name>-<clade-letter>", and the parent link. Pure data
+            // event: existing members KEEP their old kind; births INTO this
+            // clade carry the new kind id (reproduce resolves via
+            // `clade_kind`). The six ancestors stay the tree roots.
+            let family_kind = self.clade_kind(parent, kind);
+            let label = clade_letter(cid);
+            let derived_name = format!("{}-{}", self.kind_name(family_kind), label);
+            let mut ddef = self.kind_def(family_kind).clone();
+            ddef.name = Box::leak(derived_name.clone().into_boxed_str());
+            ddef.parent_kind = Some(family_kind);
+            let did = self.register_kind(ddef);
+            let derived_kind_name = self.kind_name(did);
+            let refs: Vec<&Agent> = members.iter().map(|&p| &self.agents[idxs[p]]).collect();
             let centroid = Self::mean_genome(&refs);
             // Phase 16: birth-time niche = parent niche + centroid eff gap
             // (update_niches_and_competition re-derives it on the same pass;
-            // this initial value keeps the record self-consistent).
+            // this initial value keeps the record self-consistent). Non-DECO
+            // families keep a 0-centered niche (competition stays DECO-only).
             let (parent_niche, parent_eff) = self.species_clades.iter()
                 .find(|c| c.id == parent)
                 .map(|p| (p.niche_offset, p.centroid_genome.deco_efficiency))
@@ -4295,18 +4566,21 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 + (centroid.deco_efficiency - parent_eff) * NICHE_EFF_SCALE)
                 .clamp(-1.0, 1.0);
             for &p in members.iter() {
-                self.agents[deco_idx[p]].clade_id = cid;
+                self.agents[idxs[p]].clade_id = cid;
             }
             self.species_clades.push(SpeciesClade {
                 id: cid,
                 parent_id: Some(parent),
-                kind,
-                name: format!("{}-{}", kind, clade_letter(cid)),
+                kind: derived_kind_name,
+                name: derived_name,
                 birth_tick: now,
                 death_tick: None,
                 centroid_genome: centroid,
-                members: members.iter().map(|&p| self.agents[deco_idx[p]].id).collect(),
+                members: members.iter().map(|&p| self.agents[idxs[p]].id).collect(),
                 niche_offset: niche0,
+                kind_id: did as u32,
+                derived_kind: Some(did as u32),
+                axes: self.detection_axes(did),
             });
             let ev = event.as_mut().unwrap();
             ev.child_clade_ids.push(cid);
@@ -4315,21 +4589,26 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         if let Some(ev) = event.take() {
             self.speciation_events.push(ev);
         }
+        // Per-kind time gate (Phase 34); the legacy global tick is kept in
+        // lockstep for the save contract.
+        self.last_spec_tick_by_kind[kind as usize] = now;
         self.last_clade_spec_tick = now;
     }
 
     /// Rebuild `members` from live agents and recompute centroid genomes for
     /// living clades (extinct clades keep their last frozen centroid).
+    /// Phase 34: all kinds, not just DECO.
     #[inline(never)]
-    fn refresh_clade_stats(&mut self, deco_idx: &[usize]) {
+    fn refresh_clade_stats(&mut self) {
         for clade in self.species_clades.iter_mut() { clade.members.clear(); }
-        for &i in deco_idx {
-            let cid = self.agents[i].clade_id;
-            if let Some(pos) = self.species_clades.iter().position(|c| c.id == cid) {
-                self.species_clades[pos].members.push(self.agents[i].id);
+        for a in self.agents.iter() {
+            if !a.alive { continue; }
+            if self.clade_belongs_to_family(a.clade_id, a.kind) {
+                let pos = self.species_clades.iter().position(|c| c.id == a.clade_id).unwrap();
+                self.species_clades[pos].members.push(a.id);
             }
         }
-        let alive: Vec<&Agent> = deco_idx.iter().map(|&i| &self.agents[i]).collect();
+        let alive: Vec<&Agent> = self.agents.iter().filter(|a| a.alive).collect();
         let mut centroids: Vec<(u32, Genome)> = Vec::with_capacity(self.species_clades.len());
         for clade in self.species_clades.iter() {
             if clade.members.is_empty() {
@@ -4472,24 +4751,35 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
 
     /// v1 golden-checksum contract: mixes the kind NAME's first byte (the
     /// value every legacy anchor, including `0x790184996f3acefd`, was pinned
-    /// against). Delegates to `checksum_with` with the v1 kind field.
+    /// Historical v1 golden anchor (Phase 31-33): mixes the kind NAME's
+    /// first byte (the value every legacy anchor, including
+    /// `0x790184996f3acefd`, was pinned against). Retired as primary in
+    /// Phase 34 — kept as a read-only historical accessor.
+    pub fn checksum_v1(&self) -> String {
+        self.checksum_with(|a| self.kind_name(a.kind).as_bytes()[0] as u64, false)
+    }
+
+    /// Phase 34 (Q2 ruling, promoted from the Phase 31 parallel export):
+    /// the PRIMARY checksum. Same mix stream as v1 except the kind field is
+    /// the registry id (u32) instead of the name's first byte, PLUS the
+    /// per-agent ext-locus hash (id order, a fixed draw-free computation).
+    /// Six legacy ids (0-5) never collide with the first bytes
+    /// (102/104/111/112/115/100), so v1 and v2 differ by construction.
     pub fn checksum(&self) -> String {
-        self.checksum_with(|a| self.kind_name(a.kind).as_bytes()[0] as u64)
+        self.checksum_v2()
     }
 
-    /// Phase 31 (Q2 ruling: 31 parallel export, 34 switch): identical mix
-    /// stream to v1 except the kind field is the registry id (u32) instead of
-    /// the name's first byte. Six legacy ids (0-5) never collide with the
-    /// first bytes (102/104/111/112/115/100), so v1 and v2 differ by
-    /// construction and each is deterministic on its own.
+    /// The v2 primary (alias kept so `main.rs`'s dual-output and existing
+    /// call sites keep working; `checksum()` and `checksum_v2()` are equal).
     pub fn checksum_v2(&self) -> String {
-        self.checksum_with(|a| a.kind as u32 as u64)
+        self.checksum_with(|a| a.kind as u32 as u64, true)
     }
 
-    /// Shared mix stream. `kind_field` is the only divergence point between
-    /// the v1 (name byte) and v2 (registry id) checksums — keeping it a
-    /// single source prevents the two streams from drifting.
-    fn checksum_with(&self, kind_field: impl Fn(&Agent) -> u64) -> String {
+    /// Shared mix stream. `kind_field` is the divergence point between v1
+    /// (name byte) and v2 (registry id); `mix_ext` adds the Phase 34
+    /// ext-locus hash. Keeping one source prevents the streams from
+    /// drifting.
+    fn checksum_with(&self, kind_field: impl Fn(&Agent) -> u64, mix_ext: bool) -> String {
         const MOD: u64 = 0x0000_0100_0000_01B3; // FNV-1a 64 prime 0x100000001B3
         let mut h: u128 = 14695981039346656033;
         let mut mix = |val: u64| {
@@ -4506,6 +4796,17 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             mix((a.z * 100.0).floor() as i64 as u64);
             mix((a.energy * 100.0).floor() as i64 as u64);
             mix((a.age * 10.0).floor() as i64 as u64);
+            if mix_ext {
+                // Phase 34: ext-locus hash. Each locus (id order) mixes its
+                // id + the f64 value's 32-bit halves into the agent slot.
+                // Pure function of state — zero RNG draws.
+                for l in &a.genome.ext {
+                    mix(l.id as u64);
+                    let bits = l.value.to_bits();
+                    mix((bits >> 32) as u64);
+                    mix(bits as u64);
+                }
+            }
         }
         for i in (0..self.grass.len()).step_by(7) {
             mix((self.grass[i] as f64 * 1000.0).floor() as i64 as u64);
@@ -4541,6 +4842,18 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             if a.alive && a.kind == kind { a.alive = false; }
         }
         self.agents.retain(|a| a.alive);
+    }
+    /// Phase 34: experimenter injection interface (the retired 神之手's
+    /// replacement, opt-in only). Spawns one agent of `kind` at `(x, z)`
+    /// through the FULL spawn path (biome cap check, fresh random genome,
+    /// RNG draws, generation 0) and returns the spawned agent's id, or
+    /// `None` when the kind's cap is already reached. Nothing in the engine
+    /// calls this on its own — extinction is a real outcome; this is the
+    /// controlled door for tests / the research CLI.
+    pub fn spawn_agent(&mut self, kind: SpeciesKind, x: f64, z: f64) -> Option<u32> {
+        let age = 30.0 + self.rng.next_f64() * 80.0;
+        let g = self.random_genome(kind);
+        self.spawn(kind, x, z, Some(g), 0, age).map(|a| a.id)
     }
     /// Scenario helper (Phase 4-C): directly sets a mineral-field cell. Used
     /// by the A/B grass-growth micro-test to isolate the deposit→growth leg
@@ -4705,12 +5018,122 @@ fn spec_event_to_save(e: &SpeciationEvent) -> save_state::SaveSpeciationEvent {
     }
 }
 
+/// Phase 34: one `KindDef` as its save record (the runtime registry rides
+/// `SaveState.kinds`; the six legacy entries are always present, derived
+/// fork kinds appended in registration order).
+fn kind_def_to_save(d: &KindDef) -> save_state::SaveKindDef {
+    let behavior = match d.behavior {
+        BehaviorTemplate::Herb => "Herb",
+        BehaviorTemplate::Pred => "Pred",
+        BehaviorTemplate::Scav => "Scav",
+        BehaviorTemplate::Omn => "Omn",
+        BehaviorTemplate::Fish => "Fish",
+        BehaviorTemplate::Deco => "Deco",
+    };
+    let genome_template = match d.genome_template {
+        GenomeTemplate::Herb => "Herb",
+        GenomeTemplate::Fish => "Fish",
+        GenomeTemplate::Deco => "Deco",
+        GenomeTemplate::General => "General",
+    };
+    let biome_cap = match d.biome_cap {
+        BiomeCap::Herb => "Herb",
+        BiomeCap::Pred => "Pred",
+        BiomeCap::Scav => "Scav",
+        BiomeCap::Omn => "Omn",
+        BiomeCap::Fish => "Fish",
+        BiomeCap::Fallback => "Fallback",
+    };
+    save_state::SaveKindDef {
+        name: d.name.to_string(),
+        behavior: behavior.to_string(),
+        genome_template: genome_template.to_string(),
+        biome_cap: biome_cap.to_string(),
+        global_cap: d.global_cap,
+        max_energy: d.max_energy,
+        repro_cooldown: d.repro_cooldown,
+        range_base: d.range_base,
+        mature_age: d.mature_age,
+        repro_base_threshold: d.repro_base_threshold,
+        repro_drain_pair: [d.repro_drain_pair.0, d.repro_drain_pair.1],
+        repro_drain_solo: d.repro_drain_solo,
+        start_energy: [d.start_energy.0, d.start_energy.1],
+        speed_clamp: [d.speed_clamp.0, d.speed_clamp.1],
+        mutates_fin_color: d.mutates_fin_color,
+        mutates_deco_eff: d.mutates_deco_eff,
+        eats_plant: d.diet.eats_plant,
+        plant_types: d.diet.plant_types.clone(),
+        eats_carcass: d.diet.eats_carcass,
+        prey_kinds: d.diet.prey_kinds.iter().map(|k| *k as u32).collect(),
+        parent_kind: d.parent_kind.map(|k| k as u32),
+    }
+}
+
+/// Phase 34: the inverse of `kind_def_to_save` (load side). Enum labels
+/// fall back to the conservative PRED/General/Fallback shapes when a
+/// newer-engine label is unknown; `parent_kind` is a registry id and is
+/// valid because the save list is id-ordered (parents precede children).
+fn save_kind_def_to_kind(k: &save_state::SaveKindDef) -> KindDef {
+    let behavior = match k.behavior.as_str() {
+        "Herb" => BehaviorTemplate::Herb,
+        "Pred" => BehaviorTemplate::Pred,
+        "Scav" => BehaviorTemplate::Scav,
+        "Omn" => BehaviorTemplate::Omn,
+        "Fish" => BehaviorTemplate::Fish,
+        "Deco" => BehaviorTemplate::Deco,
+        _ => BehaviorTemplate::Pred,
+    };
+    let genome_template = match k.genome_template.as_str() {
+        "Herb" => GenomeTemplate::Herb,
+        "Fish" => GenomeTemplate::Fish,
+        "Deco" => GenomeTemplate::Deco,
+        _ => GenomeTemplate::General,
+    };
+    let biome_cap = match k.biome_cap.as_str() {
+        "Herb" => BiomeCap::Herb,
+        "Pred" => BiomeCap::Pred,
+        "Scav" => BiomeCap::Scav,
+        "Omn" => BiomeCap::Omn,
+        "Fish" => BiomeCap::Fish,
+        _ => BiomeCap::Fallback,
+    };
+    KindDef {
+        id: 0, // `KindRegistry::register` assigns the real id.
+        name: save_state::intern_str(&k.name),
+        behavior,
+        genome_template,
+        biome_cap,
+        global_cap: k.global_cap,
+        max_energy: k.max_energy,
+        repro_cooldown: k.repro_cooldown,
+        range_base: k.range_base,
+        mature_age: k.mature_age,
+        repro_base_threshold: k.repro_base_threshold,
+        repro_drain_pair: (k.repro_drain_pair[0], k.repro_drain_pair[1]),
+        repro_drain_solo: k.repro_drain_solo,
+        start_energy: (k.start_energy[0], k.start_energy[1]),
+        speed_clamp: (k.speed_clamp[0], k.speed_clamp[1]),
+        mutates_fin_color: k.mutates_fin_color,
+        mutates_deco_eff: k.mutates_deco_eff,
+        diet: Diet {
+            eats_plant: k.eats_plant,
+            plant_types: k.plant_types.clone(),
+            eats_carcass: k.eats_carcass,
+            prey_kinds: k.prey_kinds.iter().map(|k| *k as SpeciesKind).collect(),
+        },
+        parent_kind: k.parent_kind.map(|k| k as SpeciesKind),
+    }
+}
+
 /// Compact camelCase JSON view of a SpeciesClade for the save-state string
 /// fields (mirrored by from_save_state's JsonClade and the JS phylogeny
 /// reader). Only centroid_eff survives the roundtrip of the centroid genome;
 /// the remaining fields are recomputed from live members on the next pass.
-/// Hand-rolled via format!: pulling in serde_json::Value/json! for these two
-/// records measurably inflated the wasm binary (Value machinery ≈ tens of KB).
+/// Phase 34 additive keys: `kindId` (the clade's registry kind id),
+/// `derivedKind` (the forked kind's NAME, null when the clade carries no
+/// derived kind) and `axes` (the detection axes active for this clade).
+/// Pre-Phase-34 JSON parses with kindId = u32::MAX / derivedKind = null /
+/// axes = [] (all `get(...)`-style, never a hard requirement).
 fn clade_to_json(c: &SpeciesClade) -> String {
     let parent = match c.parent_id {
         Some(p) => p.to_string(),
@@ -4720,23 +5143,34 @@ fn clade_to_json(c: &SpeciesClade) -> String {
         Some(t) => t.to_string(),
         None => "null".to_string(),
     };
+    let derived_kind = match c.derived_kind {
+        Some(_) => format!("\"{}\"", c.kind), // the derived kind's name, JSON-quoted
+        None => "null".to_string(),
+    };
+    let axes = c.axes.iter()
+        .map(|a| format!("\"{}\"", a))
+        .collect::<Vec<String>>()
+        .join(",");
     format!(
-        "{{\"id\":{},\"parentId\":{},\"kind\":\"{}\",\"name\":\"{}\",\"birthTick\":{},\"deathTick\":{},\"centroidEff\":{},\"aliveCount\":{},\"niche\":{}}}",
+        "{{\"id\":{},\"parentId\":{},\"kind\":\"{}\",\"name\":\"{}\",\"birthTick\":{},\"deathTick\":{},\"centroidEff\":{},\"aliveCount\":{},\"niche\":{},\"kindId\":{},\"derivedKind\":{},\"axes\":[{}]}}",
         c.id, parent, c.kind, c.name, c.birth_tick, death,
         c.centroid_genome.deco_efficiency, c.members.len(), c.niche_offset,
+        c.kind_id, derived_kind, axes,
     )
 }
 
 /// Compact camelCase JSON view of a CladeSpeciationEvent (same contract as
-/// clade_to_json).
+/// clade_to_json). Phase 34 additive key: `kindId` (the affected clade's
+/// registry kind id; u32::MAX sentinel serialized as 4294967295 on
+/// pre-Phase-34 records, which parse back to the same value).
 fn clade_event_to_json(e: &CladeSpeciationEvent) -> String {
     let children = e.child_clade_ids.iter()
         .map(|id| id.to_string())
         .collect::<Vec<String>>()
         .join(",");
     format!(
-        "{{\"tick\":{},\"parentCladeId\":{},\"childCladeIds\":[{}],\"geneticDistance\":{},\"kind\":{}}}",
-        e.tick, e.parent_clade_id, children, e.genetic_distance, e.event_kind,
+        "{{\"tick\":{},\"parentCladeId\":{},\"childCladeIds\":[{}],\"geneticDistance\":{},\"kind\":{},\"kindId\":{}}}",
+        e.tick, e.parent_clade_id, children, e.genetic_distance, e.event_kind, e.kind_id,
     )
 }
 
@@ -4926,6 +5360,13 @@ impl Ecology {
             // duplication operator running (bit-exact continuation).
             GenesisOn: self.genesis_on,
             ExtDupEvents: self.ext_dup_events,
+            // Phase 34: full runtime kind registry (legacy six + derived
+            // fork kinds, id order) + the per-kind speciation time gate +
+            // the retired HERB-script's latest lineage labels.
+            Kinds: self.kinds.defs().iter().map(kind_def_to_save).collect(),
+            LastSpecTickByKind: self.last_spec_tick_by_kind.clone(),
+            HerbLineageA: self.herb_lineage_a.clone(),
+            HerbLineageB: self.herb_lineage_b.clone(),
         }
     }
 
@@ -4952,9 +5393,26 @@ impl Ecology {
         let carcass_lock_enabled = state.CarcaseLockEnabled;
         // Phase 31: resolve saved kind names to registry ids (v5 saves only
         // carry the six legacy names; unknown names get conservative defs).
-        let mut kinds = KindRegistry::legacy();
+        // Phase 34: when the save carries the full runtime registry
+        // (`Kinds`, v8+), restore it verbatim — the six legacy entries plus
+        // any derived fork kinds (names, constants, parent links). An empty
+        // list (pre-v8) lands on the six legacy defaults.
+        let mut kinds: KindRegistry = if state.Kinds.is_empty() {
+            KindRegistry::legacy()
+        } else {
+            let mut reg = KindRegistry::legacy();
+            // The save list always starts with the six legacy entries; any
+            // entries from index 6 on are derived fork kinds restored via
+            // register (appended in save order).
+            for k in state.Kinds.iter().skip(LEGACY_KIND_COUNT) {
+                let def = save_kind_def_to_kind(k);
+                reg.register(def);
+            }
+            reg
+        };
         let kind_ids: Vec<SpeciesKind> = state.agents.iter()
             .map(|a| kinds.resolve_or_register(&a.kind)).collect();
+        let kinds_len = kinds.len();
 
         let n = state.grass.len();
         // Phase 33: restore the plant registry. Pre-v7 saves carry no list
@@ -4983,8 +5441,14 @@ impl Ecology {
         assert_eq!(state.shade.len(), n, "shade length");
         assert_eq!(state.moist.len(), n, "moist length");
         assert_eq!(state.mineral_field.len(), n, "mineral_field length");
-        assert_eq!(state.evolution.len(), 6, "evolution history slot count");
-        assert_eq!(state.generation_fitness.len(), 6, "generation_fitness slot count");
+        // Phase 34: the per-kind evolution/fitness slot lists are sized to the
+        // kind registry (six legacy by default, + derived fork kinds in v8).
+        // A shorter (legacy six) list pads with empty slots so every restored
+        // kind id stays indexable; a longer one is kept as-is.
+        assert!(state.evolution.len() >= LEGACY_KIND_COUNT,
+            "evolution history slot count must cover the legacy six");
+        assert!(state.generation_fitness.len() >= LEGACY_KIND_COUNT,
+            "generation_fitness slot count must cover the legacy six");
 
         let grass_p = state.grass_by_species;
         let suit_eff_by = state.suit_eff_by_species;
@@ -4994,17 +5458,21 @@ impl Ecology {
         let mut taken_buf = state.taken_buf;
         taken_buf.resize(pn, 0.0);
 
-        let evolution: Vec<Vec<EvolutionSample>> = state.evolution.into_iter()
+        let mut evolution: Vec<Vec<EvolutionSample>> = state.evolution.into_iter()
             .map(|hist| hist.into_iter().map(|e| EvolutionSample {
                 t: e.t, gen: e.gen, count: e.count, speed: e.speed, sense: e.sense,
                 size: e.size, metabolism: e.metabolism, bold: e.bold, curious: e.curious,
                 social: e.social, help_thr: e.help_thr,
                 deco_eff: e.DecoEffMean, deco_eff_std: e.DecoEffStd,
             }).collect::<Vec<_>>()).collect();
-        let generation_fitness: Vec<Vec<FitnessRecord>> = state.generation_fitness.into_iter()
+        let mut generation_fitness: Vec<Vec<FitnessRecord>> = state.generation_fitness.into_iter()
             .map(|recs| recs.into_iter().map(|r| FitnessRecord {
                 gen: r.gen, age: r.age, offspring: r.offspring, fitness: r.fitness,
             }).collect::<Vec<_>>()).collect();
+        // Phase 34: pad the per-kind slot lists to the restored registry so
+        // every derived fork kind id stays indexable (`die()` indexes these).
+        while evolution.len() < kinds_len { evolution.push(Vec::new()); }
+        while generation_fitness.len() < kinds_len { generation_fitness.push(Vec::new()); }
 
         let mut isolated_groups: HashMap<&'static str, IsolatedGroup> = HashMap::new();
         let mut isolated_order: Vec<&'static str> = Vec::new();
@@ -5036,6 +5504,23 @@ impl Ecology {
             // Phase 16: pre-v3 saves carry no "niche" key -> 0.0; the next
             // detection pass re-derives it from the parent chain.
             let niche = c.get("niche").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            // Phase 34 additive clade keys. Pre-v8 JSON has none of them:
+            // kindId → u32::MAX (the "unresolved" sentinel, which
+            // `clade_belongs_to_family` falls back to the kind NAME for),
+            // derivedKind → null, axes → []. The registry is restored first,
+            // so a v8 `derivedKind` name always resolves to a live id.
+            let kind_id = c.get("kindId").and_then(|v| v.as_u64()).unwrap_or(u64::MAX) as u32;
+            let derived_kind = c.get("derivedKind")
+                .and_then(|v| v.as_str())
+                .and_then(|n| kinds.id_of(n))
+                .map(|k| k as u32);
+            let axes: Vec<&'static str> = c.get("axes")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(save_state::intern_str)
+                    .collect())
+                .unwrap_or_default();
             SpeciesClade {
                 id,
                 parent_id,
@@ -5046,18 +5531,28 @@ impl Ecology {
                 centroid_genome: { let mut g = Genome::default_deco(); g.deco_efficiency = centroid_eff; g },
                 members: Vec::new(),
                 niche_offset: niche,
+                kind_id,
+                derived_kind,
+                axes,
             }
         }).collect();
-        let speciation_events = json_events.iter().map(|e| CladeSpeciationEvent {
-            tick: e["tick"].as_u64().unwrap_or(0) as u32,
-            parent_clade_id: e["parentCladeId"].as_u64().unwrap_or(0) as u32,
-            child_clade_ids: e.get("childCladeIds")
-                .and_then(|a| a.as_array())
-                .map(|arr| arr.iter().map(|v| v.as_u64().unwrap_or(0) as u32).collect())
-                .unwrap_or_default(),
-            genetic_distance: e["geneticDistance"].as_f64().unwrap_or(0.0),
-            // Phase 16: pre-v3 saves default to speciation (0).
-            event_kind: e.get("kind").and_then(|v| v.as_u64()).unwrap_or(0) as u8,
+        let speciation_events = json_events.iter().map(|e| {
+            // Phase 34 additive event key: kindId (the affected clade's
+            // registry kind id). Pre-Phase-34 records parse to the
+            // u32::MAX sentinel (the JSON stores it as 4294967295).
+            let ev_kind_id = e.get("kindId").and_then(|v| v.as_u64()).unwrap_or(u64::MAX) as u32;
+            CladeSpeciationEvent {
+                tick: e["tick"].as_u64().unwrap_or(0) as u32,
+                parent_clade_id: e["parentCladeId"].as_u64().unwrap_or(0) as u32,
+                child_clade_ids: e.get("childCladeIds")
+                    .and_then(|a| a.as_array())
+                    .map(|arr| arr.iter().map(|v| v.as_u64().unwrap_or(0) as u32).collect())
+                    .unwrap_or_default(),
+                genetic_distance: e["geneticDistance"].as_f64().unwrap_or(0.0),
+                // Phase 16: pre-v3 saves default to speciation (0).
+                event_kind: e.get("kind").and_then(|v| v.as_u64()).unwrap_or(0) as u8,
+                kind_id: ev_kind_id,
+            }
         }).collect();
         let next_clade_id = state.NextCladeId;
         let last_clade_spec_tick = state.LastCladeSpecTick;
@@ -5309,6 +5804,12 @@ impl Ecology {
             // continuation; a v6 genesis-ON save keeps the operator running).
             genesis_on: state.GenesisOn,
             ext_dup_events: state.ExtDupEvents,
+            // Phase 34: per-kind speciation time gate (zeroed on pre-v8
+            // restores) + retired HERB-script lineage labels (None pre-v8 /
+            // before the first event).
+            last_spec_tick_by_kind: state.LastSpecTickByKind,
+            herb_lineage_a: state.HerbLineageA,
+            herb_lineage_b: state.HerbLineageB,
         }
     }
 }

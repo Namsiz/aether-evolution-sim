@@ -46,11 +46,20 @@
 /// `SaveHistorySample.plant_by` become `Vec` (sized to the plant count
 /// instead of the fixed `GRASS_N`), and `SaveAgent.cargo` backfills to the
 /// plant count on older saves. The default-3 world roundtrips bit-exactly.
+/// v7 → v8 (Phase 34): speciation generalization contract. `Kinds` (the full
+/// runtime `KindRegistry` — six legacy + any derived fork kinds;
+/// `#[serde(default)]` → pre-v8 restores land on the six species),
+/// `LastSpecTickByKind` (the per-kind speciation time gate), the retired
+/// HERB-script lineage labels (`HerbLineageA`/`HerbLineageB`, both
+/// `Option<String>` defaulting to `None`), and the clade/event compact JSON
+/// strings gain additive keys: clades `kindId`/`derivedKind`/`axes`, events
+/// `kindId` (all `#[serde(default)]`-style, older clade JSON loads with
+/// kindId = u32::MAX / derivedKind = null / axes = []).
 
 use serde::{Deserialize, Serialize};
 
 
-pub const SAVE_STATE_VERSION: u32 = 7;
+pub const SAVE_STATE_VERSION: u32 = 8;
 pub const SAVE_STATE_SCHEMA_NAME: &str = "aether-sim-save-state";
 
 /// DECO selection-pressure mode selector (persisted in SaveState v2).
@@ -115,6 +124,46 @@ pub struct SavePlant {
     pub moist_w: f64,
     pub palatability: f64,
     pub fruiting: f64,
+}
+
+/// Phase 34: one serialized `KindDef` (mirrors `ecology::KindDef`). The full
+/// runtime registry rides `SaveState.kinds` in id order (six legacy entries
+/// first, derived fork kinds after). A pre-v8 save that lacks the whole
+/// list deserializes to an empty `Vec` via the parent's `#[serde(default)]`
+/// and is backfilled to the six legacy definitions on load.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct SaveKindDef {
+    pub name: String,
+    /// BehaviorTemplate as its `Display`-style label ("Herb", "Pred", …).
+    pub behavior: String,
+    /// GenomeTemplate label ("Herb", "Fish", "Deco", "General").
+    pub genome_template: String,
+    /// BiomeCap label ("Herb", …, "Fallback").
+    pub biome_cap: String,
+    pub global_cap: usize,
+    pub max_energy: f64,
+    pub repro_cooldown: f64,
+    pub range_base: f64,
+    pub mature_age: f64,
+    pub repro_base_threshold: f64,
+    /// (parent drain, mate drain) — serializes as a 2-element array.
+    pub repro_drain_pair: [f64; 2],
+    pub repro_drain_solo: f64,
+    /// (base, span) — serializes as a 2-element array.
+    pub start_energy: [f64; 2],
+    /// (min, max) — serializes as a 2-element array.
+    pub speed_clamp: [f64; 2],
+    pub mutates_fin_color: bool,
+    pub mutates_deco_eff: bool,
+    pub eats_plant: bool,
+    pub plant_types: Vec<u32>,
+    pub eats_carcass: bool,
+    pub prey_kinds: Vec<u32>,
+    /// Phase 34: the kind this one forked from (`null` for the six legacy
+    /// ancestors — they are the roots of the kind tree).
+    #[serde(default)]
+    pub parent_kind: Option<u32>,
 }
 
 /// Complete agent state (superset of render-packet AgentView: full genome,
@@ -569,6 +618,22 @@ pub struct SaveState {
     /// the running count). `#[serde(default)]` → 0 on legacy saves.
     #[serde(default)]
     pub ExtDupEvents: u64,
+    /// Phase 34: the full runtime kind registry (six legacy + derived fork
+    /// kinds, in id order). `#[serde(default)]` → pre-v8 restores land on
+    /// the six legacy definitions (the backfill happens in from_save_state).
+    #[serde(default)]
+    pub Kinds: Vec<SaveKindDef>,
+    /// Phase 34: per-kind speciation time gate (index = kind id). Empty on
+    /// pre-v8 saves → restored zeroed (a fresh clock).
+    #[serde(default)]
+    pub LastSpecTickByKind: Vec<u32>,
+    /// Phase 34: the retired HERB-script's lineage labels of the most recent
+    /// divergence event (side "a" low-speed cluster, side "b" high-speed).
+    /// `None` pre-v8 / before the first event.
+    #[serde(default)]
+    pub HerbLineageA: Option<String>,
+    #[serde(default)]
+    pub HerbLineageB: Option<String>,
 }
 
 /// Map a runtime string back to a `'static str`. Known constants are matched

@@ -442,19 +442,25 @@ pub const SCRATCH_OFF_DAYLIGHT: usize = AGENT_BASE + AGENT_CAP * AGENT_SLOT_SIZE
 pub const SCRATCH_OFF_COUNTS: usize = SCRATCH_OFF_DAYLIGHT + DAYLIGHT_CAP * 8; // 6 × u32
 pub const SCRATCH_OFF_HIST: usize = SCRATCH_OFF_COUNTS + 6 * 4; // DECO_HUE_BUCKETS_CAP × u32
 /// Phase 15: phylogeny readout region appended after the histogram area.
-/// Clade record (40 bytes since Phase 16, mirrors sim_get_clade):
+/// Clade record (44 bytes since Phase 34, mirrors sim_get_clade):
 ///   [id u32][parent u32 (u32::MAX = root)][kind_hash u32][birth u32]
 ///   [death u32 (u32::MAX = alive)][member_count u32][centroid_eff f64][argb u32]
 ///   [niche f32]   <- Phase 16 tail field (member_count = alive_count @20)
-/// Event record (56 bytes, mirrors sim_get_event):
+///   [kind_id u32] <- Phase 34 tail field (registry kind id)
+/// Event record (60 bytes since Phase 34, mirrors sim_get_event):
 ///   [tick u32][parent u32][child_count u32][event_kind u32 (was reserved)]
-///   [genetic_distance f64][child0..7 u32]
+///   [genetic_distance f64][child0..7 u32][kind_id u32]
 pub const CLADE_CAP: usize = 64;
 pub const EVENT_CAP: usize = 64;
 /// Phase 16: 36 -> 40 bytes (niche f32 appended at offset 36; existing
 /// offsets are unchanged so JS readers of the old layout only miss the tail).
-pub const CLADE_RECORD_SIZE: usize = 40;
-pub const EVENT_RECORD_SIZE: usize = 56;
+/// Phase 34: 40 -> 44 bytes (kind_id u32 appended at offset 40; the clade's
+/// registry kind id — the six legacy roots read 0-5, forked clades read the
+/// derived kind id. Old JS readers stop at 40 and are unaffected).
+pub const CLADE_RECORD_SIZE: usize = 44;
+/// Phase 34: 56 -> 60 bytes (kind_id u32 appended at offset 56; the affected
+/// clade's registry kind id, u32::MAX on pre-Phase-34 records).
+pub const EVENT_RECORD_SIZE: usize = 60;
 /// Phase 17: cataclysm record (sim_get_cataclysm, JS-provided out buffer —
 /// NOT part of the scratch arena, so SCRATCH_SIZE is unchanged):
 ///   [id u32][kind u32][tick u32][ends_at u32][remaining u32]
@@ -780,12 +786,15 @@ mod sim_exports {
         (*sim).eco.species_clades().len() as u32
     }
 
-    /// Fill the 36-byte clade record at `out`:
+    /// Fill the clade record at `out` (44 bytes since Phase 34):
     /// [id u32][parent u32 (u32::MAX = root)][kind_hash u32][birth u32]
-    /// [death u32 (u32::MAX = alive)][alive_count u32][centroid_eff f64][argb u32].
+    /// [death u32 (u32::MAX = alive)][alive_count u32][centroid_eff f64][argb u32]
+    /// [niche f32][kind_id u32].
     /// `alive_count` mirrors the last detection pass (≤ 60 ticks stale);
-    /// `argb` colors the node from centroid_eff via the Phase 9 DECO hue map.
-    /// Returns 1 on success, 0 on null/bounds failure (never traps).
+    /// `argb` colors the node from centroid_eff via the Phase 9 DECO hue map;
+    /// `kind_id` is the clade's registry kind id (Phase 34 additive tail —
+    /// old readers stop at 40 bytes and are unaffected). Returns 1 on
+    /// success, 0 on null/bounds failure (never traps).
     ///
     /// # Safety
     /// `sim` from `sim_new`; `out` writable for CLADE_RECORD_SIZE bytes.
@@ -808,6 +817,8 @@ mod sim_exports {
         // Phase 16: clade niche position (f32 tail field; offset 36 was the
         // record end before Phase 16, so old readers simply never see it).
         rec[36..40].copy_from_slice(&(c.niche_offset as f32).to_le_bytes());
+        // Phase 34: clade registry kind id (additive tail at offset 40).
+        rec[40..44].copy_from_slice(&c.kind_id.to_le_bytes());
         std::ptr::copy_nonoverlapping(rec.as_ptr(), out, CLADE_RECORD_SIZE);
         1
     }
@@ -843,9 +854,9 @@ mod sim_exports {
         (*sim).eco.clade_events().len() as u32
     }
 
-    /// Fill the 56-byte event record at `out`:
+    /// Fill the event record at `out` (60 bytes since Phase 34):
     /// [tick u32][parent_clade_id u32][child_count u32][reserved u32]
-    /// [genetic_distance f64][child0..7 u32].
+    /// [genetic_distance f64][child0..7 u32][kind_id u32].
     /// Children beyond MAX_EVENT_CHILDREN (= 8) are truncated (the engine
     /// emits one child per pass in practice). Returns child_count ≥ 1 on
     /// success, 0 on failure.
@@ -869,6 +880,9 @@ mod sim_exports {
         for (k, cid) in e.child_clade_ids.iter().take(MAX_EVENT_CHILDREN).enumerate() {
             rec[24 + k * 4..28 + k * 4].copy_from_slice(&cid.to_le_bytes());
         }
+        // Phase 34: affected clade's registry kind id (additive tail at
+        // offset 56; u32::MAX on pre-Phase-34 records).
+        rec[56..60].copy_from_slice(&e.kind_id.to_le_bytes());
         std::ptr::copy_nonoverlapping(rec.as_ptr(), out, EVENT_RECORD_SIZE);
         // Return contract (Phase 16): >= 1 on success (children count, min 1
         // so extinction records — 0 children — stay distinguishable from
