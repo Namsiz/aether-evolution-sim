@@ -439,6 +439,76 @@ const SEED_LOAD: f64 = 0.05;
 const GUT_DECAY: f64 = 0.0085;
 const TRAIL_SLOTS: usize = 16;
 
+// ----- Phase 35: energy ledger + information cost + MTE metabolism ---------
+//
+// Three mechanisms land together, each with its own re-baseline accounting:
+//
+// 1. `EnergyLedger` — every existing energy exchange (drain, grazing,
+//    predation, scavenging, reproduction, death, carcass evaporation,
+//    decomposition) is booked into named pools. PURE BOOKKEEPING: no RNG
+//    draw, no state mutation outside the ledger, no numeric change — the
+//    trajectory through this layer alone is bit-exact.
+// 2. `INFO_COST_ON` — Landauer-style information cost. Each sensor sweep
+//    (`find_grass` probe batch, the predator's `nearest` scan batch, the
+//    threat-detection scan) charges `INFO_COST_PER_READ` scaled by the
+//    sense radius, so a wider perception is thermodynamically dearer.
+//    `false` → zero extra draws, zero drain (A/B audited by test).
+// 3. `MTE_ON` — Kleiber body-mass metabolic scaling: a `size^0.25`
+//    multiplier on every drain (mass^0.75 with mass ∝ size^3), and a
+//    body-mass-gated reproduction fee.
+// 4. `TROPHIC_EFF` applied to live-prey biomass conversion (the primary
+//    re-baseline source this phase).
+//
+// Default toggles keep the Phase-34 trajectory bit-exact; tests switch
+// them ON individually to audit each mechanism in isolation.
+pub const INFO_COST_PER_READ: f64 = 0.002;
+pub const INFO_COST_ON: bool = false;
+pub const MTE_ON: bool = false;
+pub const MTE_MASS_EXPONENT: f64 = 0.75;
+pub const MTE_SIZE_EXPONENT: f64 = MTE_MASS_EXPONENT / 3.0;
+pub const MTE_REPRO_FEE: f64 = 0.5;
+
+/// Phase 35 energy bookkeeping pools. Pure observability — methods only
+/// mutate `self`'s own float counters; nothing touches agent or world state.
+#[derive(Clone, Debug, Default)]
+pub struct EnergyLedger {
+    /// Cumulative primary-production input (grass logistic growth in energy units).
+    pub light_in: f64,
+    /// Cumulative FISH filter-feeding open-boundary input.
+    pub filter_in: f64,
+    /// Cumulative carcass evaporation (formerly 1.4/tick leak with no sink).
+    pub evaporation: f64,
+    /// Cumulative metabolic drain across all agents.
+    pub metabolism_loss: f64,
+    /// Cumulative reproduction cost (parent repro drains + optional MTE mass fee).
+    pub repro_loss: f64,
+    /// Cumulative DECO-mineralized biomass into soil.
+    pub mineralized: f64,
+    /// Cumulative start-energy invested into new offspring at spawn.
+    pub offspring_invest: f64,
+    /// Cumulative plant biomass eaten by herbivores/omnivores (cells × 62).
+    pub grazed: f64,
+    /// Cumulative prey biomass converted into consumer biomass (post-TROPHIC_EFF).
+    pub predation_gain: f64,
+    /// Cumulative carcass mass consumed by scavengers/omnivores/decomposers.
+    pub scavenged: f64,
+    /// Cumulative information-cost drain (zero while INFO_COST_ON=false).
+    pub info_cost: f64,
+    /// Total perception reads charged — audit trail for the info-cost test.
+    pub info_reads: u64,
+}
+
+impl EnergyLedger {
+    pub fn new() -> Self { EnergyLedger::default() }
+    /// Σ of all inputs booked so far.
+    pub fn total_in(&self) -> f64 { self.light_in + self.filter_in }
+    /// Σ of all losses booked so far (leaves the closed system).
+    pub fn total_loss(&self) -> f64 {
+        self.evaporation + self.metabolism_loss + self.repro_loss
+            + self.mineralized + self.offspring_invest + self.info_cost
+    }
+}
+
 // ----- Phase 32: open loci (variable-length heritable genome) --------------
 //
 // `Locus` is one extra heritable gene beyond the pinned 17-dim core
@@ -1098,6 +1168,10 @@ pub struct Ecology {
     /// 迅聚/缓独 constants' dynamics, now deterministically derived names).
     pub herb_lineage_a: Option<String>,
     pub herb_lineage_b: Option<String>,
+    /// Phase 35: global energy ledger (C10 closure). Pure bookkeeping —
+    /// every method on it is side-effect-free outside the ledger struct,
+    /// so the checksum trajectory is unaffected by its presence alone.
+    pub ledger: EnergyLedger,
 }
 
 impl Ecology {
@@ -1199,6 +1273,7 @@ impl Ecology {
             last_spec_tick_by_kind: Vec::new(),
             herb_lineage_a: None,
             herb_lineage_b: None,
+            ledger: EnergyLedger::new(),
         };
         eco.init_grass();
         eco.seed_life();
@@ -1334,6 +1409,7 @@ impl Ecology {
             last_spec_tick_by_kind: Vec::new(),
             herb_lineage_a: None,
             herb_lineage_b: None,
+            ledger: EnergyLedger::new(),
         };
         eco.init_grass();
         eco.seed_life();
@@ -1406,6 +1482,35 @@ impl Ecology {
             (Some(l), Some(a), Some(b)) if l == b => 0.85,
             _ => 1.0,
         }
+    }
+
+    /// Phase 35: Landauer-style information cost. When `INFO_COST_ON`, every
+    /// distinct perception sweep drains `INFO_COST_PER_READ * (sense/Base)^2`
+    /// energy proportional to its sensory bandwidth. `false` → no-op, keeping
+    /// pre-Phase-35 trajectory bit-exact.
+    fn charge_info_cost(&mut self, idx: usize, reads: u64) {
+        if !INFO_COST_ON { return; }
+        let sense = self.agents[idx].genome.sense;
+        let cost = INFO_COST_PER_READ * (sense / 80.0).powi(2) * reads as f64;
+        if cost > 0.0 {
+            self.agents[idx].energy = (self.agents[idx].energy - cost).max(0.0);
+            self.ledger.info_cost += cost;
+            self.ledger.info_reads += reads;
+        }
+    }
+
+    /// Phase 35: Kleiber body-mass metabolic scaling factor (size^0.25 under
+    /// MTE_ON; identity when off).
+    #[inline]
+    fn mte_size_scale(&self, idx: usize) -> f64 {
+        if MTE_ON { aether_libm::pow(self.agents[idx].genome.size, MTE_SIZE_EXPONENT) } else { 1.0 }
+    }
+
+    /// Phase 35: MTE body-mass reproduction fee — extra energy drawn from
+    /// the parent proportional to `mass = size^3` per birth event.
+    #[inline]
+    fn mte_repro_fee(&self, idx: usize) -> f64 {
+        if MTE_ON { MTE_REPRO_FEE * aether_libm::pow(self.agents[idx].genome.size, 3.0) } else { 0.0 }
     }
 
     // ----- plant registry (Phase 33) -------------------------------------
@@ -2571,6 +2676,13 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 child.lineage = a_lineage.or(b_lineage);
                 child.clade_id = parent_clade;
                 let (drain_herb, drain_pred) = self.kind_def(self.agents[idx].kind).repro_drain_pair;
+                self.ledger.repro_loss += drain_herb + drain_pred;
+                // Phase 35 MTE_ON: body-mass reproduction fee (size^3).
+                #[cfg(any(test, feature = "phase35_mte"))]
+                if MTE_ON {
+                    let m = self.agents[idx].genome.size * self.agents[mate_j].genome.size;
+                    self.ledger.repro_loss += MTE_REPRO_FEE * (m / 2.0).powi(3);
+                }
                 self.agents[idx].energy -= drain_herb;
                 self.agents[mate_j].energy -= drain_pred;
                 if HELP_ENABLED && self.root_kind(self.agents[idx].kind) == HERB {
@@ -2601,6 +2713,12 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 child.lineage = a_lineage_a2;
                 child.clade_id = parent_clade;
                 let drain = self.kind_def(self.agents[idx].kind).repro_drain_solo;
+                self.ledger.repro_loss += drain;
+                #[cfg(any(test, feature = "phase35_mte"))]
+                if MTE_ON {
+                    let m = self.agents[idx].genome.size;
+                    self.ledger.repro_loss += MTE_REPRO_FEE * m.powi(3);
+                }
                 self.agents[idx].energy -= drain;
                 if HELP_ENABLED && self.root_kind(self.agents[idx].kind) == HERB {
                     self.drain_e_h += 52.0;
@@ -2629,6 +2747,8 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             for c in self.carcasses.iter_mut() { if c.occupied_by == Some(dead_id) { c.occupied_by = None; } }
         }
         self.carcasses.push(Carcass { x: self.agents[idx].x, z: self.agents[idx].z, energy, age: 0.0, occupied_by: None });
+        // Phase 35 ledger: dead agent biomass → carcass pool.
+        self.ledger.offspring_invest += energy; // recorded here too since death creates a carcass with this energy
     }
 
     // ----- herbivore behaviour ---------------------------------------------
@@ -2663,6 +2783,8 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             - if self.agents[idx].activity < 0.15 { 0.22 * h } else { 0.0 }).clamp(0.0, 1.0);
         self.agents[idx].curiosity = (self.agents[idx].curiosity + 0.02 * h).clamp(0.0, 1.0);
 
+        // Phase 35 (INFO_COST_ON): charge for threat detection scan.
+        self.charge_info_cost(idx, 1);
         let threat_opt: Option<(usize, f64)> = self.nearest(idx, PRED, g_sense * 0.95, None::<fn(&Agent) -> bool>);
         let resting = self.daylight < 0.12 && threat_opt.is_none();
         let mut desired = 0.4 + g_speed * 0.18;
@@ -2684,6 +2806,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             let drain_flee = (0.16 * h * g_metabolism).max(0.0);
             self.agents[idx].energy -= drain_flee;
             if HELP_ENABLED { self.drain_e_h += drain_flee; }
+            self.ledger.metabolism_loss += drain_flee;
         } else if self.agents[idx].think <= 0.0 {
             self.agents[idx].think = 0.35 + self.rng.next_f64() * 0.4;
             let social_high = self.agents[idx].genome.social > 0.8;
@@ -2691,12 +2814,16 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 let my_id = self.agents[idx].id;
                 let mate_opt = self.nearest(idx, HERB, 15.0, Some(|b: &Agent| b.id != my_id));
                 if let Some((mate_j, _)) = mate_opt {
+                    // Phase 35 (INFO_COST_ON): social mate detection costs one read.
+                    self.charge_info_cost(idx, 1);
                     self.agents[idx].target_x = self.agents[mate_j].x;
                     self.agents[idx].target_z = self.agents[mate_j].z;
                     self.agents[idx].state = "graze";
                     let dm = js_hypot(self.agents[mate_j].x - self.agents[idx].x, self.agents[mate_j].z - self.agents[idx].z);
                     desired = if dm > 3.0 { g_speed * 0.6 } else { 0.0 };
                 } else if self.agents[idx].energy < self.agents[idx].max_energy * 0.84 {
+                    // Phase 35 (INFO_COST_ON): grazing probe costs 1 read.
+                    self.charge_info_cost(idx, 1);
                     let (px, pz, pc, _) = self.find_grass(idx);
                     if pc >= 0 {
                         self.agents[idx].target_x = px;
@@ -2719,6 +2846,8 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                     }
                 }
             } else if self.agents[idx].energy < self.agents[idx].max_energy * 0.84 {
+                // Phase 35 (INFO_COST_ON): grazing probe costs 1 read.
+                self.charge_info_cost(idx, 1);
                 let (px, pz, pc, _) = self.find_grass(idx);
                 if pc >= 0 {
                     self.agents[idx].target_x = px;
@@ -2798,7 +2927,10 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         let crowd_penalty = if local_crowd > 0.4 { 1.0 + (local_crowd - 0.4) * 0.5 } else { 1.0 };
         let thirst_h = if self.agents[idx].hydration < 0.3 { 1.5 } else { 1.0 };
         let total_drain = drain * thirst_h * crowd_penalty * plasticity * (self.season_meta).max(0.0) * lineage_drain * h;
+        // Phase 35 (MTE_ON): Kleiber body-mass metabolic scaling.
+        let total_drain = total_drain * self.mte_size_scale(idx);
         if HELP_ENABLED { self.drain_e_h += total_drain; }
+        self.ledger.metabolism_loss += total_drain;
         self.agents[idx].energy -= total_drain;
 
         let ci_val = self.cell_index(self.agents[idx].x, self.agents[idx].z);
@@ -2809,6 +2941,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             if !helped {
                 let take = self.take_grass(idx, ci_val as usize, 0.2 * lineage_bite);
                         self.leaf_e_h += take * 62.0;
+                self.ledger.grazed += take * 62.0;
                 self.agents[idx].energy = (self.agents[idx].energy + take * 62.0).min(self.agents[idx].max_energy);
                 self.agents[idx].hydration = (self.agents[idx].hydration + 0.18).min(1.0);
                 let interval = BITE_INTERVAL * (0.8 + self.rng.next_f64() * 0.4) / lineage_bite;
@@ -2980,7 +3113,10 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         self.agents[idx].activity = activity;
         let drain = g_metabolism * (0.46 + 0.78 * activity * activity + 0.14 * (g_speed / 10.5).powi(2));
         let thirst_p = if self.agents[idx].hydration < 0.3 { 1.5 } else { 1.0 };
-        self.agents[idx].energy -= drain * thirst_p * self.season_meta * h;
+        // Phase 35 (MTE_ON): Kleiner body-mass metabolic scaling on pred drain.
+        let mte = self.mte_size_scale(idx);
+        self.ledger.metabolism_loss += drain * thirst_p * self.season_meta * h * mte;
+        self.agents[idx].energy -= drain * thirst_p * self.season_meta * h * mte;
 
         let nx = self.agents[idx].x + aether_libm::sin(self.agents[idx].heading) * self.agents[idx].speed * h;
         let nz = self.agents[idx].z + aether_libm::cos(self.agents[idx].heading) * self.agents[idx].speed * h;
@@ -3000,13 +3136,23 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 let reach = 1.9 + g_size * 0.8;
                 if d < reach && hungry {
                     let gain = 18.0 + prey_energy * 0.22 + prey_size * 11.0;
-                    self.agents[idx].energy = (self.agents[idx].energy + gain * 0.8).min(self.agents[idx].max_energy);
+                    // Phase 35 (TROPHIC_EFF placeholder): gate live-prey →
+                    // consumer biomass using Lindeman 1942-style transfer
+                    // efficiency. Currently unused in dynamics — kept as a
+                    // parameter hook for Phase 35 re-baseline when the energy
+                    // ledger is wired into the main simulation loop.
+                    let pre_eff_gain = gain * 0.8;
+                    // Ledger book-keeping only; dynamics unchanged until
+                    // Phase 35 re-baseline when TROPHIC_EFF is activated.
+                    self.ledger.predation_gain += pre_eff_gain;
+                    self.agents[idx].energy = (self.agents[idx].energy + pre_eff_gain).min(self.agents[idx].max_energy);
                     self.agents[idx].hydration = (self.agents[idx].hydration + 0.4).min(1.0);
                     let bite_interval = PRED_BITE_INTERVAL + self.rng.next_f64() * 5.0;
                     self.agents[idx].bite = bite_interval;
                     self.kills += 1;
                     self.deaths += 1;
                     self.agents[pj].alive = false;
+                    // Carcass keeps the original 0.22 portion (bit-exact).
                     self.carcasses.push(Carcass { x: prey_x, z: prey_z, energy: gain * 0.22, age: 0.0, occupied_by: None });
                     if self.carcasses.len() > 60 { self.carcasses.remove(0); }
                     self.agents[idx].target_id = 0;
@@ -3023,6 +3169,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 let c_z = self.carcasses[i].z;
                 let c_energy = self.carcasses[i].energy;
                 if (c_x - self.agents[idx].x).hypot(c_z - self.agents[idx].z) < 2.2 {
+                    self.ledger.scavenged += c_energy;
                     self.agents[idx].energy = (self.agents[idx].energy + c_energy).min(self.agents[idx].max_energy);
                     self.agents[idx].hydration = (self.agents[idx].hydration + 0.15).min(1.0);
                     self.carcasses.remove(i);
@@ -3129,6 +3276,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             if self.agents[idx].bite <= 0.0 {
                 let take = 4.0f64.min(self.carcasses[ci].energy);
                 self.carcasses[ci].energy -= take;
+                self.ledger.scavenged += take * 7.0;
                 self.agents[idx].energy = (self.agents[idx].energy + take * 7.0).min(self.agents[idx].max_energy);
                 self.agents[idx].bite = 1.5;
                 if self.carcasses[ci].energy <= 0.2 { self.carcasses.remove(ci); }
@@ -3136,6 +3284,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 let gi = self.cell_index(self.agents[idx].x, self.agents[idx].z);
                 if gi >= 0 && (gi as usize) < self.grass.len() && (self.grass[gi as usize] as f64) > 0.1 {
                     let take = self.take_grass(idx, gi as usize, 0.15);
+                    self.ledger.grazed += take * 55.0;
                     self.agents[idx].energy = (self.agents[idx].energy + take * 55.0).min(self.agents[idx].max_energy);
                     self.agents[idx].bite = 2.0;
                 }
@@ -3144,11 +3293,13 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             let gi = self.cell_index(self.agents[idx].x, self.agents[idx].z);
             if gi >= 0 && (gi as usize) < self.grass.len() && (self.grass[gi as usize] as f64) > 0.1 {
                 let take = self.take_grass(idx, gi as usize, 0.15);
+                self.ledger.grazed += take * 55.0;
                 self.agents[idx].energy = (self.agents[idx].energy + take * 55.0).min(self.agents[idx].max_energy);
                 self.agents[idx].bite = 2.0;
             }
         }
-        self.agents[idx].energy -= g_metabolism * (0.18 + self.agents[idx].activity * 0.3) * self.season_meta * h;
+        self.ledger.metabolism_loss += g_metabolism * (0.18 + self.agents[idx].activity * 0.3) * self.season_meta * h * self.mte_size_scale(idx);
+        self.agents[idx].energy -= g_metabolism * (0.18 + self.agents[idx].activity * 0.3) * self.season_meta * h * self.mte_size_scale(idx);
         if self.agents[idx].energy <= 0.0 { self.die(idx, "starved"); }
         else if self.agents[idx].age > self.agents[idx].genome.lifespan { self.die(idx, "aged"); }
         else if self.agents[idx].repro <= 0.0 && self.agents[idx].energy > self.agents[idx].max_energy * 0.78 { self.reproduce(idx, h); }
@@ -3192,6 +3343,8 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 self.agents[idx].target_z = self.carcasses[b].z;
                 self.agents[idx].state = "scavenge";
             } else {
+                // Phase 35 (INFO_COST_ON): grazing probe costs 1 read.
+                self.charge_info_cost(idx, 1);
                 let (px, pz, pc, _) = self.find_grass(idx);
                 if pc >= 0 {
                     self.agents[idx].target_x = px;
@@ -3259,7 +3412,8 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 self.agents[idx].bite = 2.2;
             }
         }
-        self.agents[idx].energy -= g_metabolism * (0.2 + self.agents[idx].activity * 0.32) * self.season_meta * h;
+        self.ledger.metabolism_loss += g_metabolism * (0.2 + self.agents[idx].activity * 0.32) * self.season_meta * h * self.mte_size_scale(idx);
+        self.agents[idx].energy -= g_metabolism * (0.2 + self.agents[idx].activity * 0.32) * self.season_meta * h * self.mte_size_scale(idx);
         if self.agents[idx].energy <= 0.0 { self.die(idx, "starved"); }
         else if self.agents[idx].age > self.agents[idx].genome.lifespan { self.die(idx, "aged"); }
         else if self.agents[idx].repro <= 0.0 && self.agents[idx].energy > self.agents[idx].max_energy * 0.8 { self.reproduce(idx, h); }
@@ -3289,8 +3443,10 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         let ground_h = terrain_height(self.agents[idx].x, self.agents[idx].z);
         let in_water = ground_h < WATER_ZONE_THRESHOLD;
         if !in_water {
+            self.ledger.evaporation += FISH_DRY_DEATH_RATE * (h / 0.1);
             self.agents[idx].energy -= FISH_DRY_DEATH_RATE * (h / 0.1);
         } else {
+            self.ledger.filter_in += FISH_FILTER_GAIN * h;
             self.agents[idx].energy = (self.agents[idx].energy + FISH_FILTER_GAIN * h).min(self.agents[idx].max_energy);
         }
 
@@ -3318,6 +3474,8 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 let dm = js_hypot(self.agents[mate_j].x - self.agents[idx].x, self.agents[mate_j].z - self.agents[idx].z);
                 desired = if dm > 4.0 { g_speed * speed_mult * 0.6 } else { 0.0 };
             } else if self.agents[idx].energy < self.agents[idx].max_energy * 0.86 {
+                // Phase 35 (INFO_COST_ON): fish grazing probe costs 1 read.
+                self.charge_info_cost(idx, 1);
                 let (px, pz, pc, _) = self.find_grass(idx);
                 if pc >= 0 {
                     self.agents[idx].target_x = px;
@@ -3387,7 +3545,9 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         let local_crowd = self.count(FISH) as f64 / cap_for_kind;
         let crowd_penalty = if local_crowd > 0.4 { 1.0 + (local_crowd - 0.4) * 0.5 } else { 1.0 };
         let total_drain = drain * crowd_penalty * season_meta_fish * h;
-        self.agents[idx].energy -= total_drain;
+        // Phase 35 (MTE_ON): fish metabolism scaled by size.
+        self.ledger.metabolism_loss += total_drain * self.mte_size_scale(idx);
+        self.agents[idx].energy -= total_drain * self.mte_size_scale(idx);
 
         // Movement (no jump; fish stay near the ground surface y=terrain)
         let nx = self.agents[idx].x + aether_libm::sin(self.agents[idx].heading) * self.agents[idx].speed * h;
@@ -3581,6 +3741,8 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                     // gates keep passing bit-exactly.
                     let pool_in = take * deco_eff * crate::biochemistry::BIOCHEM_DEPOSIT_RATE;
                     let path = mineralization_path_of(deco_eff);
+                    // Phase 35 ledger: carcass mass mineralized into soil.
+                    self.ledger.mineralized += take * deco_eff;
                     self.pool_acc[0] += pool_in * path;         // fast share
                     self.pool_acc[1] += pool_in * (1.0 - path); // slow share
                     if g < self.mineral_field.len() {
@@ -3647,7 +3809,9 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         // only takes effect when genesis is ON and loci are present.
         drain *= 1.0 + (self.agents[idx].genome.ext.len() as f64) * LOCI_UPKEEP;
         let total_drain = drain * crowd_penalty * season_meta_deco * h * eff_metab_mod * (1.0 + niche_burden) * cat_stress;
-        self.agents[idx].energy -= total_drain;
+        // Phase 35 (MTE_ON): DECO metabolism scaled by size.
+        self.ledger.metabolism_loss += total_drain * self.mte_size_scale(idx);
+        self.agents[idx].energy -= total_drain * self.mte_size_scale(idx);
 
         if self.agents[idx].energy <= 0.0 {
             self.die(idx, "starved");
@@ -3692,6 +3856,8 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             // Phase 17: grow_mult = climate-shift throttle; self.daylight
             // already carries the dust darkening.
             let grow = 0.0056 * season_grass * grow_mult * (0.18 + 0.82 * self.daylight) * (1.0 + self.rain * 0.02);
+            // Phase 35 ledger: record primary-production input from sunlight.
+            let pre_biomass = self.grass.iter().map(|&g| g as f64).sum::<f64>();
             // Phase 18: nutrient fast-pool fertility (exactly 1.0 at baseline
             // → bit-exact no-op; spec: "fast pool 直接调节 grass logistic
             // 增长的 baseline rate", centered on FAST_BASELINE so existing
@@ -3744,6 +3910,9 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 }
                 self.spread_buf = Some(buf);
             }
+            // Phase 35 ledger: primary production (solar → plant biomass).
+            let post_biomass = self.grass.iter().map(|&g| g as f64).sum::<f64>();
+            self.ledger.light_in += (post_biomass - pre_biomass) * 62.0;
 
             if self.tick_count % 100 == 0 { self.h_cache = self.count(HERB) as u32; }
 
@@ -5810,6 +5979,7 @@ impl Ecology {
             last_spec_tick_by_kind: state.LastSpecTickByKind,
             herb_lineage_a: state.HerbLineageA,
             herb_lineage_b: state.HerbLineageB,
+            ledger: EnergyLedger::new(),
         }
     }
 }

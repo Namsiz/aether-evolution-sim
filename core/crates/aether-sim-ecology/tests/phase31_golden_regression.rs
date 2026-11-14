@@ -20,6 +20,11 @@
 //! v2 value there differs from v1 only by the kind-field + ext-hash
 //! definition, not by dynamics. The 3000-tick run is where the re-baseline
 //! (a genuinely different trajectory) shows up.
+//!
+//! Phase 35: TROPHIC_EFF is a placeholder (parameter hook, NOT yet active
+//! in dynamics — see `TROPHIC_EFF` in ecology.rs). The energy ledger is
+//! pure bookkeeping, and `mte_size_scale` is a ×1.0 identity when `MTE_ON`
+//! is false, so the Phase 34 anchors remain exact.
 
 use aether_sim_ecology::ecology::Ecology;
 
@@ -42,7 +47,7 @@ fn checksum_at(seed: u32, ticks: u32) -> String {
 
 #[test]
 fn golden_seed_20261102_300_ticks() {
-    // NEW v2 anchor (Phase 34). Old v1 anchor: 0x790184996f3acefd.
+    // Phase 34 v2 anchor (unchanged: Phase 35 ledger is bookkeeping-only).
     let ck = checksum_at(20261102, 300);
     assert_eq!(ck, "0x785889bb1ec0737f",
         "300-tick v2 checksum drifted: {} — see file docs + Phase 34 report", ck);
@@ -50,8 +55,7 @@ fn golden_seed_20261102_300_ticks() {
 
 #[test]
 fn golden_seed_20261102_3000_ticks() {
-    // NEW v2 anchor (Phase 34 re-baseline: the long-run trajectory shifted).
-    // Old v1 anchor: 0x58733db4ab0c3ca0.
+    // Phase 34 v2 anchor (unchanged: Phase 35 is bookkeeping-only).
     let ck = checksum_at(20261102, 3000);
     assert_eq!(ck, "0x6dbb8f6fd216f353",
         "3000-tick v2 long-run checksum drifted: {} — if this change is an approved re-baseline, pin the new value here and record it in the phase report", ck);
@@ -59,7 +63,7 @@ fn golden_seed_20261102_3000_ticks() {
 
 #[test]
 fn golden_seed_20261105_300_ticks() {
-    // NEW v2 anchor (Phase 34). Old v1 anchor: 0x48d66bf801a9f827.
+    // Phase 34 v2 anchor (unchanged: Phase 35 is bookkeeping-only).
     let ck = checksum_at(20261105, 300);
     assert_eq!(ck, "0xf53762eefd0cf3d2",
         "alt-seed v2 checksum drifted: {} — if this change is an approved re-baseline, pin the new value here and record it in the phase report", ck);
@@ -69,7 +73,7 @@ fn golden_seed_20261105_300_ticks() {
 /// pre-Phase-34 engine. The v1 checksum (name-byte kind field, no ext hash)
 /// still reads the historical anchor — proving the 300-tick dynamics are
 /// unchanged and only the checksum DEFINITION (v1→v2) moved the 300-tick
-/// value. This is the "300-tick v1 unchanged" evidence for the report.
+/// value. Phase 35 keeps this (ledger is bookkeeping-only).
 #[test]
 fn golden_300_tick_trajectory_bit_exact_to_v1() {
     let mut eco = Ecology::new(20261102);

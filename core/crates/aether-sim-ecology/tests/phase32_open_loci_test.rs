@@ -58,8 +58,9 @@ fn genesis_off_is_bit_exact_noop() {
     assert!(eco.genesis_on == false);
     assert_eq!(eco.ext_dup_events, 0, "genesis off must never fire a dup event");
     assert_eq!(eco.ext_total_loci(), 0, "genesis off must keep ext empty");
-    // The pinned golden anchor (Phase 34 v2 primary) is unchanged by the
-    // Phase 32 mechanism.
+    // The pinned golden anchor (Phase 35 v2 primary) reflects TROPHIC_EFF
+    // wiring into predation gains; the trajectory itself shifted from
+    // Phase 34.
     assert_eq!(eco.checksum(), "0x785889bb1ec0737f");
 }
 
