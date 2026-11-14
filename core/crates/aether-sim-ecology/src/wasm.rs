@@ -1186,6 +1186,163 @@ mod sim_exports {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 38: multi-region world C-ABI (additive, does NOT touch existing sim_*).
+//
+// World = Vec<Ecology sandboxes + shared frame tree + L0 shadows + migration.
+// Each sandbox runs independently; world-level geo/biochem fires on master clock.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Build a default two-region world (side-by-side at (-250,0) and (+250,0),
+/// both radius DEFAULT_REGION_RADIUS so they overlap near origin — creates a
+/// natural corridor). The single-region path (num_regions == 1) is exactly
+/// the legacy Ecology trajectory (seed maps to region 0 identically).
+///
+/// # Safety
+/// Caller owns the returned pointer until passing it to `sim_world_free`.
+#[no_mangle]
+pub unsafe extern "C" fn sim_world_new(seed: u32, num_regions: u32) -> *mut WasmWorldCore {
+    if num_regions == 0 { return std::ptr::null_mut(); }
+    let mut regions = Vec::with_capacity(num_regions as usize);
+    // Default layout: evenly spaced along x-axis.
+    for rid in 0..num_regions {
+        let cx = if num_regions == 1 { 0.0 } else { (rid as f64 - (num_regions as f64 - 1.0) / 2.0) * 400.0 };
+        regions.push(crate::region::Region::new(rid, &format!("R{}", rid), cx, 0.0, crate::region::DEFAULT_REGION_RADIUS));
+    }
+    let w = crate::region::World::new(seed, regions);
+    Box::into_raw(Box::new(WasmWorldCore {
+        world: w,
+        scratch: vec![0u8; WORLD_SCRATCH_SIZE],
+    }))
+}
+
+/// # Safety
+/// `sim` from `sim_world_new`; must not be used after `sim_world_free`.
+#[no_mangle]
+pub unsafe extern "C" fn sim_world_free(sim: *mut WasmWorldCore) {
+    if sim.is_null() { return; }
+    drop(Box::from_raw(sim));
+}
+
+/// Advance by `n` ecological ticks (dt=0.1 each), sinusoidal daylight when series empty.
+/// Returns the new master tick count on success, 0 if `sim` is null.
+///
+/// # Safety
+/// `sim` from `sim_world_new`; `daylight` points to `daylight_len` readable f64s.
+#[no_mangle]
+pub unsafe extern "C" fn sim_world_step(
+    sim: *mut WasmWorldCore,
+    n: u32,
+    daylight: *const f64,
+    daylight_len: u32,
+) -> u32 {
+    if sim.is_null() { return 0; }
+    let core = &mut *sim;
+    for i in 0..n {
+        let dl = if !daylight.is_null() && (i as u32) < daylight_len {
+            *daylight.add(i as usize)
+        } else if !daylight.is_null() && daylight_len > 0 {
+            *daylight.add((daylight_len - 1) as usize)
+        } else {
+            let t = (core.world.tick_count as f64 * 0.1 / 300.0) * std::f64::consts::PI;
+            0.5 + 0.5 * aether_libm::sin(t)
+        };
+        core.world.update(0.1, dl);
+    }
+    core.world.tick_count
+}
+
+/// Master tick count.
+#[no_mangle]
+pub unsafe extern "C" fn sim_world_tick(sim: *mut WasmWorldCore) -> u32 {
+    if sim.is_null() { return 0; }
+    (*sim).world.tick_count
+}
+
+/// World checksum — fold per-region checksums in region-id order. Writes up to
+/// `cap` UTF-8 bytes into `buf`, returns total length written (excl nul).
+#[no_mangle]
+pub unsafe extern "C" fn sim_world_checksum(sim: *mut WasmWorldCore, buf: *mut u8, cap: u32) -> u32 {
+    if sim.is_null() || buf.is_null() || cap == 0 { return 0; }
+    let ck = (*sim).world.checksum();
+    let bytes = ck.as_bytes();
+    let len = bytes.len().min(cap as usize);
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, len);
+    len as u32
+}
+
+/// Number of regions in the world.
+#[no_mangle]
+pub unsafe extern "C" fn sim_world_region_count(sim: *mut WasmWorldCore) -> u32 {
+    if sim.is_null() { return 0; }
+    (*sim).world.n_regions() as u32
+}
+
+/// Total living agent count across all regions.
+#[no_mangle]
+pub unsafe extern "C" fn sim_world_agent_count(sim: *mut WasmWorldCore) -> u32 {
+    if sim.is_null() { return 0; }
+    (*sim).world.total_agents() as u32
+}
+
+// ─── multi-region data accessors ─────────────────────────────────────────────
+
+/// Agent counts per kind in one region (6 u32s laid out Herb/Pred/Scav/Omn/Fish/Deco).
+/// Returns count-of-filled-units (always 6 for the full vector).
+#[no_mangle]
+pub unsafe extern "C" fn sim_world_region_counts(
+    sim: *mut WasmWorldCore,
+    region_id: u32,
+    out: *mut u32,
+) -> u32 {
+    if sim.is_null() || out.is_null() { return 0; }
+    let pairs = crate::region::region_kind_counts(&(*sim).world.sandbox(region_id));
+    for k in 0..6 {
+        *out.add(k) = pairs[k].1 as u32;
+    }
+    6
+}
+
+/// L0 shadow table size (one entry per distinct (clade_id, region_id) pair).
+#[no_mangle]
+pub unsafe extern "C" fn sim_world_l0_shadow_count(sim: *mut WasmWorldCore) -> u32 {
+    if sim.is_null() { return 0; }
+    let w = &(*sim).world;
+    w.l0_shadows.len() as u32
+}
+
+/// Read one L0 shadow entry's abundance as f64.
+#[no_mangle]
+pub unsafe extern "C" fn sim_world_l0_abundance(sim: *mut WasmWorldCore, idx: u32) -> f64 {
+    if sim.is_null() { return 0.0; }
+    let w = &(*sim).world;
+    w.l0_shadows.get(idx as usize).map(|s| s.abundance).unwrap_or(0.0)
+}
+
+/// Read one L0 shadow entry's growth-rate r as f64.
+#[no_mangle]
+pub unsafe extern "C" fn sim_world_l0_r(sim: *mut WasmWorldCore, idx: u32) -> f64 {
+    if sim.is_null() { return 0.0; }
+    let w = &(*sim).world;
+    w.l0_shadows.get(idx as usize).map(|s| s.r).unwrap_or(0.0)
+}
+
+/// Read one L0 shadow entry's carrying capacity K as f64.
+#[no_mangle]
+pub unsafe extern "C" fn sim_world_l0_k(sim: *mut WasmWorldCore, idx: u32) -> f64 {
+    if sim.is_null() { return 0.0; }
+    let w = &(*sim).world;
+    w.l0_shadows.get(idx as usize).map(|s| s.k).unwrap_or(0.0)
+}
+
+#[repr(C)]
+pub struct WasmWorldCore {
+    world: crate::region::World,
+    scratch: Vec<u8>,
+}
+
+const WORLD_SCRATCH_SIZE: usize = SCRATCH_SIZE;
+
 #[cfg(test)]
 mod tests {
     use super::*;

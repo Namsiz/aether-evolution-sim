@@ -653,7 +653,7 @@ pub struct Genome {
     pub ext: Vec<Locus>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Agent {
     pub id: u32,
     pub kind: SpeciesKind,
