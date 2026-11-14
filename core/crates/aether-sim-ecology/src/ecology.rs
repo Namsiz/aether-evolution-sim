@@ -14,6 +14,7 @@ use aether_rng::Mulberry32;
 use crate::save_state;
 use crate::biochemistry::{NutrientPools, mineralization_path_of};
 use crate::geology::GeologicState;
+use crate::culture::{self, KnowledgeToken};
 use std::collections::HashMap;
 
 /// Phase 31: species identity is runtime registry data, not a code enum.
@@ -711,6 +712,8 @@ pub struct Agent {
     pub brain_last_fsm_action: u8,
     /// Phase 36: the brain one-hot action of the most recent tick (shadow book).
     pub brain_last_brain_action: u8,
+    /// Phase 37: knowledge tokens this agent has learned (id list, in learning order).
+    pub known_tokens: Vec<u32>,
 }
 
 #[derive(Debug)]
@@ -1282,6 +1285,30 @@ pub struct Ecology {
     /// (`seed ^ BRAIN_RNG_TAG`). Never mixed with `rng`/`prng`/`fish_rng`,
     /// so the main/prng/fish streams stay bit-identical.
     pub brain_learning_rng: Mulberry32,
+    /// Phase 37: knowledge token registry (open, growable). Default empty.
+    pub token_registry: crate::culture::CultureRegistry,
+    /// Phase 37: physical structure library (niche construction载体). Default empty.
+    pub structure_registry: crate::culture::StructureRegistry,
+    /// Phase 37: culture toggle (default on — formal dynamics stage, expects re-baseline).
+    pub culture_on: bool,
+    /// Phase 37: dedicated RNG stream for cultural transmission/innovation
+    /// (`seed ^ TOKEN_RNG_TAG`). Never mixed with other streams.
+    pub culture_rng: Mulberry32,
+    /// Phase 37: global culture learning telemetry (pure observability).
+    pub culture_stats: crate::culture::CultureStats,
+    /// Phase 37: propagation fidelity parameter ∈ [0,1].
+    pub culture_fidelity: f64,
+    /// Phase 37: default bias channel for social learning.
+    pub culture_bias_channel: u8, // 0=content, 1=prestige, 2=conformist, 3=all
+}
+
+fn default_fidelity() -> f64 {
+    use crate::culture::DEFAULT_FIDELITY;
+    DEFAULT_FIDELITY
+}
+
+fn default_bias_channel() -> u8 {
+    3 // default to all channels enabled
 }
 
 impl Ecology {
@@ -1395,6 +1422,15 @@ impl Ecology {
             brain_switch_enabled: BRAIN_SWITCH_ENABLED,
             brain_learning: BrainLearningStats::default(),
             brain_learning_rng: Mulberry32::new(seed ^ BRAIN_RNG_TAG),
+            // Phase 37: culture layer — ON by default for this dynamics stage,
+            // with a dedicated RNG stream separate from all ecology streams.
+            culture_on: crate::culture::CULTURE_ON,
+            token_registry: crate::culture::CultureRegistry::new(),
+            structure_registry: crate::culture::StructureRegistry::new(),
+            culture_rng: Mulberry32::new(seed ^ crate::culture::TOKEN_RNG_TAG),
+            culture_stats: crate::culture::CultureStats::default(),
+            culture_fidelity: crate::culture::DEFAULT_FIDELITY,
+            culture_bias_channel: 3, // all channels enabled by default
         };
         eco.init_grass();
         eco.seed_life();
@@ -1541,6 +1577,15 @@ impl Ecology {
             brain_switch_enabled: BRAIN_SWITCH_ENABLED,
             brain_learning: BrainLearningStats::default(),
             brain_learning_rng: Mulberry32::new(seed ^ BRAIN_RNG_TAG),
+            // Phase 37: culture layer — ON by default for this dynamics stage,
+            // with a dedicated RNG stream separate from all ecology streams.
+            culture_on: crate::culture::CULTURE_ON,
+            token_registry: crate::culture::CultureRegistry::new(),
+            structure_registry: crate::culture::StructureRegistry::new(),
+            culture_rng: Mulberry32::new(seed ^ crate::culture::TOKEN_RNG_TAG),
+            culture_stats: crate::culture::CultureStats::default(),
+            culture_fidelity: crate::culture::DEFAULT_FIDELITY,
+            culture_bias_channel: 3, // all channels enabled by default
         };
         eco.init_grass();
         eco.seed_life();
@@ -2463,6 +2508,8 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             brain_window_len: 0,
             brain_last_fsm_action: 0,
             brain_last_brain_action: 0,
+            // Phase 37: empty token set at birth — inherited via learning.
+            known_tokens: Vec::new(),
         };
         let idx = self.agents.len();
         self.agents.push(a);
@@ -4271,6 +4318,73 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 i += 1;
             }
 
+            // Phase 37: cultural dynamics — only when CULTURE_ON is true.
+            // Zero-RNG discipline: all draws use the dedicated culture_rng stream.
+            if self.culture_on && !self.token_registry.is_empty() {
+                // Collect living agent indices first to avoid borrow checker issues
+                let alive_indices: Vec<usize> = self.agents.iter().enumerate()
+                    .filter(|(_, a)| a.alive)
+                    .map(|(i, _)| i)
+                    .collect();
+                
+                // Try learning and innovation for each living agent with tokens
+                for &idx in &alive_indices {
+                    let has_tokens = !self.agents[idx].known_tokens.is_empty();
+                    if has_tokens {
+                        // Capture necessary data before mutable borrow
+                        let agent_len = self.agents.len();
+                        let n_tokens = self.agents[idx].known_tokens.len();
+                        
+                        // Try to learn a new token from next neighbor (simple model)
+                        if agent_len > 1 && n_tokens > 0 {
+                            let demoiser_idx = (self.agents[idx].id as usize + 1) % agent_len;
+                            let target_tid = self.agents[demoiser_idx].known_tokens.first().copied();
+                            if let Some(tid) = target_tid {
+                                if !self.agents[idx].known_tokens.contains(&tid) {
+                                    // Use split_at_mut to safely access both agents
+                                    let (left, right) = self.agents.split_at_mut(idx.max(demoiser_idx));
+                                    let (learner, demoiser) = if idx < demoiser_idx {
+                                        (&mut left[idx], &right[0])
+                                    } else {
+                                        (&mut left[demoiser_idx], &right[0])
+                                    };
+                                    if culture::try_learn_token(learner, tid, demoiser, 
+                                        self.culture_fidelity, &mut self.culture_rng) {
+                                        self.culture_stats.learn_count += 1;
+                                        self.culture_stats.learn_cost_total += culture::LEARNING_COST;
+                                    }
+                                }
+                            }
+                        }
+                        // Try innovation (recombination) — costs energy, may produce new token
+                        if culture::try_innovate_token(&mut self.agents[idx], &mut self.token_registry, &mut self.culture_rng).is_some() {
+                            self.culture_stats.innovation_count += 1;
+                        }
+                    }
+                }
+                // Place structures based on learned tokens (simplified model)
+                for &idx in &alive_indices {
+                    if !self.agents[idx].known_tokens.is_empty() {
+                        let first_token = self.agents[idx].known_tokens[0];
+                        let x = self.agents[idx].x;
+                        let z = self.agents[idx].z;
+                        if let Some(token) = self.token_registry.get(first_token) {
+                            let (grass_mod, _) = culture::token_to_env_mod(token);
+                            // Small probability of placing a structure
+                            if self.culture_rng.next_f64() < 0.001 {
+                                if culture::try_place_structure(&mut self.agents[idx], &mut self.structure_registry, first_token, x, z) {
+                                    self.culture_stats.structure_place_count += 1;
+                                    // Apply immediate environmental effect
+                                    self.agents[idx].energy += grass_mod * 10.0; // benefit feedback
+                                }
+                            }
+                        }
+                    }
+                }
+                // Decay structures over time
+                culture::decay_structures(&mut self.structure_registry, culture::STRUCTURE_DECAY);
+            }
+            
             for c in self.carcasses.iter_mut() { c.age += h; }
             // Phase 8: prune stale occupancy locks.
             if self.carcass_lock_enabled {
@@ -5485,6 +5599,8 @@ fn agent_to_save(a: &Agent, kinds: &KindRegistry) -> save_state::SaveAgent {
         brain_nodes_out: a.brain.nodes.iter().map(|n| n.output).collect(),
         brain_outputs: a.brain.outputs.clone(),
         brain_last_reward: a.brain.last_reward,
+        // Phase 37: learned knowledge tokens (in learning order).
+        known_tokens: a.known_tokens.clone(),
     }
 }
 
@@ -5877,6 +5993,30 @@ impl Ecology {
             TrophicEffActive: self.trophic_eff_active,
             BrainSwitchEnabled: self.brain_switch_enabled,
             BrainLearningRngState: self.brain_learning_rng.state(),
+            // Phase 37: culture layer serialization.
+            TokenRegistry: self.token_registry.tokens.iter().map(|t| {
+                save_state::SaveToken { id: t.id, vec: t.vec.clone() }
+            }).collect(),
+            StructureRegistry: self.structure_registry.structures.iter().map(|s| {
+                save_state::SaveStructure {
+                    id: s.id, token_id: s.token_id, x: s.x, z: s.z,
+                    strength: s.strength, health: s.health, builder_id: s.builder_id,
+                }
+            }).collect(),
+            CultureOn: self.culture_on,
+            CultureRngState: self.culture_rng.state(),
+            CultureFidelity: self.culture_fidelity,
+            CultureBiasChannel: self.culture_bias_channel,
+            CultureStats: save_state::SaveCultureStats {
+                learn_count: self.culture_stats.learn_count,
+                innovation_count: self.culture_stats.innovation_count,
+                structure_place_count: self.culture_stats.structure_place_count,
+                structure_maintenance_total: self.culture_stats.structure_maintenance_total,
+                learn_cost_total: self.culture_stats.learn_cost_total,
+                extinct_token_count: self.culture_stats.extinct_token_count,
+                last_extinct_tick: self.culture_stats.last_extinct_tick,
+                token_holder_count: self.culture_stats.token_holder_count,
+            },
         }
     }
 
@@ -6264,6 +6404,8 @@ impl Ecology {
                     brain_window_len: a.brain_window_len,
                     brain_last_fsm_action: 0,
                     brain_last_brain_action: 0,
+                    // Phase 37: learned knowledge tokens (empty on pre-v10 saves).
+                    known_tokens: a.known_tokens,
                 }
             }).collect(),
             carcasses: state.carcasses.into_iter().map(|c| Carcass {
@@ -6382,6 +6524,43 @@ impl Ecology {
                 // Fallback deterministic stream (pre-v9 / reset world).
                 Mulberry32::new(state.seed ^ BRAIN_RNG_TAG)
             },
+            // Phase 37: culture layer — backward-compatible defaults.
+            token_registry: {
+                let mut reg = crate::culture::CultureRegistry::new();
+                for st in state.TokenRegistry {
+                    reg.register(crate::culture::KnowledgeToken::new(st.id, st.vec));
+                }
+                reg
+            },
+            structure_registry: {
+                let mut reg = crate::culture::StructureRegistry::new();
+                let structures = &state.StructureRegistry;
+                for ss in structures {
+                    reg.structures.push(crate::culture::Structure::new(
+                        ss.id, ss.token_id, ss.x, ss.z, ss.strength, ss.health, ss.builder_id,
+                    ));
+                }
+                reg.next_structure_id = structures.last().map(|s| s.id + 1).unwrap_or(1);
+                reg
+            },
+            culture_on: state.CultureOn,
+            culture_rng: if state.CultureRngState != 0 {
+                Mulberry32::from_state(state.CultureRngState)
+            } else {
+                Mulberry32::new(state.seed ^ crate::culture::TOKEN_RNG_TAG)
+            },
+            culture_stats: crate::culture::CultureStats {
+                learn_count: state.CultureStats.learn_count,
+                innovation_count: state.CultureStats.innovation_count,
+                structure_place_count: state.CultureStats.structure_place_count,
+                structure_maintenance_total: state.CultureStats.structure_maintenance_total,
+                learn_cost_total: state.CultureStats.learn_cost_total,
+                extinct_token_count: state.CultureStats.extinct_token_count,
+                last_extinct_tick: state.CultureStats.last_extinct_tick,
+                token_holder_count: state.CultureStats.token_holder_count,
+            },
+            culture_fidelity: state.CultureFidelity,
+            culture_bias_channel: state.CultureBiasChannel,
         }
     }
 }

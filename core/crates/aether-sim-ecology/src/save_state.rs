@@ -59,7 +59,7 @@
 use serde::{Deserialize, Serialize};
 
 
-pub const SAVE_STATE_VERSION: u32 = 9;
+pub const SAVE_STATE_VERSION: u32 = 10;
 pub const SAVE_STATE_SCHEMA_NAME: &str = "aether-sim-save-state";
 
 /// DECO selection-pressure mode selector (persisted in SaveState v2).
@@ -258,6 +258,9 @@ pub struct SaveAgent {
     pub brain_outputs: Vec<f64>,
     #[serde(default)]
     pub brain_last_reward: f64,
+    /// Phase 37: learned knowledge tokens (id list, in learning order).
+    #[serde(default)]
+    pub known_tokens: Vec<u32>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -507,6 +510,41 @@ pub struct SaveSelectionPressure {
     pub crowding: f64,
 }
 
+/// Phase 37: one serialized knowledge token (mirrors `culture::KnowledgeToken`).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct SaveToken {
+    pub id: u32,
+    pub vec: Vec<f64>,
+}
+
+/// Phase 37: one serialized structure (mirrors `culture::Structure`).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct SaveStructure {
+    pub id: u32,
+    pub token_id: u32,
+    pub x: f64,
+    pub z: f64,
+    pub strength: f64,
+    pub health: f64,
+    pub builder_id: u32,
+}
+
+/// Phase 37: culture stats snapshot for telemetry.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct SaveCultureStats {
+    pub learn_count: u64,
+    pub innovation_count: u64,
+    pub structure_place_count: u64,
+    pub structure_maintenance_total: f64,
+    pub learn_cost_total: f64,
+    pub extinct_token_count: u64,
+    pub last_extinct_tick: u32,
+    pub token_holder_count: u64,
+}
+
 /// Full sim state for save/restore. Independent from render-packet `Snapshot`
 /// (Meta.version=3): this schema's `Version` starts at 1 and only counts
 /// save-state revisions.
@@ -687,6 +725,42 @@ pub struct SaveState {
     /// a fresh run start from a deterministic seed anyway.
     #[serde(default)]
     pub BrainLearningRngState: u32,
+    /// Phase 37: knowledge token registry (open, growable).
+    /// `#[serde(default)]` → pre-v10 saves restore with empty registry.
+    #[serde(default)]
+    pub TokenRegistry: Vec<SaveToken>,
+    /// Phase 37: physical structure library (niche construction载体).
+    /// `#[serde(default)]` → pre-v10 saves restore with empty structure set.
+    #[serde(default)]
+    pub StructureRegistry: Vec<SaveStructure>,
+    /// Phase 37: culture toggle. `#[serde(default)]` → pre-v10 restores ON
+    /// to match default world config; explicit false disables all culture.
+    #[serde(default = "default_culture_on")]
+    pub CultureOn: bool,
+    /// Phase 37: dedicated cultural transmission RNG state.
+    #[serde(default)]
+    pub CultureRngState: u32,
+    /// Phase 37: propagation fidelity parameter ∈ [0,1].
+    #[serde(default = "default_fidelity")]
+    pub CultureFidelity: f64,
+    /// Phase 37: bias channel mode (0=content, 1=prestige, 2=conformist, 3=all).
+    #[serde(default = "default_bias_channel")]
+    pub CultureBiasChannel: u8,
+    /// Phase 37: global culture learning telemetry.
+    #[serde(default)]
+    pub CultureStats: SaveCultureStats,
+}
+
+fn default_culture_on() -> bool {
+    true
+}
+
+fn default_fidelity() -> f64 {
+    0.9
+}
+
+fn default_bias_channel() -> u8 {
+    3 // all channels enabled
 }
 
 /// Map a runtime string back to a `'static str`. Known constants are matched
