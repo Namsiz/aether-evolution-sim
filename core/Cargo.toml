@@ -5,6 +5,7 @@ members = [
     "crates/aether-clock",
     "crates/aether-sim-ecology",
     "crates/aether-libm",
+    "crates/aether-brain",
     "crates/aether-render-packet",
     "crates/aether-biome",
 ]

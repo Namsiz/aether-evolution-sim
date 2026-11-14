@@ -1,0 +1,12 @@
+[package]
+name = "aether-brain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Phase 36: evolvable micro-brain — tiny recurrent network with Hebbian plasticity, zero-RNG deterministic learning"
+
+[dependencies]
+aether-libm = { path = "../aether-libm" }
+aether-rng = { path = "../aether-rng" }
+
+[dev-dependencies]

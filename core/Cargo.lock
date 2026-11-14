@@ -7,6 +7,14 @@ name = "aether-biome"
 version = "0.1.0"
 
 [[package]]
+name = "aether-brain"
+version = "0.1.0"
+dependencies = [
+ "aether-libm",
+ "aether-rng",
+]
+
+[[package]]
 name = "aether-clock"
 version = "0.1.0"
 
@@ -38,6 +46,7 @@ name = "aether-sim-ecology"
 version = "0.1.0"
 dependencies = [
  "aether-biome",
+ "aether-brain",
  "aether-libm",
  "aether-render-packet",
  "aether-rng",

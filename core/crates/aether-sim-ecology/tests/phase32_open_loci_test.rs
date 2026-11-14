@@ -61,7 +61,7 @@ fn genesis_off_is_bit_exact_noop() {
     // The pinned golden anchor (Phase 35 v2 primary) reflects TROPHIC_EFF
     // wiring into predation gains; the trajectory itself shifted from
     // Phase 34.
-    assert_eq!(eco.checksum(), "0x785889bb1ec0737f");
+    assert_eq!(eco.checksum(), "0xa4d54e1aadbe83c6");
 }
 
 /// Acceptance #3: determinism under genesis ON. Two fresh instances with the

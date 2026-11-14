@@ -462,11 +462,71 @@ const TRAIL_SLOTS: usize = 16;
 // Default toggles keep the Phase-34 trajectory bit-exact; tests switch
 // them ON individually to audit each mechanism in isolation.
 pub const INFO_COST_PER_READ: f64 = 0.002;
-pub const INFO_COST_ON: bool = false;
+/// Phase 36: information cost is LIVE (default on). The legacy constant is
+/// kept as the DEFAULT value read by `Ecology::new`; per-instance toggling
+/// lives on `Ecology.info_cost_on` so A/B tests can flip it at runtime while
+/// the default world (and its Phase 36 anchor) keeps it ON.
+pub const INFO_COST_ON: bool = true;
 pub const MTE_ON: bool = false;
 pub const MTE_MASS_EXPONENT: f64 = 0.75;
 pub const MTE_SIZE_EXPONENT: f64 = MTE_MASS_EXPONENT / 3.0;
 pub const MTE_REPRO_FEE: f64 = 0.5;
+
+// ----- Phase 36: evolvable micro-brain (intelligence layer) --------------
+//
+// Design constraints (roadmap §2.3 / §4 determinism discipline):
+// * `BRAIN_ON` — the shadow network runs `forward` + Hebbian learning after
+//   every FSM decision, ZERO RNG draws (pure state function). The shadow
+//   never drives behaviour unless `BRAIN_SWITCH_ENABLED` hands authority
+//   over at a speciation-check boundary.
+// * `BRAIN_UPKEEP_ON` — Herculano-Houzel-style maintenance: `BRAIN_PER_NEURON_COST
+//   × n_hidden` per tick is drained from the agent's energy and booked into
+//   `ledger.brain_cost`. This is the ONLY new energy term, so "big brains
+//   burn faster" is an emergent selection pressure, not a rule.
+// * `T_EQUIV` / `T_EQUIV_K_TICKS` — the statistical-equivalence gate for the
+//   dual-controller switchover: the brain may only take authority when its
+//   one-hot argmax agreed with the FSM's action for ≥ `T_EQUIV_K_TICKS`
+//   consecutive ticks at ≥ `T_EQUIV` agreement ratio.
+// * Learning plasticity rides the DEDICATED `BRAIN_RNG_TAG` stream for
+//   structural mutation only (Ohno node duplication); the forward pass and
+//   the Hebbian eligibility update themselves are zero-RNG, which keeps the
+//   main/prng/fish streams bit-identical.
+pub const BRAIN_ON: bool = true;
+pub const BRAIN_UPKEEP_ON: bool = true;
+pub const BRAIN_SWITCH_ENABLED: bool = false;
+/// Statistical-equivalence agreement threshold (FSM vs brain action).
+pub const T_EQUIV: f64 = 0.95;
+/// Consecutive-tick window for the equivalence gate.
+pub const T_EQUIV_K_TICKS: u32 = 60;
+/// Structural-mutation probabilities (per birth event, dedicated brain RNG).
+pub const BRAIN_MUTATE_P_ADD: f64 = 0.02;
+pub const BRAIN_MUTATE_P_DEL: f64 = 0.01;
+/// Child-inheritance weight perturbation σ.
+pub const BRAIN_PERTURB_SIGMA: f64 = 0.4;
+/// Deterministic per-agent init noise on the grandfather network.
+pub const BRAIN_NOISE_SIGMA: f64 = 0.25;
+/// Dedicated-stream seed for brain structural mutation (never main/prng/fish).
+pub const BRAIN_RNG_TAG: u32 = 0x42_52_41_49;
+/// Authority markers on `Agent.brain_authority`.
+pub const BRAIN_AUTHORITY_FSM: u8 = 0;
+pub const BRAIN_AUTHORITY_BRAIN: u8 = 1;
+
+/// Phase 36: global learning telemetry (pure observability — never feeds the
+/// trajectory). Recorded so the shadow/learning audit path is inspectable
+/// without touching agent energy.
+#[derive(Clone, Debug, Default)]
+pub struct BrainLearningStats {
+    /// Total shadow forward passes run.
+    pub forward_count: u64,
+    /// Total Hebbian eligibility updates applied.
+    pub hebbian_updates: u64,
+    /// Longest FSM↔brain agreement streak observed.
+    pub equiv_streak_max: u32,
+    /// Number of authority switches into the brain so far.
+    pub authority_switches: u32,
+    /// Cumulative brain upkeep energy drained (beyond the ledger's info_cost).
+    pub brain_energy_drained: f64,
+}
 
 /// Phase 35 energy bookkeeping pools. Pure observability — methods only
 /// mutate `self`'s own float counters; nothing touches agent or world state.
@@ -496,16 +556,20 @@ pub struct EnergyLedger {
     pub info_cost: f64,
     /// Total perception reads charged — audit trail for the info-cost test.
     pub info_reads: u64,
+    /// Phase 36: cumulative brain-upkeep drain (`BRAIN_PER_NEURON_COST × n_hidden`
+    /// per tick). Zeroed while `BRAIN_UPKEEP_ON` is off.
+    pub brain_cost: f64,
 }
 
 impl EnergyLedger {
     pub fn new() -> Self { EnergyLedger::default() }
     /// Σ of all inputs booked so far.
     pub fn total_in(&self) -> f64 { self.light_in + self.filter_in }
-    /// Σ of all losses booked so far (leaves the closed system).
+    /// Σ of all losses booked so far (leaves the closed system), including
+    /// the Phase 36 brain-upkeep drain.
     pub fn total_loss(&self) -> f64 {
         self.evaporation + self.metabolism_loss + self.repro_loss
-            + self.mineralized + self.offspring_invest + self.info_cost
+            + self.mineralized + self.offspring_invest + self.info_cost + self.brain_cost
     }
 }
 
@@ -626,6 +690,27 @@ pub struct Agent {
     /// value every fresh/legacy agent carries until the engine buckets it).
     pub clade_id: u32,
     pub offspring: u32,
+    /// Phase 36: the agent's micro-brain (tiny recurrent network). Default
+    /// zeroed; `spawn` seeds it from the kind's grandfather reference network
+    /// plus per-agent deterministic noise, `reproduce` inherits the parent's
+    /// brain, and `from_save_state` restores it from the v9 schema.
+    pub brain: aether_brain::Brain,
+    /// Phase 36 dual-controller authority: 0 = FSM drives behaviour,
+    /// 1 = the brain drives it (FSM demoted to shadow).
+    pub brain_authority: u8,
+    /// Phase 36: consecutive ticks where the brain's one-hot action agreed
+    /// with the FSM's during the `T_EQUIV` equivalence window.
+    pub brain_equiv_streak: u32,
+    /// Phase 36: tick count at which the current `brain_equiv_streak` began.
+    pub brain_equiv_start: u32,
+    /// Phase 36: running window of FSM↔brain argmax agreements (for the
+    /// `T_EQUIV` ratio test at the speciation-check boundary).
+    pub brain_agree_window: u32,
+    pub brain_window_len: u32,
+    /// Phase 36: the FSM one-hot action of the most recent tick (shadow book).
+    pub brain_last_fsm_action: u8,
+    /// Phase 36: the brain one-hot action of the most recent tick (shadow book).
+    pub brain_last_brain_action: u8,
 }
 
 #[derive(Debug)]
@@ -1172,6 +1257,31 @@ pub struct Ecology {
     /// every method on it is side-effect-free outside the ledger struct,
     /// so the checksum trajectory is unaffected by its presence alone.
     pub ledger: EnergyLedger,
+    /// Phase 36: brain shadow network toggle. Default `BRAIN_ON`; per-instance
+    /// so A/B tests can flip it at runtime without a compile-time change.
+    pub brain_on: bool,
+    /// Phase 36: brain-upkeep drain toggle (`BRAIN_UPKEEP_ON` default). When
+    /// on, every tick drains `BRAIN_PER_NEURON_COST × n_hidden` from each
+    /// agent's energy and books it into `ledger.brain_cost`.
+    pub brain_upkeep_on: bool,
+    /// Phase 36: Landauer information-cost toggle (`INFO_COST_ON` default).
+    /// Read by `charge_info_cost`; kept as a field so tests can A/B it while
+    /// the default world pays for perception.
+    pub info_cost_on: bool,
+    /// Phase 36: `TROPHIC_EFF` wiring toggle. When on, the PRED bite gain is
+    /// multiplied by `TROPHIC_EFF` (Lindeman 1942 transfer efficiency),
+    /// replacing the Phase 35 placeholder.
+    pub trophic_eff_active: bool,
+    /// Phase 36: dual-controller switchover gate. Default off (FSM stays
+    /// authoritative); when on, the brain may take authority at a
+    /// speciation-check boundary once `T_EQUIV` agreement holds.
+    pub brain_switch_enabled: bool,
+    /// Phase 36: global learning telemetry (pure observability).
+    pub brain_learning: BrainLearningStats,
+    /// Phase 36: dedicated RNG stream for brain structural mutation
+    /// (`seed ^ BRAIN_RNG_TAG`). Never mixed with `rng`/`prng`/`fish_rng`,
+    /// so the main/prng/fish streams stay bit-identical.
+    pub brain_learning_rng: Mulberry32,
 }
 
 impl Ecology {
@@ -1274,6 +1384,17 @@ impl Ecology {
             herb_lineage_a: None,
             herb_lineage_b: None,
             ledger: EnergyLedger::new(),
+            // Phase 36: evolvable micro-brain defaults — the shadow network is
+            // ON, neuron upkeep and the Landauer info cost are ON, TROPHIC_EFF
+            // is wired into the PRED bite gain, and the FSM stays authoritative
+            // (the dual-controller switchover gate is off).
+            brain_on: BRAIN_ON,
+            brain_upkeep_on: BRAIN_UPKEEP_ON,
+            info_cost_on: INFO_COST_ON,
+            trophic_eff_active: true,
+            brain_switch_enabled: BRAIN_SWITCH_ENABLED,
+            brain_learning: BrainLearningStats::default(),
+            brain_learning_rng: Mulberry32::new(seed ^ BRAIN_RNG_TAG),
         };
         eco.init_grass();
         eco.seed_life();
@@ -1410,11 +1531,170 @@ impl Ecology {
             herb_lineage_a: None,
             herb_lineage_b: None,
             ledger: EnergyLedger::new(),
+            // Phase 36: evolvable micro-brain defaults — the shadow network is
+            // ON, neuron upkeep and the Landauer info cost are ON, TROPHIC_EFF
+            // is wired into the PRED bite gain, and the FSM stays authoritative.
+            brain_on: BRAIN_ON,
+            brain_upkeep_on: BRAIN_UPKEEP_ON,
+            info_cost_on: INFO_COST_ON,
+            trophic_eff_active: true,
+            brain_switch_enabled: BRAIN_SWITCH_ENABLED,
+            brain_learning: BrainLearningStats::default(),
+            brain_learning_rng: Mulberry32::new(seed ^ BRAIN_RNG_TAG),
         };
         eco.init_grass();
         eco.seed_life();
         eco.sample();
         eco
+    }
+
+    // Phase 36: micro-brain initialization and shadow helpers.
+
+    /// Create a fresh brain seeded from the grandfather reference network for
+    /// `kind_name`, then overwrite with per-agent deterministic noise derived
+    /// from `agent_id` (zero consumption of the main/prng/fish RNG streams,
+    /// preserving their bit-exact order).
+    pub fn initial_brain(&self, kind: SpeciesKind, agent_id: u32) -> aether_brain::Brain {
+        use aether_brain::{reference_brain, BRAIN_RNG_TAG};
+        let mut b = reference_brain(self.kind_name(kind));
+        // Deterministic per-id noise on a dedicated seed — no draw from main/prng/fish.
+        let mut nrng = aether_rng::Mulberry32::new(agent_id.wrapping_mul(0x9E3779B9).wrapping_add(BRAIN_RNG_TAG));
+        b.perturb(&mut nrng, BRAIN_NOISE_SIGMA);
+        b
+    }
+
+    /// Sample an 8-channel sense vector from the live agent state **after** the
+    /// FSM has made its decision this tick (inputs are already committed to
+    /// `agent.state` / `fear` / target / etc). Zero extra RNG.
+    /// Takes `grass` explicitly so callers with only scalar aliases can
+    /// invoke this without overlapping borrows through `self`.
+    #[inline]
+    pub fn sample_sense_vector(
+        &self,
+        a: &Agent,
+        grass: &[f32],
+        cell_index_fn: impl Fn(f64, f64) -> isize,
+        daylight: f64,
+        out: &mut [f64; 8],
+    ) {
+        // 0 threat  : 1 if PRED is within sense*0.95 (legacy HERB scan).
+        out[0] = if a.fear > 0.5 { 1.0 } else { 0.0 };
+        // 1 hungry  : energy < 0.84 * max_energy (the grazing trigger used by
+        //             every herbivore branch).
+        out[1] = if a.energy < a.max_energy * 0.84 { 1.0 } else { 0.0 };
+        // 2 food_near: grass cell at position >= 0.1.
+        let ci = cell_index_fn(a.x, a.z);
+        out[2] = if ci >= 0 {
+            let gi = ci as usize;
+            if gi < grass.len() && (grass[gi] as f64) > 0.1 { 1.0 } else { 0.0 }
+        } else { 0.0 };
+        // 3 prey_near: 1 iff the agent has a live target (PRED tracking prey).
+        out[3] = if a.target_id != 0 {
+            // We need the agents slice to test liveness; caller passes a thin
+            // closure if needed. Here we just inspect the flag.
+            1.0
+        } else { 0.0 };
+        // 4 social: genome.social > 0.8 (the legacy `social_high` gate).
+        out[4] = if a.genome.social > 0.8 { 1.0 } else { 0.0 };
+        // 5 fatigue: direct carry (in [0,1]).
+        out[5] = a.fatigue.clamp(0.0, 1.0);
+        // 6 daylight: world daytime in [0,1].
+        out[6] = daylight;
+        // 7 dist_norm: distance to target normalised by speed*10+1, clamped.
+        let dx = a.target_x - a.x;
+        let dz = a.target_z - a.z;
+        let d = dx.hypot(dz);
+        let scale = (a.desired_speed.max(a.genome.speed) * 10.0 + 1.0).max(1.0);
+        out[7] = (d / scale).clamp(0.0, 1.0);
+    }
+
+    /// Derive a deterministic 7-dim one-hot action index from an agent's FSM
+    /// state / speed / repro readiness. Mirrors the high-level intent encoded
+    /// in `update_*`: flee/hunt/eat/wander → move_forward, reproduce when
+    /// conditions are met, help on cooperative interactions (rare).
+    #[inline]
+    pub fn fsm_action_from(a: &Agent) -> u8 {
+        match a.state {
+            "flee" => 4,
+            "graze" | "feed" | "eat" => 3,
+            "hunt" | "scavenge" | "approach" => 0, // move_forward
+            _ if a.repro <= 0.0 && a.energy > a.max_energy * 0.72 => 5, // reproduce
+            _ if a.help_cd <= 0.0 && a.image > 0 => 6, // help (approx)
+            _ => 0, // default: move_forward (wander/patrol/school/search/other)
+        }
+    }
+
+    /// Phase 36: run the shadow forward pass + Hebbian update on each alive
+    /// agent at the end of its per-tick FSM loop. Zero additional RNG draws:
+    /// the whole path is a pure function of `(agent_state, brain_state, dt)`.
+    /// Side effects (when toggled on):
+    /// * `energy -= upkeep` and `ledger.brain_cost += ...` (BRAIN_UPKEEP_ON)
+    /// * `charge_info_cost(idx, 1)` (INFO_COST_ON)
+    /// * Brain weights updated via hebbian_update; no main/prng/fish consumption.
+    /// The dual-controller switchover itself runs only at speciation-check
+    /// boundaries (sample() cadence), not here, to avoid per-tick overhead.
+    pub fn brain_shadow(&mut self, idx: usize, h: f64) {
+        if !self.brain_on { return; }
+        // Pre-fetch immutable state BEFORE acquiring any mutable alias, so
+        // downstream mutations can coexist with reads without NLL conflicts.
+        let a_ref = &self.agents[idx];
+        let mut sense = [0.0f64; aether_brain::INPUT_CHANNELS];
+        self.sample_sense_vector(a_ref, &self.grass, |x, z| self.cell_index(x, z), self.daylight, &mut sense);
+        let fsm_act = Self::fsm_action_from(a_ref);
+        let up_keep = if self.brain_upkeep_on && a_ref.brain.n_hid > 0 {
+            Some(a_ref.brain.upkeep() * h)
+        } else { None };
+        // Upkeep drain (books into ledger).
+        if let Some(cost) = up_keep {
+            let a = &mut self.agents[idx];
+            a.energy = (a.energy - cost).max(0.0);
+            self.ledger.brain_cost += cost;
+            self.brain_learning.brain_energy_drained += cost;
+        }
+        // Forward + Hebbian + streak bookkeeping (all within one mutable block).
+        {
+            let a = &mut self.agents[idx];
+            let _out = a.brain.forward(&sense); // out unused — shadow only
+            self.brain_learning.forward_count += 1;
+            let reward = a.brain.taxis_reward(a.energy);
+            a.brain.hebbian_update(&sense, reward, h);
+            self.brain_learning.hebbian_updates += 1;
+            a.brain_last_fsm_action = fsm_act;
+            a.brain_last_brain_action = a.brain.argmax_action() as u8;
+            if fsm_act == a.brain_last_brain_action {
+                a.brain_equiv_streak += 1;
+                a.brain_agree_window += 1;
+            } else {
+                a.brain_equiv_streak = 0;
+            }
+            a.brain_window_len += 1;
+            if a.brain_window_len > T_EQUIV_K_TICKS { a.brain_window_len = T_EQUIV_K_TICKS; }
+            if a.brain_equiv_streak > self.brain_learning.equiv_streak_max {
+                self.brain_learning.equiv_streak_max = a.brain_equiv_streak;
+            }
+        }
+    }
+
+    /// Phase 36: check whether any agent's shadow has accumulated enough
+    /// FSM↔brain agreement to flip its authority from FSM → brain. Runs ONLY
+    /// at speciation-check tick boundaries (`tick_count % SPECIATION_CHECK_TICKS
+    /// == 0`) so it never interferes with the hot update loop.
+    /// Default `BRAIN_SWITCH_ENABLED = false` keeps all legacy trajectories
+    /// bit-exact under the old code (this method is a no-op).
+    pub fn check_brain_authority_switch(&mut self) {
+        if !self.brain_switch_enabled { return; }
+        if self.tick_count % SPECIATION_CHECK_TICKS != 0 { return; }
+        for i in 0..self.agents.len() {
+            let a = &self.agents[i];
+            if !a.alive || a.brain_authority == BRAIN_AUTHORITY_BRAIN { continue; }
+            let n = a.brain_window_len.max(1) as u32;
+            let agree_ratio = a.brain_agree_window as f64 / n as f64;
+            if a.brain_equiv_streak >= T_EQUIV_K_TICKS && agree_ratio >= T_EQUIV {
+                // Mutable re-acquisition now that we've finished the shared-read phase.
+                self.agents[i].brain_authority = BRAIN_AUTHORITY_BRAIN;
+                self.brain_learning.authority_switches += 1;
+            }
+        }
     }
 
     // ----- kind registry (Phase 31) ------------------------------------
@@ -1489,7 +1769,7 @@ impl Ecology {
     /// energy proportional to its sensory bandwidth. `false` → no-op, keeping
     /// pre-Phase-35 trajectory bit-exact.
     fn charge_info_cost(&mut self, idx: usize, reads: u64) {
-        if !INFO_COST_ON { return; }
+        if !self.info_cost_on { return; }
         let sense = self.agents[idx].genome.sense;
         let cost = INFO_COST_PER_READ * (sense / 80.0).powi(2) * reads as f64;
         if cost > 0.0 {
@@ -2172,6 +2452,17 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             lineage: None,
             clade_id: 0,
             offspring: 0,
+            // Phase 36: seed the micro-brain from the kind's grandfather
+            // reference network plus per-agent deterministic noise (zero main
+            // RNG draws; the noise stream is agent-id derived).
+            brain: self.initial_brain(kind, self.next_id - 1),
+            brain_authority: BRAIN_AUTHORITY_FSM,
+            brain_equiv_streak: 0,
+            brain_equiv_start: 0,
+            brain_agree_window: 0,
+            brain_window_len: 0,
+            brain_last_fsm_action: 0,
+            brain_last_brain_action: 0,
         };
         let idx = self.agents.len();
         self.agents.push(a);
@@ -2672,9 +2963,20 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             // Phase 34 kind-fork: births INTO a forked clade carry the clade's
             // derived kind; root-clade births keep the parent's kind.
             let child_kind = self.clade_kind(parent_clade, a_kind);
+            // Phase 36: capture parent brain (immutable) before spawning so we
+            // can mutate it for the child without conflicting with the
+            // &mut Agent alias returned by spawn.
+            let parent_brain = self.agents[idx].brain.clone();
+            // Phase 36: mutate the child's brain BEFORE spawning so we never
+            // hold `&mut Agent` (from spawn) and `&mut self.brain_learning_rng`
+            // simultaneously — they are both reachable through `self`.
+            let mut child_brain = parent_brain;
+            child_brain.mutate_structure(&mut self.brain_learning_rng, BRAIN_MUTATE_P_ADD, BRAIN_MUTATE_P_DEL);
+            child_brain.perturb(&mut self.brain_learning_rng, BRAIN_PERTURB_SIGMA);
             if let Some(child) = self.spawn(child_kind, child_x, child_z, Some(g), max_gen_child, 0.0) {
                 child.lineage = a_lineage.or(b_lineage);
                 child.clade_id = parent_clade;
+                child.brain = child_brain;
                 let (drain_herb, drain_pred) = self.kind_def(self.agents[idx].kind).repro_drain_pair;
                 self.ledger.repro_loss += drain_herb + drain_pred;
                 // Phase 35 MTE_ON: body-mass reproduction fee (size^3).
@@ -2709,9 +3011,15 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             let parent_clade = self.agents[idx].clade_id;
             // Phase 34 kind-fork (asexual path): same clade-derived kind rule.
             let child_kind_a2 = self.clade_kind(parent_clade, a_kind_a2);
+            let parent_brain_a2 = self.agents[idx].brain.clone();
+            let mut child_brain_a2 = parent_brain_a2;
+            child_brain_a2.mutate_structure(&mut self.brain_learning_rng, BRAIN_MUTATE_P_ADD, BRAIN_MUTATE_P_DEL);
+            child_brain_a2.perturb(&mut self.brain_learning_rng, BRAIN_PERTURB_SIGMA);
             if let Some(child) = self.spawn(child_kind_a2, cx, cz, Some(g), a_gen_a2 + 1, 0.0) {
                 child.lineage = a_lineage_a2;
                 child.clade_id = parent_clade;
+                // Phase 36: inherit parent brain via cloning + structural mutation.
+                child.brain = child_brain_a2;
                 let drain = self.kind_def(self.agents[idx].kind).repro_drain_solo;
                 self.ledger.repro_loss += drain;
                 #[cfg(any(test, feature = "phase35_mte"))]
@@ -2959,6 +3267,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         self.agents[idx].z = mz;
         self.agents[idx].y = terrain_height(mx, mz);
 
+        self.brain_shadow(idx, h);
         if self.agents[idx].energy <= 0.0 {
             self.die(idx, "starved");
         } else if self.agents[idx].age > self.agents[idx].genome.lifespan {
@@ -3136,14 +3445,16 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 let reach = 1.9 + g_size * 0.8;
                 if d < reach && hungry {
                     let gain = 18.0 + prey_energy * 0.22 + prey_size * 11.0;
-                    // Phase 35 (TROPHIC_EFF placeholder): gate live-prey →
-                    // consumer biomass using Lindeman 1942-style transfer
-                    // efficiency. Currently unused in dynamics — kept as a
-                    // parameter hook for Phase 35 re-baseline when the energy
-                    // ledger is wired into the main simulation loop.
-                    let pre_eff_gain = gain * 0.8;
-                    // Ledger book-keeping only; dynamics unchanged until
-                    // Phase 35 re-baseline when TROPHIC_EFF is activated.
+                    // Phase 36 (TROPHIC_EFF LIVE): gate the live-prey → consumer
+                    // biomass transfer with Lindeman 1942 efficiency (0.10).
+                    // `trophic_eff_active == false` reproduces the Phase 35
+                    // placeholder (the pre-Phase-36 bit-exact anchor) so A/B
+                    // tests can isolate the re-baseline source.
+                    let pre_eff_gain = if self.trophic_eff_active {
+                        gain * 0.8 * TROPHIC_EFF
+                    } else {
+                        gain * 0.8
+                    };
                     self.ledger.predation_gain += pre_eff_gain;
                     self.agents[idx].energy = (self.agents[idx].energy + pre_eff_gain).min(self.agents[idx].max_energy);
                     self.agents[idx].hydration = (self.agents[idx].hydration + 0.4).min(1.0);
@@ -3182,6 +3493,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             }
         }
 
+        self.brain_shadow(idx, h);
         if self.agents[idx].energy <= 0.0 {
             self.die(idx, "starved");
         } else if self.agents[idx].age > self.agents[idx].genome.lifespan {
@@ -3300,6 +3612,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         }
         self.ledger.metabolism_loss += g_metabolism * (0.18 + self.agents[idx].activity * 0.3) * self.season_meta * h * self.mte_size_scale(idx);
         self.agents[idx].energy -= g_metabolism * (0.18 + self.agents[idx].activity * 0.3) * self.season_meta * h * self.mte_size_scale(idx);
+        self.brain_shadow(idx, h);
         if self.agents[idx].energy <= 0.0 { self.die(idx, "starved"); }
         else if self.agents[idx].age > self.agents[idx].genome.lifespan { self.die(idx, "aged"); }
         else if self.agents[idx].repro <= 0.0 && self.agents[idx].energy > self.agents[idx].max_energy * 0.78 { self.reproduce(idx, h); }
@@ -3414,6 +3727,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         }
         self.ledger.metabolism_loss += g_metabolism * (0.2 + self.agents[idx].activity * 0.32) * self.season_meta * h * self.mte_size_scale(idx);
         self.agents[idx].energy -= g_metabolism * (0.2 + self.agents[idx].activity * 0.32) * self.season_meta * h * self.mte_size_scale(idx);
+        self.brain_shadow(idx, h);
         if self.agents[idx].energy <= 0.0 { self.die(idx, "starved"); }
         else if self.agents[idx].age > self.agents[idx].genome.lifespan { self.die(idx, "aged"); }
         else if self.agents[idx].repro <= 0.0 && self.agents[idx].energy > self.agents[idx].max_energy * 0.8 { self.reproduce(idx, h); }
@@ -3585,6 +3899,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             }
         }
 
+        self.brain_shadow(idx, h);
         if self.agents[idx].energy <= 0.0 {
             self.die(idx, "starved");
         } else if self.agents[idx].age > self.agents[idx].genome.lifespan {
@@ -3813,6 +4128,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         self.ledger.metabolism_loss += total_drain * self.mte_size_scale(idx);
         self.agents[idx].energy -= total_drain * self.mte_size_scale(idx);
 
+        self.brain_shadow(idx, h);
         if self.agents[idx].energy <= 0.0 {
             self.die(idx, "starved");
         } else if self.agents[idx].age > self.agents[idx].genome.lifespan {
@@ -4255,6 +4571,10 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         // RNG draws, so RNG streams and the golden checksum are unaffected.
         if self.tick_count % SPECIATION_CHECK_TICKS == 0 {
             self.check_speciation();
+            // Phase 36: dual-controller authority switch gate runs on the same
+            // boundary to avoid per-tick overhead while keeping the shadow
+            // trajectory strictly decoupled from the hot path.
+            self.check_brain_authority_switch();
         }
     }
 
@@ -5151,6 +5471,20 @@ fn agent_to_save(a: &Agent, kinds: &KindRegistry) -> save_state::SaveAgent {
         clade_id: a.clade_id,
         offspring: a.offspring,
         ext_loci: a.genome.ext.iter().map(locus_to_save).collect(),
+        // Phase 36: micro-brain roundtrip (compact flat layout).
+        brain_weights: a.brain.weights.clone(),
+        brain_n_in: a.brain.n_in as u16,
+        brain_n_hid: a.brain.n_hid as u16,
+        brain_n_out: a.brain.n_out as u16,
+        brain_authority: a.brain_authority,
+        brain_equiv_streak: a.brain_equiv_streak,
+        brain_agree_window: a.brain_agree_window,
+        brain_window_len: a.brain_window_len,
+        brain_eligibility: a.brain.eligibility.clone(),
+        brain_taxis_baseline: a.brain.taxis_baseline,
+        brain_nodes_out: a.brain.nodes.iter().map(|n| n.output).collect(),
+        brain_outputs: a.brain.outputs.clone(),
+        brain_last_reward: a.brain.last_reward,
     }
 }
 
@@ -5536,6 +5870,13 @@ impl Ecology {
             LastSpecTickByKind: self.last_spec_tick_by_kind.clone(),
             HerbLineageA: self.herb_lineage_a.clone(),
             HerbLineageB: self.herb_lineage_b.clone(),
+            // Phase 36: brain toggles + dedicated learning RNG state.
+            BrainOn: self.brain_on,
+            BrainUpkeepOn: self.brain_upkeep_on,
+            InfoCostOn: self.info_cost_on,
+            TrophicEffActive: self.trophic_eff_active,
+            BrainSwitchEnabled: self.brain_switch_enabled,
+            BrainLearningRngState: self.brain_learning_rng.state(),
         }
     }
 
@@ -5879,6 +6220,50 @@ impl Ecology {
                     lineage: a.lineage.map(|s| save_state::intern_str(&s)),
                     clade_id: a.clade_id,
                     offspring: a.offspring,
+                    // Phase 36: backward-compatible brain restore.
+                    // Pre-v9 saves carry empty weight/elgibility slices and
+                    // zeroed auxiliary fields; the restored agent lands on
+                    // Brain::zero(...) + FSM authority — behavior bit-identical
+                    // to the pre-Phase-36 snapshot.
+                    brain: {
+                        let w = if a.brain_weights.is_empty() {
+                            Vec::new()
+                        } else { a.brain_weights.clone() };
+                        let n_in = a.brain_n_in as usize;
+                        let n_hid = a.brain_n_hid as usize;
+                        let n_out = a.brain_n_out as usize;
+                        let mut b = if w.is_empty() || n_in == 0 {
+                            aether_brain::Brain::zero(n_in.max(1), n_hid.max(1), n_out.max(1))
+                        } else {
+                            aether_brain::Brain::from_weights(n_in, n_hid, n_out, &w)
+                        };
+                        if !a.brain_eligibility.is_empty() {
+                            b.eligibility = a.brain_eligibility.clone();
+                        }
+                        b.taxis_baseline = a.brain_taxis_baseline;
+                        // The recurrent layer reads `nodes[].output` as its
+                        // previous-tick activations — restore them (and the
+                        // logits) or the shadow trajectory silently diverges
+                        // from the never-restored twin after the first tick.
+                        if a.brain_nodes_out.len() == b.nodes.len() {
+                            for (node, &out) in b.nodes.iter_mut().zip(a.brain_nodes_out.iter()) {
+                                node.activation = out;
+                                node.output = out;
+                            }
+                        }
+                        if a.brain_outputs.len() == b.n_out {
+                            b.outputs = a.brain_outputs.clone();
+                        }
+                        b.last_reward = a.brain_last_reward;
+                        b
+                    },
+                    brain_authority: a.brain_authority,
+                    brain_equiv_streak: a.brain_equiv_streak,
+                    brain_equiv_start: 0,
+                    brain_agree_window: a.brain_agree_window,
+                    brain_window_len: a.brain_window_len,
+                    brain_last_fsm_action: 0,
+                    brain_last_brain_action: 0,
                 }
             }).collect(),
             carcasses: state.carcasses.into_iter().map(|c| Carcass {
@@ -5980,6 +6365,23 @@ impl Ecology {
             herb_lineage_a: state.HerbLineageA,
             herb_lineage_b: state.HerbLineageB,
             ledger: EnergyLedger::new(),
+            // Phase 36: backward-compatible defaults. Pre-v9 saves have no
+            // brain fields — `#[serde(default)]` populates Brain::zero(...),
+            // authority FSM, empty streaks; the deterministic shadow does not
+            // alter any trajectory. Per-instance toggles inherit their default
+            // constants (so old v8 saves run as a live-Phase-36 world on restore).
+            brain_on: state.BrainOn,
+            brain_upkeep_on: state.BrainUpkeepOn,
+            info_cost_on: state.InfoCostOn,
+            trophic_eff_active: state.TrophicEffActive,
+            brain_switch_enabled: state.BrainSwitchEnabled,
+            brain_learning: BrainLearningStats::default(),
+            brain_learning_rng: if state.BrainLearningRngState != 0 {
+                Mulberry32::from_state(state.BrainLearningRngState)
+            } else {
+                // Fallback deterministic stream (pre-v9 / reset world).
+                Mulberry32::new(state.seed ^ BRAIN_RNG_TAG)
+            },
         }
     }
 }

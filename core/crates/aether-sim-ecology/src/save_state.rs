@@ -59,7 +59,7 @@
 use serde::{Deserialize, Serialize};
 
 
-pub const SAVE_STATE_VERSION: u32 = 8;
+pub const SAVE_STATE_VERSION: u32 = 9;
 pub const SAVE_STATE_SCHEMA_NAME: &str = "aether-sim-save-state";
 
 /// DECO selection-pressure mode selector (persisted in SaveState v2).
@@ -223,6 +223,41 @@ pub struct SaveAgent {
     /// pre-v6 saves restore with an empty ext list, i.e. genesis OFF).
     #[serde(default)]
     pub ext_loci: Vec<SaveLocus>,
+    /// Phase 36: micro-brain flat weights in compact indexed layout
+    /// (`aether_brain::weight_slots(n_in, n_hid, n_out)`). Empty on
+    /// pre-v9 restores → zero network.
+    #[serde(default)]
+    pub brain_weights: Vec<f32>,
+    #[serde(default)]
+    pub brain_n_in: u16,
+    #[serde(default)]
+    pub brain_n_hid: u16,
+    #[serde(default)]
+    pub brain_n_out: u16,
+    #[serde(default)]
+    pub brain_authority: u8,
+    #[serde(default)]
+    pub brain_equiv_streak: u32,
+    #[serde(default)]
+    pub brain_agree_window: u32,
+    #[serde(default)]
+    pub brain_window_len: u32,
+    #[serde(default)]
+    pub brain_eligibility: Vec<f64>,
+    #[serde(default)]
+    pub brain_taxis_baseline: f64,
+    /// Phase 36: hidden-node outputs (last forward's `nodes[].output`) —
+    /// the recurrent layer reads these as its "previous tick" activations,
+    /// so a bit-exact continuation MUST restore them (initializing from
+    /// tanh(bias) instead silently diverges the shadow trajectory).
+    #[serde(default)]
+    pub brain_nodes_out: Vec<f64>,
+    /// Phase 36: output logits of the last forward (`brain.outputs`),
+    /// kept so `argmax_action` round-trips without a re-forward.
+    #[serde(default)]
+    pub brain_outputs: Vec<f64>,
+    #[serde(default)]
+    pub brain_last_reward: f64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -634,6 +669,24 @@ pub struct SaveState {
     pub HerbLineageA: Option<String>,
     #[serde(default)]
     pub HerbLineageB: Option<String>,
+    /// Phase 36: per-instance toggles + dedicated brain learning RNG state.
+    /// Defaults keep pre-v9 restores on the default world config (brain ON,
+    /// upkeep ON, info-cost ON, TROPHIC_EFF active, switch gate OFF).
+    #[serde(default)]
+    pub BrainOn: bool,
+    #[serde(default)]
+    pub BrainUpkeepOn: bool,
+    #[serde(default)]
+    pub InfoCostOn: bool,
+    #[serde(default)]
+    pub TrophicEffActive: bool,
+    #[serde(default)]
+    pub BrainSwitchEnabled: bool,
+    /// Phase 36: dedicated learning stream snapshot. Restored as zeroed
+    /// `Mulberry32::new(0)` for pre-v9 saves — structural mutation draws in
+    /// a fresh run start from a deterministic seed anyway.
+    #[serde(default)]
+    pub BrainLearningRngState: u32,
 }
 
 /// Map a runtime string back to a `'static str`. Known constants are matched

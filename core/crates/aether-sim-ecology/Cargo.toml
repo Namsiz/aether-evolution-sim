@@ -8,6 +8,7 @@ description = "Phase-2 port of the JS ecology oracle: minimal HERB+PRED simulati
 [dependencies]
 aether-rng = { path = "../aether-rng" }
 aether-libm = { path = "../aether-libm" }
+aether-brain = { path = "../aether-brain" }
 aether-biome = { path = "../aether-biome" }
 aether-render-packet.workspace = true
 serde = { version = "1", features = ["derive"] }

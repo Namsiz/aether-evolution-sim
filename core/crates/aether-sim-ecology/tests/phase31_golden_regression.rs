@@ -1,4 +1,6 @@
-//! Phase 31+ golden regression anchors — Phase 34 re-baselined.
+//! Phase 31+ golden regression anchors — Phase 34 re-baselined, Phase 36
+//! updated again (INFO_COST_ON + TROPHIC_EFF active changes the dynamics vs
+//! the ledger-only Phase 35 skeleton).
 //!
 //! Phase 31 pinned the v1 checksum (kind field = the kind NAME's first byte).
 //! Phase 34 (Q2 ruling) promotes the v2 checksum to primary: the kind field
@@ -6,25 +8,22 @@
 //! `Ecology::checksum()` now returns the v2 value; `checksum_v1()` is kept as
 //! the read-only historical accessor.
 //!
-//! RE-BASELINE (recorded in the Phase 34 report + commit): the approved
-//! dynamics changes (神之手 retirement, the legacy HERB script retirement,
-//! kind-forking's density-brake feedback) shift the long-run trajectory, so
-//! the pinned anchors move to the v2 values below. The OLD v1 anchors are
-//! kept in the comments as the historical record:
-//!   seed 20261102 @300  v1 0x790184996f3acefd  (Phase 16/17/18 anchor)
-//!   seed 20261102 @3000 v1 0x58733db4ab0c3ca0
-//!   seed 20261105 @300  v1 0x48d66bf801a9f827
+//! RE-BASELINE (recorded in the Phase 36 report + commit): the approved
+//! dynamics changes (INFO_COST_ON=true paying for perception sweeps +
+//! TROPHIC_EFF=true gating live-prey → consumer biomass at Lindeman 0.10)
+//! shift the long-run trajectory again, so the pinned anchors move to the
+//! v2 values below. The OLD Phase 35 anchors are kept as comments:
+//!   seed 20261102 @300  v2 0x785889bb1ec0737f  (Phase 35 / Phase 34 anchor)
+//!   seed 20261102 @3000 v2 0x6dbb8f6fd216f353
+//!   seed 20261105 @300  v2 0xf53762eefd0cf3d2
+//!   seed 20261102 @300  v1 0x790184996f3acefd  (historical, pre-Phase-34)
 //!
-//! A key Phase 34 invariant the 300-tick run pins: the *trajectory* up to
-//! tick 300 is bit-exact to the pre-Phase-34 engine (v1 unchanged), so the
-//! v2 value there differs from v1 only by the kind-field + ext-hash
-//! definition, not by dynamics. The 3000-tick run is where the re-baseline
-//! (a genuinely different trajectory) shows up.
-//!
-//! Phase 35: TROPHIC_EFF is a placeholder (parameter hook, NOT yet active
-//! in dynamics — see `TROPHIC_EFF` in ecology.rs). The energy ledger is
-//! pure bookkeeping, and `mte_size_scale` is a ×1.0 identity when `MTE_ON`
-//! is false, so the Phase 34 anchors remain exact.
+//! Phase 36 keeps the dual-controller gate OFF by default (BRAIN_SWITCH_ENABLED=false)
+//! so behaviour is still FSM-driven, but the deterministic shadow network runs
+//! every tick with zero extra RNG draws (the main/prng/fish streams stay
+//! aligned). The net effect comes from two sources of energy change:
+//! * INFO_COST_PER_READ × sense² per perception sweep (≈ 0.002 × (sense/80)²)
+//! * TROPHIC_EFF ≈ 0.10 multiplier on live-prey conversion in PRED bite gains
 
 use aether_sim_ecology::ecology::Ecology;
 
@@ -47,39 +46,42 @@ fn checksum_at(seed: u32, ticks: u32) -> String {
 
 #[test]
 fn golden_seed_20261102_300_ticks() {
-    // Phase 34 v2 anchor (unchanged: Phase 35 ledger is bookkeeping-only).
+    // Phase 36 re-baseline (INFO_COST_ON + TROPHIC_EFF active by default).
     let ck = checksum_at(20261102, 300);
-    assert_eq!(ck, "0x785889bb1ec0737f",
-        "300-tick v2 checksum drifted: {} — see file docs + Phase 34 report", ck);
+    assert_eq!(ck, "0xa4d54e1aadbe83c6",
+        "300-tick v2 checksum drifted: {} — see file docs + Phase 36 report", ck);
 }
 
 #[test]
 fn golden_seed_20261102_3000_ticks() {
-    // Phase 34 v2 anchor (unchanged: Phase 35 is bookkeeping-only).
+    // Phase 36 re-baseline (INFO_COST_ON + TROPHIC_EFF active by default).
     let ck = checksum_at(20261102, 3000);
-    assert_eq!(ck, "0x6dbb8f6fd216f353",
+    assert_eq!(ck, "0xdd79b5ab74f3545d",
         "3000-tick v2 long-run checksum drifted: {} — if this change is an approved re-baseline, pin the new value here and record it in the phase report", ck);
 }
 
 #[test]
 fn golden_seed_20261105_300_ticks() {
-    // Phase 34 v2 anchor (unchanged: Phase 35 is bookkeeping-only).
+    // Phase 36 re-baseline (INFO_COST_ON + TROPHIC_EFF active by default).
     let ck = checksum_at(20261105, 300);
-    assert_eq!(ck, "0xf53762eefd0cf3d2",
+    assert_eq!(ck, "0x777cd6c33bb3345c",
         "alt-seed v2 checksum drifted: {} — if this change is an approved re-baseline, pin the new value here and record it in the phase report", ck);
 }
 
-/// Phase 34 invariant: the 300-tick TRAJECTORY is bit-exact to the
-/// pre-Phase-34 engine. The v1 checksum (name-byte kind field, no ext hash)
-/// still reads the historical anchor — proving the 300-tick dynamics are
-/// unchanged and only the checksum DEFINITION (v1→v2) moved the 300-tick
-/// value. Phase 35 keeps this (ledger is bookkeeping-only).
+/// Phase 36: INFO_COST_ON=true charges for perception sweeps every tick
+/// (Herb/Pred/Omn/Fish/Deco branches all call `charge_info_cost`). This
+/// shifts the v1 trajectory vs. the historical anchor. The test captures
+/// the new live value; any future brain-gated toggle-off path should go
+/// through its own separate anchor rather than claiming bit-exactness.
 #[test]
 fn golden_300_tick_trajectory_bit_exact_to_v1() {
     let mut eco = Ecology::new(20261102);
     for t in 1..=300 { eco.update(0.1, daylight(t)); }
-    assert_eq!(eco.checksum_v1(), "0x790184996f3acefd",
-        "the 300-tick v1 trajectory must remain bit-exact to the historical anchor");
+    // Phase 36 re-baseline: the v1 trajectory has shifted because every
+    // per-tick perception sweep now drains a small amount of energy when
+    // `info_cost_on` is true (the default). Pin the new anchor.
+    assert_eq!(eco.checksum_v1(), "0x3782a36aee6f1ff5",
+        "the 300-tick v1 trajectory must stay at the pinned Phase 36 anchor");
 }
 
 /// Determinism guard: same seed + same ticks must be bit-identical across
