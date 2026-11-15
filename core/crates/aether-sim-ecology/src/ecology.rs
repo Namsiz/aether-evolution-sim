@@ -5222,9 +5222,14 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                         let agent_len = self.agents.len();
                         let n_tokens = self.agents[idx].known_tokens.len();
                         
-                        // Try to learn a new token from next neighbor (simple model)
+                        // Try to learn a new token from the nearest token-bearing
+                        // neighbour (Phase 44.1: real spatial proximity — culture
+                        // spreads through contact, not through an id+1 roll that
+                        // pairs agents on opposite sides of the world).
                         if agent_len > 1 && n_tokens > 0 {
-                            let demoiser_idx = (self.agents[idx].id as usize + 1) % agent_len;
+                            let demoiser_idx = self.nearest(idx, self.agents[idx].kind, self.agents[idx].genome.sense, Some(|b: &Agent| !b.known_tokens.is_empty()))
+                                .map(|(j, _)| j)
+                                .unwrap_or_else(|| (self.agents[idx].id as usize + 1) % agent_len);
                             let target_tid = self.agents[demoiser_idx].known_tokens.first().copied();
                             if let Some(tid) = target_tid {
                                 if !self.agents[idx].known_tokens.contains(&tid) {

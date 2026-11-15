@@ -27,8 +27,13 @@ pub const LEARNING_COST: f64 = 0.5;
 pub const TEACH_COST: f64 = LEARNING_COST * 0.5;
 /// 传播保真度 ∈ [0,1]（示范→模仿时 token 向量加噪，噪声幅度 ∝ (1-f)）。
 pub const DEFAULT_FIDELITY: f64 = 0.9;
-/// 重组创新概率（两个已知 token → 重组向量产生新 token）。
-pub const RECOMBINATION_P: f64 = 0.01;
+/// 重组创新概率（两个已知 token → 重组向量产生新 token，每持有者每 tick）。
+/// Phase 37 的 0.01 标定于传播死锁期——holders 恒为个位数时从不出问题。
+/// Phase 44.1 的空间邻近学习把 30k-tick 的 bearer 群抬到 144，0.01 立即
+/// 变成信息爆炸（19839 个 token，其中 >97% 是重组）。创新必须是稀有事件：
+/// 0.00002 让 500 持有者的世界每千 tick 约 10 次重组，与 de-novo 发明率
+/// 同一量级。
+pub const RECOMBINATION_P: f64 = 0.00002;
 /// 重组变异 σ（crossover + mutation 时的噪声幅度）。
 pub const RECOMBINATION_SIGMA: f64 = 0.05;
 /// 结构放置成本（能量，进 ledger）。
