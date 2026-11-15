@@ -116,18 +116,20 @@ fn checksum_at(seed: u32, ticks: u32, group_on: bool) -> String {
 // ---------------------------------------------------------------------------
 #[test]
 fn group_off_is_bit_exact_phase36_anchor() {
-    // The Phase 36 anchors (re-baselined twice before) must survive the
-    // presence of the new fields: `group_on = false` means no scans, no draws,
-    // no energy flows.
-    assert_eq!(checksum_at(20261102, 300, false), "0xa4d54e1aadbe83c6");
-    assert_eq!(checksum_at(20261102, 3000, false), "0xdd79b5ab74f3545d");
-    assert_eq!(checksum_at(20261105, 300, false), "0x777cd6c33bb3345c");
+    // With `group_on = false` there are no scans, no draws, no energy flows —
+    // the layer is a pure no-op. These anchors are the group-off trajectory
+    // after the Phase 40.1 reproduction-brake fix (REPRO_THRESHOLD_MAX); the
+    // old Phase 36 values no longer apply because the brake fix shifts every
+    // trajectory, group layer or not.
+    assert_eq!(checksum_at(20261102, 300, false), "0x8e59843d4f009045");
+    assert_eq!(checksum_at(20261102, 3000, false), "0xa62405ff14bfbcad");
+    assert_eq!(checksum_at(20261105, 300, false), "0x8f981cd0b42a58d7");
 
     // Same v1 anchor (the historical stream must not see the group hash).
     let mut eco = Ecology::new(20261102);
     eco.group_on = false;
     run_ticks(&mut eco, 1, 300);
-    assert_eq!(eco.checksum_v1(), "0x3782a36aee6f1ff5");
+    assert_eq!(eco.checksum_v1(), "0x771a11f1bd8ce316");
 }
 
 // ---------------------------------------------------------------------------

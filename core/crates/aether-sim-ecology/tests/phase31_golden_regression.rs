@@ -1,9 +1,18 @@
 //! Phase 31+ golden regression anchors — Phase 34 re-baselined, Phase 36
 //! updated again (INFO_COST_ON + TROPHIC_EFF active changes the dynamics vs
 //! the ledger-only Phase 35 skeleton), Phase 39.1 re-baselined a third time
-//! (group entities + task-switching cost + dirty-work mutagenesis).
+//! (group entities + task-switching cost + dirty-work mutagenesis), and
+//! **Phase 40.1 re-baselined a fourth time** — the 100k-tick observatory
+//! found the density brake pushing the HERB reproduction threshold above
+//! 1.0×max_energy at saturation (an absorbing zero-birth state → one-cohort
+//! ageing → extinction). `REPRO_THRESHOLD_MAX = 0.90` caps the brake.
 //!
-//! PHASE 39.1 ANCHORS (current, group layer ON by default):
+//! PHASE 40.1 ANCHORS (current):
+//!   seed 20261102 @300  v2 0xbbee72352ef4468d
+//!   seed 20261102 @3000 v2 0x00bd6cd1892d6c10
+//!   seed 20261105 @300  v2 0xfa11ea50ba7ef71a
+//!   seed 20261102 @300  v1 0xfb8827f6b1b34b5a
+//! PHASE 39.1 ANCHORS (previous, kept for the record):
 //!   seed 20261102 @300  v2 0x32c496b54efc9626
 //!   seed 20261102 @3000 v2 0xb900f6366f38cc47
 //!   seed 20261105 @300  v2 0x786979c7e9c84a93
@@ -61,42 +70,36 @@ fn checksum_at(seed: u32, ticks: u32) -> String {
 
 #[test]
 fn golden_seed_20261102_300_ticks() {
-    // Phase 39.1 re-baseline (group layer ON by default).
+    // Phase 40.1 re-baseline (REPRO_THRESHOLD_MAX density-brake cap).
     let ck = checksum_at(20261102, 300);
-    assert_eq!(ck, "0x32c496b54efc9626",
-        "300-tick v2 checksum drifted: {} — see file docs + Phase 39.1 report", ck);
+    assert_eq!(ck, "0xbbee72352ef4468d",
+        "300-tick v2 checksum drifted: {} — see file docs + Phase 40.1 report", ck);
 }
 
 #[test]
 fn golden_seed_20261102_3000_ticks() {
-    // Phase 39.1 re-baseline (group layer ON by default).
+    // Phase 40.1 re-baseline (REPRO_THRESHOLD_MAX density-brake cap).
     let ck = checksum_at(20261102, 3000);
-    assert_eq!(ck, "0xb900f6366f38cc47",
+    assert_eq!(ck, "0x00bd6cd1892d6c10",
         "3000-tick v2 long-run checksum drifted: {} — if this change is an approved re-baseline, pin the new value here and record it in the phase report", ck);
 }
 
 #[test]
 fn golden_seed_20261105_300_ticks() {
-    // Phase 39.1 re-baseline (group layer ON by default).
+    // Phase 40.1 re-baseline (REPRO_THRESHOLD_MAX density-brake cap).
     let ck = checksum_at(20261105, 300);
-    assert_eq!(ck, "0x786979c7e9c84a93",
+    assert_eq!(ck, "0xfa11ea50ba7ef71a",
         "alt-seed v2 checksum drifted: {} — if this change is an approved re-baseline, pin the new value here and record it in the phase report", ck);
 }
 
-/// Phase 36: INFO_COST_ON=true charges for perception sweeps every tick
-/// (Herb/Pred/Omn/Fish/Deco branches all call `charge_info_cost`). This
-/// shifts the v1 trajectory vs. the historical anchor. The test captures
-/// the new live value; any future brain-gated toggle-off path should go
-/// through its own separate anchor rather than claiming bit-exactness.
+/// Phase 40.1: the reproduction-threshold cap shifts the v1 stream too
+/// (the brake sits in `reproduce`, which runs on the main RNG path).
 #[test]
 fn golden_300_tick_trajectory_bit_exact_to_v1() {
     let mut eco = Ecology::new(20261102);
     for t in 1..=300 { eco.update(0.1, daylight(t)); }
-    // Phase 39.1 re-baseline: the group layer shifts energy flows (task
-    // switching, pooled feeding), so the v1 stream moves with them. The group
-    // table itself is mixed into v2 only.
-    assert_eq!(eco.checksum_v1(), "0x5fa905f98eb6546e",
-        "the 300-tick v1 trajectory must stay at the pinned Phase 39.1 anchor");
+    assert_eq!(eco.checksum_v1(), "0xfb8827f6b1b34b5a",
+        "the 300-tick v1 trajectory must stay at the pinned Phase 40.1 anchor");
 }
 
 /// Determinism guard: same seed + same ticks must be bit-identical across

@@ -94,13 +94,17 @@ fn scav_omn_ecology_loop_active_and_counts_match_js_oracle() {
         if t == next_sample {
             let s = eco.agents.iter().filter(|a| a.alive && a.kind == SCAV).count();
             let o = eco.agents.iter().filter(|a| a.alive && a.kind == OMN).count();
-            assert_eq!(s, 8, "scav count at t={}", t);
-            // Phase 36 re-anchor: TROPHIC_EFF (live-prey conversion 0.10) +
-            // INFO_COST_ON shift the carcass/energy economy feeding
-            // SCAV/OMN reproduction; the OMN census now reaches 13 at t=200
-            // (the pre-Phase-36 JS oracle held 12 through t=200 and 14 at
-            // t=300). SCAV stays pinned at 8.
-            let o_gold = if t >= 200 { 13usize } else { 12 };
+            // Phase 40.1 re-anchor: the reproduction-brake cap (0.90) shifts
+            // the SCAV/OMN census — SCAV reaches 9 at t=300 (was pinned 8
+            // since the pre-Phase-8 JS oracle), OMN climbs 12→13→14→16.
+            let s_gold = if t >= 300 { 9usize } else { 8 };
+            assert_eq!(s, s_gold, "scav count at t={}", t);
+            let o_gold = match t {
+                300 => 16usize,
+                250 => 14,
+                200 => 13,
+                _ => 12,
+            };
             assert_eq!(o, o_gold, "omn count at t={}", t);
             next_sample += 50;
         }

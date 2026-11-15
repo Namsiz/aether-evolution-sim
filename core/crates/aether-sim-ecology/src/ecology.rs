@@ -377,6 +377,18 @@ const SCAV_REPRO_COOLDOWN: f64 = 40.0;
 const OMN_REPRO_COOLDOWN: f64 = 38.0;
 
 const HELP_ENABLED: bool = true;
+/// Phase 40.1: hard ceiling on the effective reproduction energy threshold
+/// (fraction of max_energy). The Phase 4-A density brake multiplies the
+/// base threshold by (1 + density_factor), and at full carrying capacity
+/// that pushed HERB to 1.29-1.72×max_energy — unreachable, so the population
+/// stopped breeding entirely, aged as one cohort, and went extinct (the
+/// 100k-tick observatory found two of three seeds dying this way).
+/// Capping at 0.90 keeps the brake meaningful (breeding becomes rare at
+/// saturation) without ever locking it out: well-fed individuals (90%+ of
+/// max energy) can always breed. The brake's *intent* — lower birth rate
+/// under crowding — is preserved; only the absorbing zero-birth state is
+/// removed.
+const REPRO_THRESHOLD_MAX: f64 = 0.90;
 const HELP_RADIUS: f64 = 22.0;
 const HELP_CD_MIN: f64 = 8.0;
 const HELP_CD_RAND: f64 = 4.0;
@@ -2984,6 +2996,11 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             if pred_n < 8 { threshold = 0.90; }
             else if (pred_n as f64) > (MAX_PRED as f64) * 0.35 { threshold = 1.0; }
         }
+        // Phase 40.1: never let the density brake reach the absorbing
+        // zero-birth state (see REPRO_THRESHOLD_MAX). Applied after all
+        // per-kind overrides except DECO's individualized selection mapping
+        // (that one is a genuine fitness gradient, not a crowding brake).
+        if a_kind != DECO { threshold = threshold.min(REPRO_THRESHOLD_MAX); }
         // FISH does not reproduce in winter
         if a_kind == FISH && self.season == 3 { return; }
         // Phase 7: DECO individualized reproduction threshold in selective mode.
@@ -3110,6 +3127,11 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             }
         }
         // Asexual reproduction
+        // (Phase 40.1 note: a low-density rescue variant — dropping this bar
+        // to 0.90 while live_count < 50 — was tried and reverted: it shifts
+        // early population assembly and destabilizes dense seeds. The
+        // Allee effect at sparse densities is recorded as a real ecological
+        // feature, not a bug.)
         if self.agents[idx].age > 45.0 && self.agents[idx].energy > self.agents[idx].max_energy * 0.94 {
             let a_geno_a2 = self.agents[idx].genome.clone();
             let a_kind_a2 = self.agents[idx].kind;

@@ -60,7 +60,7 @@ fn genesis_off_is_bit_exact_noop() {
     assert_eq!(eco.ext_total_loci(), 0, "genesis off must keep ext empty");
     // The pinned golden anchor is the Phase 39.1 v2 primary (group layer ON
     // by default); the trajectory shifted from Phase 34 → 36 → 39.1.
-    assert_eq!(eco.checksum(), "0x32c496b54efc9626");
+    assert_eq!(eco.checksum(), "0xbbee72352ef4468d");
 }
 
 /// Acceptance #3: determinism under genesis ON. Two fresh instances with the
