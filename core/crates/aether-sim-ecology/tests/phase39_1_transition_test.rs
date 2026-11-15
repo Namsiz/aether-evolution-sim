@@ -122,15 +122,15 @@ fn group_off_is_bit_exact_phase36_anchor() {
     // trajectory, group layer or not). Pre-Phase-41 values:
     //   @300 0x8e59843d4f009045 · @3000 0xa3dd655b64f18333
     //   seed2 @300 0x8f981cd0b42a58d7 · v1 @300 0x771a11f1bd8ce316
-    assert_eq!(checksum_at(20261102, 300, false), "0xf0d9487bf2497095");
-    assert_eq!(checksum_at(20261102, 3000, false), "0xec820a13793f9780");
-    assert_eq!(checksum_at(20261105, 300, false), "0x27af4bd0b8bb57c5");
+    assert_eq!(checksum_at(20261102, 300, false), "0x928befcb3c6e255a");
+    assert_eq!(checksum_at(20261102, 3000, false), "0xa45d2f6f3d8ab0dd");
+    assert_eq!(checksum_at(20261105, 300, false), "0x1273f9270d9d1d33");
 
     // Same v1 anchor (the historical stream must not see the group hash).
     let mut eco = Ecology::new(20261102);
     eco.group_on = false;
     run_ticks(&mut eco, 1, 300);
-    assert_eq!(eco.checksum_v1(), "0x6addfa3f6fff573e");
+    assert_eq!(eco.checksum_v1(), "0xda27297f37db8db1");
 }
 
 // ---------------------------------------------------------------------------

@@ -1897,7 +1897,13 @@ impl Ecology {
         }
         // Phase 41: three-layer shadow. Zero RNG; the executed action is the
         // FSM's current pick (the shadow learns the real transition).
-        if self.triune_on {
+        // Phase 41.1: brain rhythm — each agent does a full triune update on
+        // every other tick, half the population staggered per tick. A neuron
+        // does not replan every 100 ms; a ~200 ms decision rhythm is both
+        // biologically plausible and halves the per-tick planning cost
+        // (was 19.7 ms/frame in the wasm viewer budget, over the 16 ms gate).
+        // Upkeep is still charged every tick (the brain is always alive).
+        if self.triune_on && (self.tick_count % 2) == (idx as u32 % 2) {
             let outcome = {
                 let a = &mut self.agents[idx];
                 a.triune.tick(&sense, reward, h, fsm_act)

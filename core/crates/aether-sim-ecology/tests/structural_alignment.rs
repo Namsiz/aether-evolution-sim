@@ -100,7 +100,8 @@ fn scav_omn_ecology_loop_active_and_counts_match_js_oracle() {
             let s_gold = 8usize;
             assert_eq!(s, s_gold, "scav count at t={}", t);
             let o_gold = match t {
-                250 | 300 => 14usize,
+                300 => 15usize,
+                250 => 14,
                 200 => 13,
                 _ => 12,
             };

@@ -189,6 +189,38 @@ action = argmax(final)
 
 ---
 
+---
+
+## 7.1 Phase 41.1 — 脑节律（性能修复，第七次 re-baseline）
+
+### 问题
+三脑全速运行让 wasm 冒烟的性能闸门失败：**19.65 ms/frame > 16 ms 预算**（60 帧 sim+export 循环）。子代理交付时遗漏报告此项。对照实验确认三脑是大头：`triune_on=false` 时 **6.14 ms/frame**。
+
+### 修复：脑节律（biologically plausible brain rhythm）
+`ecology.rs::brain_shadow`：每个 agent 每 **2 tick** 做一次完整三脑更新，按 `idx % 2 == tick_count % 2` 错开——每 tick 只有一半种群做完整规划，无同步停顿。维护费仍每 tick 全额扣（大脑一直活着）。
+
+- 生理合理性：神经元不每 100ms 重规划一次；~200ms 的决策节律符合神经振荡现实
+- 效果：**19.65 → 13.26 ms/frame**（-32%），冒烟通过（`WASM VIEWER SMOKE OK`）
+- 代价：第七次 re-baseline（学习频率减半，轨迹移动）
+
+### 第七次 re-baseline 锚点（41.1）
+
+| 检查点 | Phase 41（旧） | **Phase 41.1（新）** |
+|---|---|---|
+| seed 20261102 @300 v2 | `0xe82f6b44f4871bf7` | **`0x1265fe37e680e828`** |
+| seed 20261102 @3000 v2 | `0x1142f4862637a383` | **`0x0d10cdeaf3e447c0`** |
+| seed 20261105 @300 v2 | `0x9d060128d2ff9a87` | **`0x0c1a5b2254ef521e`** |
+| seed 20261102 @300 v1 | `0x44b3fda76ab6c427` | **`0x490a0a05d97ba7d3`** |
+| group_off @300 v2 | `0xf0d9487bf2497095` | **`0x928befcb3c6e255a`** |
+| group_off @3000 v2 | `0xec820a13793f9780` | **`0xa45d2f6f3d8ab0dd`** |
+| group_off alt @300 v2 | `0x27af4bd0b8bb57c5` | **`0x1273f9270d9d1d33`** |
+| group_off @300 v1 | `0x6addfa3f6fff573e` | **`0xda27297f37db8db1`** |
+
+structural_alignment 计数同步更新（SCAV 8 / OMN @300=15）。
+全量：**133 passed / 0 failed**（aether-sim-ecology --tests）。
+
+---
+
 ## 8. 留给 Phase 42 的衔接点
 
 1. **行为权威仍未交给三脑**（`BRAIN_SWITCH_ENABLED=false`）：本期三脑的仲裁动作只记录不驱动。下一步需要把 7 动作映射回 FSM 状态（flee/eat/approach/…），并在高置信/高唤醒条件下开闸；这会带来一次行为级 re-baseline。
