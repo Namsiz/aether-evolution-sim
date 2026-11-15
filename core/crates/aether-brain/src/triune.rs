@@ -61,6 +61,12 @@ pub const REASON_CORTEX_UNITS: usize = INPUT_CHANNELS;
 /// 本能层权重数（56）与情绪→动作权重数（28）。
 pub const INSTINCT_W_COUNT: usize = OUTPUT_ACTIONS * INPUT_CHANNELS;
 pub const EMOTION_W_COUNT: usize = EMOTION_DIM * OUTPUT_ACTIONS;
+/// 经验回放环形缓冲容量（Phase 42）。固定常量而非基因：回放缓冲是个体
+/// 情节记忆，不是可遗传的脑结构；固定 12 条把每脑的额外内存锁在
+/// 12 × 136 B ≈ 1.6 KB，且不给基因布局新增维度（148 基因保持不动）。
+pub const REPLAY_CAP: usize = 12;
+/// 抑制闸门「打开」判据（与 `Decision::inhibit_gate` 的 0.5 分界一致）。
+pub const GATE_OPEN: f64 = 0.5;
 
 // ---------------------------------------------------------------------------
 // 基因布局（148 个连续 f64；结构基因存连续值、使用时四舍五入到整数）
@@ -263,6 +269,28 @@ pub struct TickOutcome {
     pub decision_rate: f64,
 }
 
+/// 一条被回放的经验（Phase 42）：`(sense, action, next, reward)`。
+/// 存完整的 next 而不是靠环形后继重建——最后写入的那条没有后继，
+/// 而且重建会把两次不同动作之间的跳变当成转移。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ReplayEntry {
+    pub sense: [f64; INPUT_CHANNELS],
+    pub action: u8,
+    pub next: [f64; INPUT_CHANNELS],
+    pub reward: f64,
+}
+
+impl Default for ReplayEntry {
+    fn default() -> Self {
+        ReplayEntry {
+            sense: [0.0; INPUT_CHANNELS],
+            action: 0,
+            next: [0.0; INPUT_CHANNELS],
+            reward: 0.0,
+        }
+    }
+}
+
 /// 累计统计（可观测性；随三脑状态一起存档，不影响动力学）。
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct TriuneStats {
@@ -281,6 +309,14 @@ pub struct TriuneStats {
     pub confidence_sum: f64,
     pub pred_error_sum: f64,
     pub action_hist: [u64; OUTPUT_ACTIONS],
+    /// Phase 42: 离线回放次数。
+    #[serde(default)]
+    pub replay_updates: u64,
+    /// Phase 42: 抑制闸门统计（校准指标）：打开次数与闸门值总和。
+    #[serde(default)]
+    pub gate_open_ticks: u64,
+    #[serde(default)]
+    pub gate_sum: f64,
 }
 
 impl TriuneStats {
@@ -292,6 +328,13 @@ impl TriuneStats {
     }
     pub fn mean_pred_error(&self) -> f64 {
         if self.ticks == 0 { 0.0 } else { self.pred_error_sum / self.ticks as f64 }
+    }
+    /// Phase 42: gate > 0.5 的 tick 占比（抑制校准的主指标）。
+    pub fn gate_open_ratio(&self) -> f64 {
+        if self.ticks == 0 { 0.0 } else { self.gate_open_ticks as f64 / self.ticks as f64 }
+    }
+    pub fn mean_gate(&self) -> f64 {
+        if self.ticks == 0 { 0.0 } else { self.gate_sum / self.ticks as f64 }
     }
 }
 
@@ -329,6 +372,17 @@ pub struct TriuneBrain {
     /// 元认知校准：1 - |置信度 - 预测准确率| 的 EMA。
     pub calibration: f64,
     pub last_rpe: f64,
+    /// Phase 42: 经验回放环形缓冲（海马尖波涟漪重放的最小工程同构）。
+    /// `replay[0..replay_len]` 是有效条目，`replay_head` 是下一个写入槽，
+    /// `replay_cursor` 是确定性轮转读取位置。
+    #[serde(default)]
+    pub replay: Vec<ReplayEntry>,
+    #[serde(default)]
+    pub replay_head: usize,
+    #[serde(default)]
+    pub replay_len: usize,
+    #[serde(default)]
+    pub replay_cursor: usize,
     // 记账
     pub tick_count: u32,
     pub prev_fear: f64,
@@ -458,8 +512,8 @@ impl TriuneBrain {
         g[G_DISCOUNT] = 0.90;
         g[G_WORLD_LR] = 0.02;
         g[G_REWARD_LR] = 0.05;
-        g[G_INHIBIT_GAIN] = 3.0;
-        g[G_INHIBIT_THRESHOLD] = 0.2;
+        g[G_INHIBIT_GAIN] = 0.75;
+        g[G_INHIBIT_THRESHOLD] = 2.0;
         g[G_INHIBIT_STRENGTH] = 2.0;
         g[G_INHIBIT_COST] = 0.002;
         g[G_CONFIDENCE_TAU] = 20.0;
@@ -520,6 +574,10 @@ impl TriuneBrain {
             pred_error_ema: 0.5,
             calibration: 0.5,
             last_rpe: 0.0,
+            replay: Vec::new(),
+            replay_head: 0,
+            replay_len: 0,
+            replay_cursor: 0,
             tick_count: 0,
             prev_fear: 0.0,
             last_sense: [0.0; INPUT_CHANNELS],
@@ -610,7 +668,25 @@ impl TriuneBrain {
         } else {
             self.sync_structure();
         }
+        self.sync_replay();
         self.sync_structure();
+    }
+
+    /// Phase 42: 回放缓冲的结构/数值规范化（v12 存档无此字段 → 空缓冲）。
+    fn sync_replay(&mut self) {
+        if self.replay.len() > REPLAY_CAP {
+            self.replay.truncate(REPLAY_CAP);
+        }
+        for e in self.replay.iter_mut() {
+            for v in e.sense.iter_mut().chain(e.next.iter_mut()) {
+                *v = finite(*v, 0.0).clamp(-4.0, 4.0);
+            }
+            e.action %= OUTPUT_ACTIONS as u8;
+            e.reward = finite(e.reward, 0.0).clamp(-4.0, 4.0);
+        }
+        self.replay_len = self.replay_len.min(self.replay.len());
+        self.replay_head = if self.replay.is_empty() { 0 } else { self.replay_head % self.replay.len() };
+        self.replay_cursor = if self.replay_len == 0 { 0 } else { self.replay_cursor % self.replay_len };
     }
 
     // ----- 成本 -----------------------------------------------------------
@@ -656,6 +732,20 @@ impl TriuneBrain {
 
     /// 单条经验更新世界模型（delta rule，受 dopamine 增益调制）。零 RNG。
     pub fn observe(&mut self, prev: &[f64; INPUT_CHANNELS], action: usize, next: &[f64; INPUT_CHANNELS], reward: f64) {
+        self.observe_impl(prev, action, next, reward, true);
+    }
+
+    /// `observe` 的实现体。`learn_meta=false` 是 Phase 42 的离线回放路径：
+    /// 只练世界模型权重，不触碰 RPE / 置信度 / 校准——离线回放是模型巩固，
+    /// 不应驱动神经调质（dopamine 必须反映在线奖励预测误差）。
+    fn observe_impl(
+        &mut self,
+        prev: &[f64; INPUT_CHANNELS],
+        action: usize,
+        next: &[f64; INPUT_CHANNELS],
+        reward: f64,
+        learn_meta: bool,
+    ) {
         let a = action % OUTPUT_ACTIONS;
         let (pred, rpred) = self.world_predict(prev, a);
         let mut err = [0.0f64; INPUT_CHANNELS];
@@ -665,16 +755,19 @@ impl TriuneBrain {
             abs_sum += err[i].abs();
         }
         let mean_err = abs_sum / INPUT_CHANNELS as f64;
-        let tau = self.g(G_CONFIDENCE_TAU).max(0.1);
-        let conf = 1.0 / (1.0 + tau * mean_err);
-        self.confidence = clamp01(0.9 * self.confidence + 0.1 * conf);
-        self.pred_error_ema = clamp01(0.9 * self.pred_error_ema + 0.1 * mean_err.min(1.0));
-        let accurate = if argmax_state(next) == argmax_state(&pred) { 1.0 } else { 0.0 };
-        self.calibration = clamp01(
-            0.9 * self.calibration + 0.1 * (1.0 - (self.confidence - accurate).abs()),
-        );
         let rpe = reward - rpred;
-        self.last_rpe = finite(rpe, 0.0).clamp(-8.0, 8.0);
+        if learn_meta {
+            let tau = self.g(G_CONFIDENCE_TAU).max(0.1);
+            let conf = 1.0 / (1.0 + tau * mean_err);
+            self.confidence = clamp01(0.9 * self.confidence + 0.1 * conf);
+            self.pred_error_ema = clamp01(0.9 * self.pred_error_ema + 0.1 * mean_err.min(1.0));
+            let accurate = if argmax_state(next) == argmax_state(&pred) { 1.0 } else { 0.0 };
+            self.calibration = clamp01(
+                0.9 * self.calibration + 0.1 * (1.0 - (self.confidence - accurate).abs()),
+            );
+            self.last_rpe = finite(rpe, 0.0).clamp(-8.0, 8.0);
+            self.prev_reward_pred = rpred;
+        }
 
         let da = self.dopamine.max(0.0);
         let lr = self.g(G_WORLD_LR) * (1.0 + self.g(G_DA_SENS) * da);
@@ -693,7 +786,80 @@ impl TriuneBrain {
         }
         let bi = world_reward_b_index(a);
         self.world[bi] = (self.world[bi] + rlr * rpe).clamp(-8.0, 8.0);
-        self.prev_reward_pred = rpred;
+    }
+
+    /// 把一条经验写入回放环形缓冲（超出容量时覆盖最旧）。容量固定，零 RNG。
+    /// 公开入口供离线巩固实验直接喂样本；在线路径由 `learn_transition` 调用。
+    pub fn record(&mut self, sense: &[f64; INPUT_CHANNELS], action: usize, next: &[f64; INPUT_CHANNELS], reward: f64) {
+        self.push_replay(sense, action, next, reward);
+    }
+
+    fn push_replay(&mut self, sense: &[f64; INPUT_CHANNELS], action: usize, next: &[f64; INPUT_CHANNELS], reward: f64) {
+        if self.replay.len() < REPLAY_CAP {
+            self.replay.push(ReplayEntry::default());
+        }
+        if self.replay.is_empty() { return; }
+        let cap = self.replay.len();
+        let slot = self.replay_head % cap;
+        let e = &mut self.replay[slot];
+        e.sense = *sense;
+        e.action = (action % OUTPUT_ACTIONS) as u8;
+        e.next = *next;
+        e.reward = finite(reward, 0.0).clamp(-4.0, 4.0);
+        self.replay_head = (slot + 1) % cap;
+        self.replay_len = (self.replay_len + 1).min(self.replay.len());
+    }
+
+    /// Phase 42: 离线回放一步（海马尖波涟漪重放）：按确定性游标轮转抽取
+    /// 一条历史经验做 delta-rule 世界模型更新。零 RNG、不驱动神经调质。
+    /// 返回本次回放前的预测误差（L1 均值），供 A/B 遥测。
+    pub fn replay_step(&mut self) -> Option<f64> {
+        let n = self.replay_len.min(self.replay.len());
+        if n == 0 { return None; }
+        let idx = self.replay_cursor % n;
+        let e = self.replay[idx].clone();
+        let before = self.entry_error(&e);
+        self.replay_cursor = (idx + 1) % n;
+        self.observe_impl(&e.sense, e.action as usize, &e.next, e.reward, false);
+        self.stats.replay_updates += 1;
+        Some(before)
+    }
+
+    #[inline]
+    fn entry_error(&self, e: &ReplayEntry) -> f64 {
+        let (pred, _) = self.world_predict(&e.sense, e.action as usize);
+        let mut s = 0.0;
+        for i in 0..INPUT_CHANNELS {
+            s += (e.next[i] - pred[i]).abs();
+        }
+        s / INPUT_CHANNELS as f64
+    }
+
+    /// Phase 42: 回放缓冲上的平均预测误差（纯读，不学习）——A/B 指标。
+    /// 这是模型对「亲身经历过的转移」的拟合质量：回放给稀有动作更多
+    /// 巩固机会，因此有回放的模型应该在同一个缓冲上误差更低。
+    pub fn probe_error(&self) -> f64 {
+        let n = self.replay_len.min(self.replay.len());
+        if n == 0 { return 0.0; }
+        let mut sum = 0.0;
+        for e in self.replay.iter().take(n) {
+            sum += self.entry_error(e);
+        }
+        sum / n as f64
+    }
+
+    /// 单一动作在回放缓冲上的误差（缓冲里没有该动作时返回 None）。
+    pub fn probe_error_for(&self, action: usize) -> Option<f64> {
+        let a = (action % OUTPUT_ACTIONS) as u8;
+        let mut sum = 0.0;
+        let mut n = 0usize;
+        for e in self.replay.iter().take(self.replay_len.min(self.replay.len())) {
+            if e.action == a {
+                sum += self.entry_error(e);
+                n += 1;
+            }
+        }
+        if n == 0 { None } else { Some(sum / n as f64) }
     }
 
     fn learn_transition(&mut self, sense: &[f64; INPUT_CHANNELS], reward: f64) {
@@ -701,6 +867,8 @@ impl TriuneBrain {
         let prev = self.last_sense;
         let a = self.last_executed as usize % OUTPUT_ACTIONS;
         self.observe(&prev, a, sense, reward);
+        // Phase 42: 同一条在线转移写入回放缓冲（供后续脑节律 tick 离线巩固）。
+        self.push_replay(&prev, a, sense, reward);
     }
 
     // ----- 情绪脑 ---------------------------------------------------------
@@ -1027,6 +1195,8 @@ impl TriuneBrain {
         self.stats.inhibitions += inhibition as u64;
         self.stats.prediction_updates += prediction_updated as u64;
         self.stats.high_confidence_ticks += (self.confidence > 0.7) as u64;
+        self.stats.gate_open_ticks += (d.inhibit_gate > GATE_OPEN) as u64;
+        self.stats.gate_sum += d.inhibit_gate;
         self.stats.max_fear = self.stats.max_fear.max(self.fear);
         self.stats.fear_sum += self.fear;
         self.stats.confidence_sum += self.confidence;
@@ -1086,6 +1256,8 @@ impl TriuneBrain {
     }
 
     /// 出生时清空瞬时情绪/调质状态（情绪记忆与世界模型作为亲代遗产保留）。
+    /// Phase 42: 回放缓冲是**个体情节记忆**，出生时清空——继承世界模型
+    /// （先天先验）但不继承亲代的最后 12 条经历（那些不是这个身体见过的）。
     pub fn reset_transients(&mut self) {
         self.fear = 0.0;
         self.desire = 0.0;
@@ -1103,6 +1275,10 @@ impl TriuneBrain {
         self.last_sense = [0.0; INPUT_CHANNELS];
         self.last_executed = 0;
         self.last = Decision::default();
+        self.replay.clear();
+        self.replay_head = 0;
+        self.replay_len = 0;
+        self.replay_cursor = 0;
         self.stats = TriuneStats::default();
     }
 }
@@ -1349,5 +1525,137 @@ mod tests {
         let da = b.tick(&s, 0.2, 0.1, 2).decision;
         let dc = c.tick(&s, 0.2, 0.1, 2).decision;
         assert_eq!(da, dc);
+    }
+
+    // ----- Phase 42: 经验回放 -------------------------------------------------
+
+    #[test]
+    fn replay_buffer_is_bounded_and_deterministic() {
+        let mut a = TriuneBrain::reference("herb", 31);
+        let mut b = a.clone();
+        for t in 0..60 {
+            let s = sense([(t % 5) as f64 / 5.0, 1.0, 0.4, 0.1, 0.2, 0.3, 0.5, 0.6]);
+            let oa = a.tick(&s, 0.1, 0.1, (t % 7) as u8);
+            let ob = b.tick(&s, 0.1, 0.1, (t % 7) as u8);
+            assert_eq!(oa.decision.action, ob.decision.action);
+            a.replay_step();
+            b.replay_step();
+        }
+        assert_eq!(a, b, "tick + replay must stay deterministic");
+        assert_eq!(a.replay.len(), REPLAY_CAP, "ring grows to the fixed cap");
+        assert_eq!(a.replay_len, REPLAY_CAP);
+        // 60 tick 里只有 59 条在线转移（首次 tick 没有上一条经验），
+        // 因此也只有 59 次回放更新。
+        assert_eq!(a.stats.replay_updates, 59);
+        assert!(a.replay.iter().all(|e| e.action < OUTPUT_ACTIONS as u8));
+        assert!(a.replay.iter().all(|e| e.next.iter().all(|v| v.is_finite())));
+    }
+
+    #[test]
+    fn replay_does_not_move_neuromodulators() {
+        let mut b = TriuneBrain::reference("pred", 37);
+        for t in 0..24 {
+            let s = sense([0.2, 0.9, 0.1, 0.7, 0.0, 0.4, 0.5, 0.3]);
+            b.tick(&s, (t % 3) as f64 - 1.0, 0.1, (t % 7) as u8);
+        }
+        let rpe = b.last_rpe;
+        let conf = b.confidence;
+        let err = b.pred_error_ema;
+        let cal = b.calibration;
+        assert!(b.replay_step().is_some());
+        assert_eq!(b.last_rpe, rpe, "离线重放不得改写 RPE（DA 必须反映在线误差）");
+        assert_eq!(b.confidence, conf);
+        assert_eq!(b.pred_error_ema, err);
+        assert_eq!(b.calibration, cal);
+    }
+
+    #[test]
+    fn replay_refines_rare_action_world_model() {
+        // 真转移：所有动作都是同一个固定映射 next = tanh(0.4·s + 0.2)，奖励 0。
+        // 主行为几乎只执行动作 0，动作 3 每 20 tick 才执行一次。
+        // 只做在线学习的脑对动作 3 只能拿到 1/20 的样本；有回放的脑在每次
+        // 节律 tick 额外巩固一条历史经验 → 动作 3 的预测误差应明显更低。
+        let truth = |s: &[f64; INPUT_CHANNELS], action: usize| -> ([f64; INPUT_CHANNELS], f64) {
+            let mut n = [0.0; INPUT_CHANNELS];
+            for i in 0..INPUT_CHANNELS {
+                n[i] = libm_tanh(0.4 * s[i] + 0.2) + 0.05 * action as f64 * s[i];
+            }
+            (n, 0.0)
+        };
+        let make = || {
+            let mut b = TriuneBrain::reference("herb", 41);
+            b.genes[G_WORLD_LR] = 0.15;
+            b
+        };
+        let mut online = make();
+        let mut replayed = make();
+        for t in 0..400 {
+            let s = sense([
+                (t % 7) as f64 / 7.0,
+                ((t * 3) % 5) as f64 / 5.0,
+                ((t * 5) % 11) as f64 / 11.0,
+                0.5,
+                0.2,
+                0.3,
+                0.4,
+                0.6,
+            ]);
+            let action = if t % 20 == 0 { 3usize } else { 0usize };
+            let (next, reward) = truth(&s, action);
+            // tick 用 executed 记录上一条转移；这里直接显式喂一条转移
+            // （等价于 tick 的 online 路径，但不受节律/情绪影响）。
+            online.observe(&s, action, &next, reward);
+            online.record(&s, action, &next, reward);
+            replayed.observe(&s, action, &next, reward);
+            replayed.record(&s, action, &next, reward);
+            replayed.replay_step();
+        }
+        // 再各自把同一批稀有动作经验写入缓冲，用于同一把尺子度量。
+        for t in 0..40 {
+            let s = sense([
+                ((t * 11) % 13) as f64 / 13.0,
+                0.8,
+                0.2,
+                0.4,
+                0.1,
+                0.5,
+                0.6,
+                0.3,
+            ]);
+            let (next, reward) = truth(&s, 3);
+            online.observe(&s, 3, &next, reward);
+            online.record(&s, 3, &next, reward);
+            replayed.observe(&s, 3, &next, reward);
+            replayed.record(&s, 3, &next, reward);
+        }
+        // 两边缓冲内容一致（只是回放次数不同），尺子相同。
+        assert_eq!(online.replay, replayed.replay);
+        let e_online = online.probe_error_for(3).unwrap();
+        let e_replay = replayed.probe_error_for(3).unwrap();
+        assert!(
+            e_replay < e_online * 0.95,
+            "replay should refine the rare action model: replay {:.4} vs online {:.4}",
+            e_replay, e_online
+        );
+        assert!(replayed.stats.replay_updates == 400);
+    }
+
+    #[test]
+    fn probe_error_decreases_with_learning() {
+        let mut b = TriuneBrain::reference("omn", 43);
+        b.genes[G_WORLD_LR] = 0.2;
+        let s = sense([0.1, 0.8, 0.3, 0.0, 0.4, 0.2, 0.5, 0.6]);
+        let next = [0.5, 0.2, 0.6, 0.1, 0.3, 0.4, 0.7, 0.2];
+        for _ in 0..200 {
+            b.observe(&s, 2, &next, 0.3);
+        }
+        // 手动写入一条历史经验，测 probe 是否反映当前拟合。
+        b.replay.clear();
+        b.replay.push(ReplayEntry { sense: s, action: 2, next, reward: 0.3 });
+        b.replay_len = 1;
+        let fitted = b.probe_error();
+        assert!(fitted < 0.1, "fitted model error should be small, got {}", fitted);
+        b.replay[0].next = [0.9; INPUT_CHANNELS];
+        assert!(b.probe_error() > fitted, "probe must respond to a mismatched target");
     }
 }

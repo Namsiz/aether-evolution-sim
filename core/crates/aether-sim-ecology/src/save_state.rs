@@ -62,6 +62,13 @@
 /// All are `#[serde(default)]`, so a v10 archive loads as a solitary world
 /// (no groups, role = none, zero damage) and continues from its own state.
 /// Group telemetry (`GroupStats`) is observability only and is not persisted.
+/// v12 → v13 (Phase 42): behaviour authority + experience replay. Per-agent
+/// `TriuneEquivStreak` / `TriuneAgreeBits` / `TriuneAgreeN` (the triune's own
+/// FSM-agreement gate bookkeeping) and the sim-level `ReplayOn` toggle. All are
+/// `#[serde(default)]` → a v12 archive restores with zero streak / empty
+/// agreement window and replay ON (the Phase 42 default world config).
+/// The replay ring buffer itself rides inside `SaveAgent.triune`'s JSON string
+/// with serde defaults, so v12 brains deserialize with an empty ring.
 /// v11 → v12 (Phase 41): triune brain. `SaveAgent.triune` is a compact JSON
 /// string holding the three-layer brain (genes, emotion state/memory, working
 /// memory, world model, metacognition, stats). `#[serde(default)]` → pre-v12
@@ -72,7 +79,7 @@
 use serde::{Deserialize, Serialize};
 
 
-pub const SAVE_STATE_VERSION: u32 = 12;
+pub const SAVE_STATE_VERSION: u32 = 13;
 pub const SAVE_STATE_SCHEMA_NAME: &str = "aether-sim-save-state";
 
 /// DECO selection-pressure mode selector (persisted in SaveState v2).
@@ -292,6 +299,15 @@ pub struct SaveAgent {
     /// the loader seeds a fresh reference brain from the agent's kind/id.
     #[serde(default)]
     pub triune: String,
+    /// Phase 42: triune FSM-agreement gate — consecutive agreeing brain-rhythm
+    /// ticks (v12 restores land on 0, i.e. the authority must be re-earned).
+    #[serde(default)]
+    pub triune_equiv_streak: u32,
+    /// Phase 42: sliding-window agreement bitmap (bit=1 → agreed).
+    #[serde(default)]
+    pub triune_agree_bits: u64,
+    #[serde(default)]
+    pub triune_agree_n: u32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -805,6 +821,10 @@ pub struct SaveState {
     pub TriuneOn: bool,
     #[serde(default = "default_true")]
     pub TriuneUpkeepOn: bool,
+    /// Phase 42: offline experience replay (sharp-wave-ripple analogue).
+    /// `#[serde(default = "default_true")]` → pre-v13 saves land on replay ON.
+    #[serde(default = "default_true")]
+    pub ReplayOn: bool,
     /// Phase 37: knowledge token registry (open, growable).
     /// `#[serde(default)]` → pre-v10 saves restore with empty registry.
     #[serde(default)]

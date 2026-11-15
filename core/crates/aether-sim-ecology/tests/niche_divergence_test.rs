@@ -170,6 +170,10 @@ fn setup_split() -> (Ecology, u32, [(f64, f64); 2]) {
     // the burden's time-averaged signature (measured: 84.3 vs 83.6); with it
     // off the same A/B shows 69.3 vs 88.5.
     eco.group_on = false;
+    // Phase 42: same discipline for the triune behaviour authority — the
+    // taken-over agents steer their own bodies, which is another chaotic
+    // amplifier orthogonal to the burden mechanism under test here.
+    eco.brain_switch_enabled = false;
     eco.deco_eff_choice_mode = save_state::DECO_CHOICE_SELECTIVE;
     let (a, b) = seed_two_clusters(&mut eco);
     let anchors = [a, b];

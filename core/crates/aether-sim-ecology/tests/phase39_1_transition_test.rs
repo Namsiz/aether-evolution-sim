@@ -118,19 +118,19 @@ fn checksum_at(seed: u32, ticks: u32, group_on: bool) -> String {
 fn group_off_is_bit_exact_phase36_anchor() {
     // With `group_on = false` there are no scans, no draws, no energy flows —
     // the layer is a pure no-op. These anchors are the group-off trajectory
-    // after Phase 41's triune-brain cost (the extra energy term shifts every
-    // trajectory, group layer or not). Pre-Phase-41 values:
-    //   @300 0x8e59843d4f009045 · @3000 0xa3dd655b64f18333
-    //   seed2 @300 0x8f981cd0b42a58d7 · v1 @300 0x771a11f1bd8ce316
-    assert_eq!(checksum_at(20261102, 300, false), "0x928befcb3c6e255a");
-    assert_eq!(checksum_at(20261102, 3000, false), "0xa45d2f6f3d8ab0dd");
-    assert_eq!(checksum_at(20261105, 300, false), "0x1273f9270d9d1d33");
+    // after Phase 42's triune behaviour authority + replay + the Allee relief
+    // (all shift every trajectory, group layer or not). Phase 41.1 values (previous):
+    //   @300 0x928befcb3c6e255a · @3000 0xa45d2f6f3d8ab0dd
+    //   seed2 @300 0x1273f9270d9d1d33 · v1 @300 0xda27297f37db8db1
+    assert_eq!(checksum_at(20261102, 300, false), "0xf5cc546cb068941f");
+    assert_eq!(checksum_at(20261102, 3000, false), "0x615fbdaaa7fb0f4e");
+    assert_eq!(checksum_at(20261105, 300, false), "0x7a3fe91e7165c234");
 
     // Same v1 anchor (the historical stream must not see the group hash).
     let mut eco = Ecology::new(20261102);
     eco.group_on = false;
     run_ticks(&mut eco, 1, 300);
-    assert_eq!(eco.checksum_v1(), "0xda27297f37db8db1");
+    assert_eq!(eco.checksum_v1(), "0x5b514478b9799fa0");
 }
 
 // ---------------------------------------------------------------------------
@@ -408,7 +408,8 @@ fn save_v11_roundtrip_is_bit_exact() {
     let mut eco = grouped_world(600);
     let state = eco.to_save_state();
     assert_eq!(state.version, save_state::SAVE_STATE_VERSION);
-    assert_eq!(save_state::SAVE_STATE_VERSION, 12);
+    // Phase 42 bumped the schema to v13 (triune authority bookkeeping + ReplayOn).
+    assert_eq!(save_state::SAVE_STATE_VERSION, 13);
     assert!(!state.Groups.is_empty());
 
     let json = serde_json::to_string(&state).expect("save serializes");
@@ -451,17 +452,20 @@ fn legacy_v10_archive_loads_as_solitary_world() {
     let eco = grouped_world(400);
     let json = serde_json::to_string(&eco.to_save_state()).unwrap();
     let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(v["Version"], 12);
-    // Strip every v11 addition — this is exactly what a v10 archive looks like.
+    // Phase 42 bumped the schema to v13 (ReplayOn + triune authority keys ride
+    // alongside the older layers; all serde-defaulted).
+    assert_eq!(v["Version"], 13);
+    // Strip every v11/v13 addition — this is exactly what a v10 archive looks like.
     v["Version"] = serde_json::json!(10);
     let obj = v.as_object_mut().unwrap();
     for k in ["Groups", "NextGroupId", "GroupOn", "GroupRngState",
-              "TriuneOn", "TriuneUpkeepOn"] {
+              "TriuneOn", "TriuneUpkeepOn", "ReplayOn"] {
         obj.remove(k);
     }
     for a in obj["Agents"].as_array_mut().unwrap() {
         let ao = a.as_object_mut().unwrap();
-        for k in ["GroupId", "Role", "SomaticDamage", "Triune"] {
+        for k in ["GroupId", "Role", "SomaticDamage", "Triune",
+                  "TriuneEquivStreak", "TriuneAgreeBits", "TriuneAgreeN"] {
             ao.remove(k);
         }
     }

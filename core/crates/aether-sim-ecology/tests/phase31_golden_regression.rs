@@ -7,7 +7,17 @@
 //! 1.0×max_energy at saturation (an absorbing zero-birth state → one-cohort
 //! ageing → extinction). `REPRO_THRESHOLD_MAX = 0.90` caps the brake.
 //!
-//! PHASE 41.1 ANCHORS (current; Phase 41 triune brain + the 41.1 brain
+//! PHASE 42 ANCHORS (current; **eighth re-baseline** — the triune brain takes
+//! behaviour authority once its own FSM-agreement gate + confidence floor is
+//! met, its arbitration actions are bridged into FSM states/motion intent, and
+//! offline replay consolidates the world model). Replay also shifts the shadow
+//! arm, so even `brain_switch_enabled=false` moves off the 41.1 values.
+//!   seed 20261102 @300  v2 0xdc98f7d34a7af777
+//!   seed 20261102 @3000 v2 0xafa833641ebfd5a8
+//!   seed 20261105 @300  v2 0x2e9539930abd8975
+//!   seed 20261102 @300  v1 0xe6404a7bee633eb8
+//!   (shadow-only @300 for the A/B arm: v2 0xf31c4501f764be29)
+//! PHASE 41.1 ANCHORS (previous; Phase 41 triune brain + the 41.1 brain
 //! rhythm: each agent runs a full triune update every other tick, staggered
 //! by index parity, halving per-tick planning cost for the 16 ms wasm gate;
 //! upkeep is still charged every tick):
@@ -80,25 +90,25 @@ fn checksum_at(seed: u32, ticks: u32) -> String {
 
 #[test]
 fn golden_seed_20261102_300_ticks() {
-    // Phase 41 re-baseline (triune-brain energy cost).
+    // Phase 42 re-baseline (triune behaviour authority + replay).
     let ck = checksum_at(20261102, 300);
-    assert_eq!(ck, "0x1265fe37e680e828",
+    assert_eq!(ck, "0xdc98f7d34a7af777",
         "300-tick v2 checksum drifted: {} — see file docs + Phase 40.1 report", ck);
 }
 
 #[test]
 fn golden_seed_20261102_3000_ticks() {
-    // Phase 41 re-baseline (triune-brain energy cost).
+    // Phase 42 re-baseline (triune behaviour authority + replay).
     let ck = checksum_at(20261102, 3000);
-    assert_eq!(ck, "0x0d10cdeaf3e447c0",
+    assert_eq!(ck, "0xafa833641ebfd5a8",
         "3000-tick v2 long-run checksum drifted: {} — if this change is an approved re-baseline, pin the new value here and record it in the phase report", ck);
 }
 
 #[test]
 fn golden_seed_20261105_300_ticks() {
-    // Phase 41 re-baseline (triune-brain energy cost).
+    // Phase 42 re-baseline (triune behaviour authority + replay).
     let ck = checksum_at(20261105, 300);
-    assert_eq!(ck, "0x0c1a5b2254ef521e",
+    assert_eq!(ck, "0x2e9539930abd8975",
         "alt-seed v2 checksum drifted: {} — if this change is an approved re-baseline, pin the new value here and record it in the phase report", ck);
 }
 
@@ -108,8 +118,8 @@ fn golden_seed_20261105_300_ticks() {
 fn golden_300_tick_trajectory_bit_exact_to_v1() {
     let mut eco = Ecology::new(20261102);
     for t in 1..=300 { eco.update(0.1, daylight(t)); }
-    assert_eq!(eco.checksum_v1(), "0x490a0a05d97ba7d3",
-        "the 300-tick v1 trajectory must stay at the pinned Phase 41 anchor");
+    assert_eq!(eco.checksum_v1(), "0xe6404a7bee633eb8",
+        "the 300-tick v1 trajectory must stay at the pinned Phase 42 anchor");
 }
 
 /// Determinism guard: same seed + same ticks must be bit-identical across

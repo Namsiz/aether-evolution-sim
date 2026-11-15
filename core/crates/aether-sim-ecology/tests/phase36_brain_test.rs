@@ -15,11 +15,10 @@
 //!      previous-tick activations), logits, eligibility, weights and the
 //!      taxis baseline all survive the JSON hop, so the shadow trajectory
 //!      does not fork from the never-restored twin.
-//!   4. `shadow_never_drives_behaviour_by_default` — with the authority
-//!      switch OFF (default), the FSM is the sole behaviour source: the
-//!      checksum trajectory is identical to a run with the brain shadow
-//!      disabled (upkeep is the only side channel, hence the A/B uses a
-//!      world-level toggle to keep energy identical).
+//!   4. `switch_off_arm_never_hands_authority_over` — with the authority gate
+//!      explicitly OFF (the Phase 36/41 A/B arm; Phase 42 defaults it ON), the
+//!      FSM stays the sole behaviour source: no agent ever flips to brain
+//!      authority.
 //!
 //! Brain-crate unit tests (`forward_is_deterministic_zero_rng`,
 //! `hebbian_updates_weights`, `reference_networks_have_expected_weights`)
@@ -151,21 +150,22 @@ fn save_restore_preserves_brain_internals() {
 /// trajectory (the ledger's brain_cost and info_cost entries are
 /// observation-only; they do not feed back into agent energy).
 #[test]
-fn shadow_never_drives_behaviour_by_default() {
+fn switch_off_arm_never_hands_authority_over() {
     let mut a = Ecology::new(20261102);
+    // Phase 42: the default world hands behaviour authority to the triune
+    // brain; this test pins the explicit OFF arm (the shadow A/B control).
+    a.brain_switch_enabled = false;
+    assert!(a.brain_on, "shadow network runs by default");
     run_ticks(&mut a, 1, 300);
-    assert!(!a.brain_switch_enabled, "authority gate must default OFF");
     assert!(
         a.living().iter().all(|agent| agent.brain_authority == BRAIN_AUTHORITY_FSM),
         "all agents must start under FSM authority"
     );
     // The authority flag never flips while the gate is off.
     run_ticks(&mut a, 301, 600);
+    assert_eq!(a.brain_learning.authority_switches, 0, "gate off ⇒ zero switches");
     assert!(
         a.living().iter().all(|agent| agent.brain_authority != BRAIN_AUTHORITY_BRAIN),
         "FSM authority must hold while the gate is off"
     );
-    // Both instance flags are consistent with the constants.
-    assert!(a.brain_on, "shadow network runs by default");
-    assert!(!a.brain_switch_enabled, "switch gate stays off by default");
 }

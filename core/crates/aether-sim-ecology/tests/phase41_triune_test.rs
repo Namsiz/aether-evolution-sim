@@ -41,9 +41,12 @@ fn triune_shadow_runs_on_every_tick() {
     for a in &living {
         assert_eq!(a.triune.genes.len(), GENE_COUNT, "agent {} gene length", a.id);
         assert!(
-            a.triune.stats.ticks > 0,
+            a.triune.stats.ticks > 0 || a.age < 0.25,
             "agent {} never ticked its triune brain",
             a.id
+            // Phase 42: 新生个体允许未 tick——脑节律按 idx 奇偶错开，一个
+            // 出生在本 tick 且奇偶未轮到的个体要等下一拍（Allee 缓解提高了
+            // 出生率，这个窗口在 t=300 的断言里真的会被踩到）。
         );
         assert!(
             a.triune.wm.len() <= MAX_WM_SLOTS && a.triune.memory_valence.len() <= MAX_MEMORY_SLOTS,
@@ -104,11 +107,14 @@ fn triune_cost_is_priced_and_ab_testable() {
 
 #[test]
 fn save_v12_roundtrip_is_bit_exact() {
+    // Phase 42 bumps the schema to v13 (triune authority bookkeeping + ReplayOn),
+    // but the triune-state roundtrip contract is unchanged.
     let mut eco = Ecology::new(20261102);
     run_ticks(&mut eco, 1, 120);
     let json = serde_json::to_string(&eco.to_save_state()).unwrap();
-    assert!(json.contains("\"Version\":12"), "schema version must be v12");
+    assert!(json.contains("\"Version\":13"), "schema version must be v13");
     assert!(json.contains("\"Triune\""), "SaveAgent must carry the triune string");
+    assert!(json.contains("\"ReplayOn\""), "v13 must carry the replay toggle");
     let restored = Ecology::from_save_state(serde_json::from_str(&json).unwrap());
     let json2 = serde_json::to_string(&restored.to_save_state()).unwrap();
     assert_eq!(json, json2, "v12 save-state JSON must round-trip bit-exactly");

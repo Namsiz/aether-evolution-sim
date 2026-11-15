@@ -506,11 +506,18 @@ pub const MTE_REPRO_FEE: f64 = 0.5;
 //   main/prng/fish streams bit-identical.
 pub const BRAIN_ON: bool = true;
 pub const BRAIN_UPKEEP_ON: bool = true;
-pub const BRAIN_SWITCH_ENABLED: bool = false;
+/// Phase 42: 行为权威开闸。三脑在通过一致性门（且置信度门）后接管行为；
+/// `false` 保留 Phase 36/41 的纯影子 A/B 路径（测试与对照用）。
+pub const BRAIN_SWITCH_ENABLED: bool = true;
 /// Statistical-equivalence agreement threshold (FSM vs brain action).
 pub const T_EQUIV: f64 = 0.95;
 /// Consecutive-tick window for the equivalence gate.
 pub const T_EQUIV_K_TICKS: u32 = 60;
+/// Phase 42: 接管前的置信度下限（元认知门）。三脑的世界模型没拟合好之前
+/// （预测误差大 → 置信度低）不把行为交出去——「高置信才接管」。
+pub const T_TAKEOVER_CONF: f64 = 0.50;
+/// Phase 42: 经验回放默认开关（A/B 对照可运行期翻转）。
+pub const REPLAY_ON: bool = true;
 /// Structural-mutation probabilities (per birth event, dedicated brain RNG).
 pub const BRAIN_MUTATE_P_ADD: f64 = 0.02;
 pub const BRAIN_MUTATE_P_DEL: f64 = 0.01;
@@ -565,6 +572,37 @@ pub struct TriuneLearningStats {
     pub confidence_sum: f64,
     pub pred_error_sum: f64,
     pub action_hist: [u64; aether_brain::OUTPUT_ACTIONS],
+    /// Phase 42: 离线回放次数。
+    pub replay_updates: u64,
+    /// Phase 42: 抑制闸门校准指标：gate > 0.5 的 tick 数与闸门总和。
+    pub gate_open_ticks: u64,
+    pub gate_sum: f64,
+    /// Phase 42: 行为权威接管后的适应性记账（接管 vs 未接管的 A/B）。
+    pub fitness: AuthorityFitness,
+}
+
+/// Phase 42: 按「行为权威类型」分组的累计适应性（纯观测，不进动力学）。
+/// 死亡时记寿年与子代，出生时按亲代权威归类——这是「脑驱动是否更优」
+/// 的直接检验数据。
+#[derive(Clone, Debug, Default)]
+pub struct AuthorityFitness {
+    pub fsm_deaths: u64,
+    pub fsm_lifespan_sum: f64,
+    pub fsm_offspring_sum: u64,
+    pub brain_deaths: u64,
+    pub brain_lifespan_sum: f64,
+    pub brain_offspring_sum: u64,
+    pub fsm_parent_births: u64,
+    pub brain_parent_births: u64,
+}
+
+impl AuthorityFitness {
+    pub fn mean_fsm_lifespan(&self) -> f64 {
+        if self.fsm_deaths == 0 { 0.0 } else { self.fsm_lifespan_sum / self.fsm_deaths as f64 }
+    }
+    pub fn mean_brain_lifespan(&self) -> f64 {
+        if self.brain_deaths == 0 { 0.0 } else { self.brain_lifespan_sum / self.brain_deaths as f64 }
+    }
 }
 
 impl TriuneLearningStats {
@@ -576,6 +614,13 @@ impl TriuneLearningStats {
     }
     pub fn mean_pred_error(&self) -> f64 {
         if self.ticks == 0 { 0.0 } else { self.pred_error_sum / self.ticks as f64 }
+    }
+    /// Phase 42: gate > 0.5 的 tick 占比（抑制校准主指标）。
+    pub fn gate_open_ratio(&self) -> f64 {
+        if self.ticks == 0 { 0.0 } else { self.gate_open_ticks as f64 / self.ticks as f64 }
+    }
+    pub fn mean_gate(&self) -> f64 {
+        if self.ticks == 0 { 0.0 } else { self.gate_sum / self.ticks as f64 }
     }
 }
 
@@ -772,6 +817,14 @@ pub struct Agent {
     /// is under selection. Behaviour authority stays behind the existing
     /// `brain_switch_enabled` gate.
     pub triune: aether_brain::triune::TriuneBrain,
+    /// Phase 42: 三脑一致度门——它在多少个连续的脑节律 tick 上与自己当时的
+    /// FSM 动作一致（只有影子阶段有意义）。
+    pub triune_equiv_streak: u32,
+    /// Phase 42: 最近 `T_EQUIV_K_TICKS` 个脑节律 tick 的一致位图（bit=1 表示
+    /// 一致）。用 64 位移位寄存器做真正的滑动窗口，而不是只涨不跌的计数器。
+    pub triune_agree_bits: u64,
+    /// Phase 42: 位图里已累积的样本数（封顶 `T_EQUIV_K_TICKS`）。
+    pub triune_agree_n: u32,
     /// Phase 37: knowledge tokens this agent has learned (id list, in learning order).
     pub known_tokens: Vec<u32>,
     /// Phase 39.1: group membership (0 = solitary). Groups are behavioural
@@ -1358,6 +1411,8 @@ pub struct Ecology {
     /// shadow (decision + learning); `triune_upkeep_on` charges its energy.
     pub triune_on: bool,
     pub triune_upkeep_on: bool,
+    /// Phase 42: 离线经验回放开关（A/B 对照可运行期翻转）。
+    pub replay_on: bool,
     /// Phase 41: triune-brain aggregate telemetry (observability only).
     pub triune_stats: TriuneLearningStats,
     /// Phase 36: dedicated RNG stream for brain structural mutation
@@ -1519,10 +1574,12 @@ impl Ecology {
             brain_switch_enabled: BRAIN_SWITCH_ENABLED,
             brain_learning: BrainLearningStats::default(),
             brain_learning_rng: Mulberry32::new(seed ^ BRAIN_RNG_TAG),
-            // Phase 41: triune brain runs every tick and pays real upkeep;
-            // behaviour authority remains with the FSM (shadow decision layer).
+            // Phase 41: triune brain runs every tick and pays real upkeep.
+            // Phase 42: it also takes behaviour authority once its own
+            // FSM-agreement gate (and confidence floor) is met.
             triune_on: true,
             triune_upkeep_on: true,
+            replay_on: REPLAY_ON,
             triune_stats: TriuneLearningStats::default(),
             // Phase 37: culture layer — ON by default for this dynamics stage,
             // with a dedicated RNG stream separate from all ecology streams.
@@ -1688,10 +1745,12 @@ impl Ecology {
             brain_switch_enabled: BRAIN_SWITCH_ENABLED,
             brain_learning: BrainLearningStats::default(),
             brain_learning_rng: Mulberry32::new(seed ^ BRAIN_RNG_TAG),
-            // Phase 41: triune brain runs every tick and pays real upkeep;
-            // behaviour authority remains with the FSM (shadow decision layer).
+            // Phase 41: triune brain runs every tick and pays real upkeep.
+            // Phase 42: it also takes behaviour authority once its own
+            // FSM-agreement gate (and confidence floor) is met.
             triune_on: true,
             triune_upkeep_on: true,
+            replay_on: REPLAY_ON,
             triune_stats: TriuneLearningStats::default(),
             // Phase 37: culture layer — ON by default for this dynamics stage,
             // with a dedicated RNG stream separate from all ecology streams.
@@ -1850,6 +1909,15 @@ impl Ecology {
         let mut sense = [0.0f64; aether_brain::INPUT_CHANNELS];
         self.sample_sense_vector(a_ref, &self.grass, |x, z| self.cell_index(x, z), self.daylight, &mut sense);
         let fsm_act = Self::fsm_action_from(a_ref);
+        // Phase 42: 回流一致性——接管个体的 `executed` 就是上一脑节律 tick 仲裁
+        // 出来、本 tick 真的被 `brain_bridge` 执行的那个动作（不再是 FSM 动作）。
+        // 三层脑学的因此是它自己造成的真实转移，学习闭环自洽。
+        let authority = a_ref.brain_authority == BRAIN_AUTHORITY_BRAIN;
+        let executed = if authority && a_ref.triune.stats.ticks > 0 {
+            a_ref.triune.last.action
+        } else {
+            fsm_act
+        };
         let legacy_up = if self.brain_on && self.brain_upkeep_on && a_ref.brain.n_hid > 0 {
             Some(a_ref.brain.upkeep() * h)
         } else { None };
@@ -1903,11 +1971,41 @@ impl Ecology {
         // biologically plausible and halves the per-tick planning cost
         // (was 19.7 ms/frame in the wasm viewer budget, over the 16 ms gate).
         // Upkeep is still charged every tick (the brain is always alive).
+        //
+        let replay_on = self.replay_on;
         if self.triune_on && (self.tick_count % 2) == (idx as u32 % 2) {
-            let outcome = {
+            let (outcome, replayed) = {
                 let a = &mut self.agents[idx];
-                a.triune.tick(&sense, reward, h, fsm_act)
+                let o = a.triune.tick(&sense, reward, h, executed);
+                // Phase 42: 离线巩固——每个脑节律 tick 额外抽一条历史经验
+                // 做一次 delta-rule 更新（海马尖波涟漪重放的最小同构）。
+                // 零 RNG：游标确定性轮转。与在线更新共用世界模型，但只改权重
+                // （不驱动 RPE/置信度，见 `observe_impl` 的 learn_meta）。
+                let r = if replay_on { a.triune.replay_step().is_some() } else { false };
+                (o, r)
             };
+            // 影子阶段才累积一致度（接管后 FSM 已被脑驱动，再比就没意义）。
+            if !authority {
+                let a = &mut self.agents[idx];
+                let agree = outcome.decision.action == fsm_act;
+                // 只保留最近 K 位：移位寄存器即滑动窗口，高位必须剪掉，
+                // 否则存档/恢复的掩码会与运行中的值不一致（位精确契约）。
+                let mask: u64 = if T_EQUIV_K_TICKS >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << T_EQUIV_K_TICKS) - 1
+                };
+                a.triune_agree_bits = ((a.triune_agree_bits << 1) | (agree as u64)) & mask;
+                a.triune_agree_n = (a.triune_agree_n + 1).min(T_EQUIV_K_TICKS);
+                if agree {
+                    a.triune_equiv_streak += 1;
+                } else {
+                    a.triune_equiv_streak = 0;
+                }
+                if a.triune_equiv_streak > self.brain_learning.equiv_streak_max {
+                    self.brain_learning.equiv_streak_max = a.triune_equiv_streak;
+                }
+            }
             let decision_cost = if self.triune_upkeep_on {
                 outcome.decision_rate * h
             } else { 0.0 };
@@ -1928,6 +2026,9 @@ impl Ecology {
             st.inhibitions += outcome.inhibition as u64;
             st.prediction_updates += outcome.prediction_updated as u64;
             st.high_confidence_ticks += (outcome.confidence > 0.7) as u64;
+            st.replay_updates += replayed as u64;
+            st.gate_open_ticks += (outcome.decision.inhibit_gate > aether_brain::triune::GATE_OPEN) as u64;
+            st.gate_sum += outcome.decision.inhibit_gate;
             st.max_fear = st.max_fear.max(outcome.fear);
             st.fear_sum += outcome.fear;
             st.confidence_sum += outcome.confidence;
@@ -1940,18 +2041,28 @@ impl Ecology {
     /// FSM↔brain agreement to flip its authority from FSM → brain. Runs ONLY
     /// at speciation-check tick boundaries (`tick_count % SPECIATION_CHECK_TICKS
     /// == 0`) so it never interferes with the hot update loop.
-    /// Default `BRAIN_SWITCH_ENABLED = false` keeps all legacy trajectories
-    /// bit-exact under the old code (this method is a no-op).
+    ///
+    /// Phase 42: the agreement now comes from the **triune** brain — the network
+    /// that actually takes over (checking the legacy micro-brain's agreement
+    /// would hand authority to an unrelated network), plus a metacognitive
+    /// confidence floor (`T_TAKEOVER_CONF`): a brain whose world model does not
+    /// yet predict its own transitions has no business steering the body.
+    ///
+    /// `BRAIN_SWITCH_ENABLED = false` keeps the Phase 41.1 shadow-only world
+    /// (the A/B arm).
     pub fn check_brain_authority_switch(&mut self) {
         if !self.brain_switch_enabled { return; }
         if self.tick_count % SPECIATION_CHECK_TICKS != 0 { return; }
+        let k = T_EQUIV_K_TICKS;
+        let mask: u64 = if k >= 64 { u64::MAX } else { (1u64 << k) - 1 };
+        let need = ((k as f64 * T_EQUIV).ceil() as u32).min(k);
         for i in 0..self.agents.len() {
             let a = &self.agents[i];
             if !a.alive || a.brain_authority == BRAIN_AUTHORITY_BRAIN { continue; }
-            let n = a.brain_window_len.max(1) as u32;
-            let agree_ratio = a.brain_agree_window as f64 / n as f64;
-            if a.brain_equiv_streak >= T_EQUIV_K_TICKS && agree_ratio >= T_EQUIV {
-                // Mutable re-acquisition now that we've finished the shared-read phase.
+            if a.triune_equiv_streak < k || a.triune_agree_n < k { continue; }
+            let agrees = (a.triune_agree_bits & mask).count_ones();
+            let confident = a.triune.stats.ticks > 0 && a.triune.confidence >= T_TAKEOVER_CONF;
+            if agrees >= need && confident {
                 self.agents[i].brain_authority = BRAIN_AUTHORITY_BRAIN;
                 self.brain_learning.authority_switches += 1;
             }
@@ -1959,6 +2070,307 @@ impl Ecology {
     }
 
     // ----- kind registry (Phase 31) ------------------------------------
+
+    // ----- Phase 42: 行为权威桥接 ---------------------------------------------
+
+    /// 把朝向对准目标（与各 update_* 的转向子程序同一套语义：最大 2.8·h rad/tick）。
+    fn brain_steer(&mut self, idx: usize, h: f64) {
+        let dx = self.agents[idx].target_x - self.agents[idx].x;
+        let dz = self.agents[idx].target_z - self.agents[idx].z;
+        if dx * dx + dz * dz > 0.01 {
+            let want = aether_libm::atan2(dx, dz);
+            let mut diff = want - self.agents[idx].heading;
+            while diff > std::f64::consts::PI { diff -= std::f64::consts::PI * 2.0; }
+            while diff < -std::f64::consts::PI { diff += std::f64::consts::PI * 2.0; }
+            self.agents[idx].heading += diff.clamp(-2.8 * h, 2.8 * h);
+        }
+    }
+
+    /// 改变朝向并把目标点挪到新朝向上（转体=朝向+目标一起转，否则下一 tick
+    /// FSM 的转向子程序会把身体掰回旧目标）。
+    fn brain_aim(&mut self, idx: usize, heading: f64) {
+        let x = self.agents[idx].x;
+        let z = self.agents[idx].z;
+        // Phase 42.1: the body refuses what the environment cannot execute.
+        // A beached fish dies at FISH_DRY_DEATH_RATE = 0.5/s, and the
+        // unbridged `flee`/`turn` intents happily aimed schools onto dry land
+        // (every taken-over fish was dead by t=16k in the diagnostic run).
+        // So for aquatic bodies the aim is clamped to the nearest heading
+        // whose 10-unit lookahead stays in water — a zero-RNG physical
+        // constraint, not a behaviour script.
+        if self.kind_def(self.agents[idx].kind).behavior == BehaviorTemplate::Fish {
+            for &off in &[0.0, 0.45, -0.45, 0.9, -0.9, 1.35, -1.35, 1.8, -1.8, 2.25, -2.25] {
+                let hx = x + aether_libm::sin(heading + off) * 10.0;
+                let hz = z + aether_libm::cos(heading + off) * 10.0;
+                if terrain_height(hx, hz) < WATER_LEVEL + 1.5 {
+                    let hh = heading + off;
+                    self.agents[idx].heading = hh;
+                    self.agents[idx].target_x = x + aether_libm::sin(hh) * 10.0;
+                    self.agents[idx].target_z = z + aether_libm::cos(hh) * 10.0;
+                    return;
+                }
+            }
+            // No water within reach in any direction: keep the current
+            // heading and target (the school hugs the shoreline instead of
+            // marching inland).
+            return;
+        }
+        self.agents[idx].heading = heading;
+        self.agents[idx].target_x = x + aether_libm::sin(heading) * 10.0;
+        self.agents[idx].target_z = z + aether_libm::cos(heading) * 10.0;
+    }
+
+    /// 活猎物探测（零 RNG）：物种 diet 声明了猎物、且猎物物理可达时才返回
+    /// （水生猎物只能从浅水边缘捕捉——沿用 update_pred 的物理约束）。
+    /// 返回 (距离, id, x, z)。
+    fn brain_probe_prey(
+        &self,
+        idx: usize,
+        prey_kinds: &[SpeciesKind],
+        g_sense: f64,
+    ) -> Option<(f64, u32, f64, f64)> {
+        let my_ground = terrain_height(self.agents[idx].x, self.agents[idx].z);
+        let fish_reachable = my_ground < WATER_LEVEL + 3.0;
+        let mut best: Option<(f64, u32, f64, f64)> = None;
+        let mut best_d = g_sense * g_sense;
+        for &pk in prey_kinds {
+            if self.kind_def(pk).behavior == BehaviorTemplate::Fish && !fish_reachable { continue; }
+            if let Some((j, d)) = self.nearest(idx, pk, g_sense, None::<fn(&Agent) -> bool>) {
+                if d < best_d {
+                    best_d = d;
+                    best = Some((d, self.agents[j].id, self.agents[j].x, self.agents[j].z));
+                }
+            }
+        }
+        best
+    }
+
+    /// 草地探测（零 RNG）：在感知半径内扫描草量最高的格子。
+    /// 返回 (距离, x, z)——与 prey/carcass 探测同一形态。
+    fn brain_probe_grass(&self, idx: usize, g_sense: f64) -> Option<(f64, f64, f64)> {
+        let ax = self.agents[idx].x;
+        let az = self.agents[idx].z;
+        let ci0 = self.cell_index(ax, az);
+        if ci0 < 0 { return None; }
+        let gn = self.grid_n as isize;
+        let i0 = ci0 % gn;
+        let j0 = ci0 / gn;
+        let r = (g_sense / self.cell).ceil() as isize;
+        let mut best: Option<(f64, f64, f64)> = None;
+        let mut best_score = 0.15f64; // below the FSM's graze floor: ignore stubble
+        for j in (j0 - r).max(0)..=(j0 + r).min(gn - 1) {
+            for i in (i0 - r).max(0)..=(i0 + r).min(gn - 1) {
+                let gi = (j * gn + i) as usize;
+                let g = self.grass[gi] as f64;
+                if g <= best_score { continue; }
+                let mut cc = [0.0f64; 2];
+                Self::cell_coord(j * gn + i, &mut cc);
+                let (cx, cz) = (cc[0], cc[1]);
+                let dx = cx - ax;
+                let dz = cz - az;
+                let d2 = dx * dx + dz * dz;
+                if d2 > g_sense * g_sense { continue; }
+                // score = grass minus a small distance tiebreak
+                let score = g - 0.001 * d2.sqrt();
+                if score > best_score {
+                    best_score = score;
+                    best = Some((d2.sqrt(), cx, cz));
+                }
+            }
+        }
+        best
+    }
+
+    /// 尸体探测（零 RNG）：最近的可声明尸体（锁仲裁沿用 Phase 8 的规则）。
+    /// 返回 (距离, x, z)。
+    fn brain_probe_carcass(&self, idx: usize, g_sense: f64) -> Option<(f64, f64, f64)> {
+        let ax = self.agents[idx].x;
+        let az = self.agents[idx].z;
+        let self_id = self.agents[idx].id;
+        let mut bd = (g_sense * 1.2).powi(2);
+        let mut best: Option<(f64, f64, f64)> = None;
+        for c in self.carcasses.iter() {
+            if !self.carcass_claimable(c, self_id) { continue; }
+            let dx = c.x - ax;
+            let dz = c.z - az;
+            let d2 = dx * dx + dz * dz;
+            if d2 < bd { bd = d2; best = Some((d2.sqrt(), c.x, c.z)); }
+        }
+        best
+    }
+
+    /// Phase 42: 三脑仲裁动作 → 运动意图的桥接层。
+    ///
+    /// 这是**接口层**，不是行为剧本：脑只选「做什么」（前进/左转/右转/吃/逃/
+    /// 繁殖/帮助），怎么落地完全由身体能力决定——能吃植物/尸体/活猎物看
+    /// `diet`，速度倍率看行为模板，lok 仲裁/啃食/繁殖生理全在原有的
+    /// `update_*` 子程序里。因此桥接零 RNG、不新增感知通道、不改能量学。
+    ///
+    /// 意图与实现的分工：脑拥有最终一拍（在 FSM 的运动块之后覆盖
+    /// `state`/`heading`/`desired_speed`），FSM 保留感知-目标维护、接近-
+    /// 锁定、啃食、繁殖、死亡等全部子程序——脑是总经理，不是工人。
+    ///
+    /// 只在 `brain_authority == BRAIN_AUTHORITY_BRAIN` 时生效；在未更新的
+    /// 脑节律 tick 上复用 `triune.last`（最近一次仲裁结果）。
+    fn brain_bridge(&mut self, idx: usize, h: f64) {
+        if !self.triune_on { return; }
+        if self.agents[idx].brain_authority != BRAIN_AUTHORITY_BRAIN { return; }
+        if self.agents[idx].triune.stats.ticks == 0 { return; }
+        let action = self.agents[idx].triune.last.action as usize % aether_brain::OUTPUT_ACTIONS;
+        let kind = self.agents[idx].kind;
+        let tmpl = self.kind_def(kind).behavior;
+        let g_speed = self.agents[idx].genome.speed;
+        let g_sense = self.agents[idx].genome.sense;
+        let g_bold = self.agents[idx].genome.bold;
+        let speed_mult = match tmpl {
+            BehaviorTemplate::Fish => FISH_SPEED_MULT,
+            BehaviorTemplate::Deco => DECO_SPEED_MULT,
+            _ => 1.0,
+        };
+        let cruise = g_speed * speed_mult * match tmpl {
+            BehaviorTemplate::Pred => 0.32,
+            BehaviorTemplate::Deco => 0.4,
+            _ => 0.55,
+        };
+        let eats_plant = self.diet_of(kind).eats_plant;
+        let eats_carcass = self.diet_of(kind).eats_carcass;
+        let prey_kinds: Vec<SpeciesKind> = self.diet_of(kind).prey_kinds.clone();
+
+        let desired = match action {
+            // turn_left / turn_right：转体 + 慢速前移（探索/避障）
+            1 | 2 => {
+                let rate = 2.8 * h;
+                let heading = self.agents[idx].heading + if action == 1 { -rate } else { rate };
+                self.brain_aim(idx, heading);
+                if self.agents[idx].state == "flee" { self.agents[idx].state = "wander"; }
+                cruise * 0.5
+            }
+            // eat：在物种能吃的所有来源里选最近的（能力决定菜单，距离决定
+            // 选择，不是菜谱式偏好）。脚下有植物视为零距离。
+            3 => {
+                let ci = self.cell_index(self.agents[idx].x, self.agents[idx].z);
+                let here = if ci >= 0 { self.grass[ci as usize] as f64 } else { 0.0 };
+                // Phase 42.1: 觅食经济学优先——脚下的食物胜过 30 单位外更肥的
+                // 草格，仍有草的目标格胜过重新探针。每个 eat 决策都重新定靶
+                // 会让草食者在肥草格之间跳跃、永远坐不下来喈食（实测摄入崩
+                // 塨 → cohort 老龄化灭绝）。只有目标真正失效（空/太远/未设）
+                // 才做 richest-cell 探针；零 RNG、扫描顺序即确定性平局规则。
+                if eats_plant && here > 0.1 {
+                    self.agents[idx].state = "graze";
+                    self.agents[idx].desired_speed = 0.0;
+                    return;
+                }
+                // Phase 42.1: real forage probe — “eat” must mean “go to the
+                // nearest actual food”, otherwise a taken-over herb walks to
+                // the stale FSM target and starves inside a full meadow
+                // (grass 4200, herd extinct by t=7k in the diagnostic).
+                let d_plant = if eats_plant {
+                    let tx = self.agents[idx].target_x;
+                    let tz = self.agents[idx].target_z;
+                    let tci = self.cell_index(tx, tz);
+                    let t_grass = if tci >= 0 { self.grass[tci as usize] as f64 } else { 0.0 };
+                    let td = js_hypot(tx - self.agents[idx].x, tz - self.agents[idx].z);
+                    if t_grass > 0.1 && td > 0.01 {
+                        td
+                    } else {
+                        match self.brain_probe_grass(idx, g_sense) {
+                            Some((d, gx, gz)) => {
+                                self.agents[idx].target_x = gx;
+                                self.agents[idx].target_z = gz;
+                                d
+                            }
+                            None => f64::INFINITY,
+                        }
+                    }
+                } else { f64::INFINITY };
+                let prey = if !prey_kinds.is_empty() {
+                    self.brain_probe_prey(idx, &prey_kinds, g_sense)
+                } else { None };
+                let carcass = if eats_carcass { self.brain_probe_carcass(idx, g_sense) } else { None };
+                let mut best = (d_plant, 0u8);
+                if let Some((d, _, _, _)) = prey {
+                    if d < best.0 { best = (d, 1); }
+                }
+                if let Some((d, _, _)) = carcass {
+                    if d < best.0 { best = (d, 2); }
+                }
+                match best.1 {
+                    1 => {
+                        let (_, tid, px, pz) = prey.unwrap();
+                        self.agents[idx].target_id = tid;
+                        self.agents[idx].target_x = px;
+                        self.agents[idx].target_z = pz;
+                        self.agents[idx].state = "hunt";
+                        self.brain_steer(idx, h);
+                        g_speed * speed_mult * 1.1
+                    }
+                    2 => {
+                        let (_, cx, cz) = carcass.unwrap();
+                        self.agents[idx].target_x = cx;
+                        self.agents[idx].target_z = cz;
+                        self.agents[idx].state = match tmpl {
+                            BehaviorTemplate::Deco => "approach",
+                            _ => "scavenge",
+                        };
+                        self.brain_steer(idx, h);
+                        match tmpl {
+                            BehaviorTemplate::Deco => g_speed * speed_mult * 0.8,
+                            _ => g_speed * speed_mult * 1.1,
+                        }
+                    }
+                    _ => {
+                        self.agents[idx].state = "graze";
+                        if eats_plant && here > 0.1 || d_plant < 1.6 {
+                            0.0
+                        } else {
+                            self.brain_steer(idx, h);
+                            g_speed * speed_mult * 0.75
+                        }
+                    }
+                }
+            }
+            // flee：逃离最近威胁；无威胁时意图退化为移动（不演不存在的逃跑戏）
+            4 => {
+                let threat = self.nearest(idx, PRED, g_sense, None::<fn(&Agent) -> bool>);
+                if let Some((tj, _)) = threat {
+                    let away = aether_libm::atan2(
+                        self.agents[idx].x - self.agents[tj].x,
+                        self.agents[idx].z - self.agents[tj].z,
+                    );
+                    self.brain_aim(idx, away);
+                    self.agents[idx].state = "flee";
+                    g_speed * (1.32 - g_bold * 0.25)
+                } else {
+                    if self.agents[idx].state == "flee" { self.agents[idx].state = "wander"; }
+                    self.brain_steer(idx, h);
+                    cruise * 1.2
+                }
+            }
+            // reproduce：只表达意图，生理条件（能量/冷却/配偶）仍由 update_*
+            // 尾部的现有繁殖路径决定——脑不能绕过能量学。
+            5 => {
+                self.brain_steer(idx, h);
+                cruise
+            }
+            // help：走现有协作路径（kind/年龄/能量/冷却全在 try_help 里）
+            6 => {
+                if self.agents[idx].state == "flee" { self.agents[idx].state = "graze"; }
+                let ci = self.cell_index(self.agents[idx].x, self.agents[idx].z);
+                if ci >= 0 {
+                    self.try_help(idx, ci as usize);
+                }
+                self.agents[idx].state = "graze";
+                0.0
+            }
+            // move_forward：保持当前目标全速前进
+            _ => {
+                if self.agents[idx].state == "flee" { self.agents[idx].state = "wander"; }
+                self.brain_steer(idx, h);
+                cruise
+            }
+        };
+        self.agents[idx].desired_speed = desired;
+    }
 
     pub fn kind_def(&self, id: SpeciesKind) -> &KindDef { self.kinds.def(id) }
 
@@ -2730,6 +3142,11 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             // Phase 41: three-layer brain seeded from the kind's reference
             // genome (agents of the same kind still differ via id noise).
             triune: self.initial_triune(kind, self.next_id - 1),
+            // Phase 42: 新生个体的行为权威从 FSM 开始——三脑必须用自己的一生
+            // 再次赢回一致度门（脑与身体同步发育，不继承亲代的权威状态）。
+            triune_equiv_streak: 0,
+            triune_agree_bits: 0,
+            triune_agree_n: 0,
             brain_authority: BRAIN_AUTHORITY_FSM,
             brain_equiv_streak: 0,
             brain_equiv_start: 0,
@@ -3174,7 +3591,16 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         // spread along the narrow shoreline band, so nearest-neighbor distance
         // is much larger than for land species.
         let mate_id = self.agents[idx].id; let mate_max_e = self.agents[idx].max_energy; let mate_kind = self.agents[idx].kind;
-        let mate_radius = if mate_kind == FISH { 60.0 } else { 11.0 };
+        // Phase 42: Allee 缓解——择偶搜索半径随稀疏程度扩大（密度越低，
+        // 找到配偶的搜寻成本越高）。满员（density_factor == 1）时半径恰为
+        // legacy 11.0，密集世界的动力学逐位不变；稀疏世界则不会因为
+        // 「找不到 11 单位内的配偶」而落入零出生吸收态（42 诊断实测：
+        // 满员时也只有 27% 的待育者在 11 单位内有配偶，稀疏后直接归零）。
+        let mate_radius = if mate_kind == FISH {
+            60.0
+        } else {
+            11.0 * (1.0 + (1.0 - density_factor.clamp(0.0, 1.0)) * 3.0)
+        };
         let mate_min_e_const = if mate_kind == FISH { 0.55 } else { 0.68 };
         let selected_mode = self.deco_eff_choice_mode;
         let mate_filter = Some(move |b: &Agent| {
@@ -3253,6 +3679,8 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             // can mutate it for the child without conflicting with the
             // &mut Agent alias returned by spawn.
             let parent_brain = self.agents[idx].brain.clone();
+            // Phase 42: 亲代行为权威类型（出生记账用，提前取以免 spawn 后借用冲突）。
+            let parent_authority = self.agents[idx].brain_authority;
             // Phase 36: mutate the child's brain BEFORE spawning so we never
             // hold `&mut Agent` (from spawn) and `&mut self.brain_learning_rng`
             // simultaneously — they are both reachable through `self`.
@@ -3267,6 +3695,12 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 child.clade_id = parent_clade;
                 child.brain = child_brain;
                 child.triune = child_triune;
+                // Phase 42: 按亲代的行为权威归类出生（适应性 A/B 的分母）。
+                if parent_authority == BRAIN_AUTHORITY_BRAIN {
+                    self.triune_stats.fitness.brain_parent_births += 1;
+                } else {
+                    self.triune_stats.fitness.fsm_parent_births += 1;
+                }
                 let (drain_herb, drain_pred) = self.kind_def(self.agents[idx].kind).repro_drain_pair;
                 self.ledger.repro_loss += drain_herb + drain_pred;
                 // Phase 35 MTE_ON: body-mass reproduction fee (size^3).
@@ -3345,6 +3779,16 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         if cause == "starved" { self.starved += 1; }
         else if cause == "aged" { self.aged += 1; }
         let offspring = self.agents[idx].offspring;
+        // Phase 42: 按死者的行为权威类型记寿年与子代（接管 vs 未接管的适应性 A/B）。
+        if self.agents[idx].brain_authority == BRAIN_AUTHORITY_BRAIN {
+            self.triune_stats.fitness.brain_deaths += 1;
+            self.triune_stats.fitness.brain_lifespan_sum += self.agents[idx].age;
+            self.triune_stats.fitness.brain_offspring_sum += offspring as u64;
+        } else {
+            self.triune_stats.fitness.fsm_deaths += 1;
+            self.triune_stats.fitness.fsm_lifespan_sum += self.agents[idx].age;
+            self.triune_stats.fitness.fsm_offspring_sum += offspring as u64;
+        }
         let lifetime_fitness = (self.agents[idx].age / self.agents[idx].genome.lifespan) * (1.0 + offspring as f64) / self.agents[idx].genome.metabolism;
         let kind_idx = self.agents[idx].kind as usize;
         self.generation_fitness[kind_idx].push(FitnessRecord { gen: self.agents[idx].generation, age: self.agents[idx].age, offspring, fitness: lifetime_fitness });
@@ -3515,6 +3959,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             }
         }
 
+        self.brain_bridge(idx, h);
         self.agents[idx].speed = self.agents[idx].speed + (self.agents[idx].desired_speed - self.agents[idx].speed) * (h * 5.0).min(1.0);
         let activity = self.agents[idx].speed / g_speed.max(1.0);
         self.agents[idx].activity = activity;
@@ -3717,6 +4162,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                     }
                     self.agents[idx].desired_speed = desired;
                 }
+        self.brain_bridge(idx, h);
         self.agents[idx].speed = self.agents[idx].speed + (self.agents[idx].desired_speed - self.agents[idx].speed) * (h * 5.0).min(1.0);
         let activity = self.agents[idx].speed / g_speed.max(1.0);
         self.agents[idx].activity = activity;
@@ -3869,6 +4315,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 }
             }
         }
+        self.brain_bridge(idx, h);
         self.agents[idx].speed = self.agents[idx].speed + (self.agents[idx].desired_speed - self.agents[idx].speed) * (h * 5.0).min(1.0);
         let activity = self.agents[idx].speed / g_speed.max(1.0);
         self.agents[idx].activity = activity;
@@ -3998,6 +4445,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 }
             }
         }
+        self.brain_bridge(idx, h);
         self.agents[idx].speed = self.agents[idx].speed + (self.agents[idx].desired_speed - self.agents[idx].speed) * (h * 5.0).min(1.0);
         let activity = self.agents[idx].speed / g_speed.max(1.0);
         self.agents[idx].activity = activity;
@@ -4145,6 +4593,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             }
         }
 
+        self.brain_bridge(idx, h);
         self.agents[idx].speed = self.agents[idx].speed + (self.agents[idx].desired_speed - self.agents[idx].speed) * (h * 5.0).min(1.0);
         let activity = self.agents[idx].speed / (g_speed * speed_mult).max(1.0);
         self.agents[idx].activity = activity;
@@ -4325,6 +4774,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         }
         self.agents[idx].desired_speed = desired;
 
+        self.brain_bridge(idx, h);
         self.agents[idx].speed = self.agents[idx].speed + (self.agents[idx].desired_speed - self.agents[idx].speed) * (h * 5.0).min(1.0);
         let activity = self.agents[idx].speed / (g_speed * speed_mult).max(1.0);
         self.agents[idx].activity = activity;
@@ -5901,6 +6351,10 @@ fn agent_to_save(a: &Agent, kinds: &KindRegistry) -> save_state::SaveAgent {
         // Phase 41: three-layer brain as a compact JSON string (flat visitor
         // footprint, same trick as SavedClades).
         triune: serde_json::to_string(&a.triune).unwrap_or_default(),
+        // Phase 42: triune agreement gate bookkeeping (authority switch state).
+        triune_equiv_streak: a.triune_equiv_streak,
+        triune_agree_bits: a.triune_agree_bits,
+        triune_agree_n: a.triune_agree_n,
     }
 }
 
@@ -6295,6 +6749,7 @@ impl Ecology {
             BrainLearningRngState: self.brain_learning_rng.state(),
             // Phase 41: triune-brain toggles.
             TriuneOn: self.triune_on,
+            ReplayOn: self.replay_on,
             TriuneUpkeepOn: self.triune_upkeep_on,
             // Phase 37: culture layer serialization.
             TokenRegistry: self.token_registry.tokens.iter().map(|t| {
@@ -6771,6 +7226,11 @@ impl Ecology {
                         t.normalize_saved();
                         t
                     },
+                    triune_equiv_streak: a.triune_equiv_streak,
+                    triune_agree_bits: a.triune_agree_bits.min(
+                        if T_EQUIV_K_TICKS >= 64 { u64::MAX } else { (1u64 << T_EQUIV_K_TICKS) - 1 },
+                    ),
+                    triune_agree_n: a.triune_agree_n.min(T_EQUIV_K_TICKS),
                     brain_authority: a.brain_authority,
                     brain_equiv_streak: a.brain_equiv_streak,
                     brain_equiv_start: 0,
@@ -6902,6 +7362,7 @@ impl Ecology {
             brain_switch_enabled: state.BrainSwitchEnabled,
             brain_learning: BrainLearningStats::default(),
             triune_on: state.TriuneOn,
+            replay_on: state.ReplayOn,
             triune_upkeep_on: state.TriuneUpkeepOn,
             triune_stats: TriuneLearningStats::default(),
             brain_learning_rng: if state.BrainLearningRngState != 0 {
