@@ -8,6 +8,7 @@ pub mod cataclysm; // Phase 17: cataclysms + recovery dynamics
 pub mod geology; // Phase 18: plate tectonics + eustatic sea level
 pub mod biochemistry; // Phase 18: fast/slow nutrient pools + fertility feedback
 pub mod culture; // Phase 37: knowledge tokens + niche construction
+pub mod civilization_metrics; // Phase 39.0: civilization-scale research telemetry
 pub mod region; // Phase 38: multi-region frame tree + shared geo/nutrients
 pub mod l0_shadow; // Phase 38: L0 statistical shadows (Lotka-Volterra aggregate)
 pub mod wasm;
