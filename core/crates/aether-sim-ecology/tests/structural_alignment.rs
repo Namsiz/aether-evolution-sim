@@ -94,14 +94,13 @@ fn scav_omn_ecology_loop_active_and_counts_match_js_oracle() {
         if t == next_sample {
             let s = eco.agents.iter().filter(|a| a.alive && a.kind == SCAV).count();
             let o = eco.agents.iter().filter(|a| a.alive && a.kind == OMN).count();
-            // Phase 40.1 re-anchor: the reproduction-brake cap (0.90) shifts
-            // the SCAV/OMN census — SCAV reaches 9 at t=300 (was pinned 8
-            // since the pre-Phase-8 JS oracle), OMN climbs 12→13→14→16.
-            let s_gold = if t >= 300 { 9usize } else { 8 };
+            // Phase 41 re-anchor: the triune-brain energy term shifts the
+            // SCAV/OMN census back down — SCAV stays 8 throughout and OMN
+            // climbs 12→13→14 (previously 9 / 12→13→14→16 under Phase 40.1).
+            let s_gold = 8usize;
             assert_eq!(s, s_gold, "scav count at t={}", t);
             let o_gold = match t {
-                300 => 16usize,
-                250 => 14,
+                250 | 300 => 14usize,
                 200 => 13,
                 _ => 12,
             };

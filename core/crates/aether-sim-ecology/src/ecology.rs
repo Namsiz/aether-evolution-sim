@@ -518,6 +518,8 @@ pub const BRAIN_MUTATE_P_DEL: f64 = 0.01;
 pub const BRAIN_PERTURB_SIGMA: f64 = 0.4;
 /// Deterministic per-agent init noise on the grandfather network.
 pub const BRAIN_NOISE_SIGMA: f64 = 0.25;
+/// Phase 41: per-birth triune gene/world noise scale.
+pub const TRIUNE_MUTATE_SIGMA: f64 = 0.6;
 /// Dedicated-stream seed for brain structural mutation (never main/prng/fish).
 pub const BRAIN_RNG_TAG: u32 = 0x42_52_41_49;
 /// Authority markers on `Agent.brain_authority`.
@@ -539,6 +541,42 @@ pub struct BrainLearningStats {
     pub authority_switches: u32,
     /// Cumulative brain upkeep energy drained (beyond the ledger's info_cost).
     pub brain_energy_drained: f64,
+}
+
+/// Phase 41: triune-brain global telemetry (pure observability — never feeds
+/// the trajectory). Per-agent counters live on `Agent.triune.stats`; this
+/// aggregate sums the per-tick increments across the population.
+#[derive(Clone, Debug, Default)]
+pub struct TriuneLearningStats {
+    pub ticks: u64,
+    pub upkeep_energy: f64,
+    pub decision_energy: f64,
+    pub fear_events: u64,
+    pub fear_conditioning: u64,
+    pub memory_retrievals: u64,
+    pub wm_updates: u64,
+    pub rollout_steps: u64,
+    pub planned_overrides: u64,
+    pub inhibitions: u64,
+    pub prediction_updates: u64,
+    pub high_confidence_ticks: u64,
+    pub max_fear: f64,
+    pub fear_sum: f64,
+    pub confidence_sum: f64,
+    pub pred_error_sum: f64,
+    pub action_hist: [u64; aether_brain::OUTPUT_ACTIONS],
+}
+
+impl TriuneLearningStats {
+    pub fn mean_fear(&self) -> f64 {
+        if self.ticks == 0 { 0.0 } else { self.fear_sum / self.ticks as f64 }
+    }
+    pub fn mean_confidence(&self) -> f64 {
+        if self.ticks == 0 { 0.0 } else { self.confidence_sum / self.ticks as f64 }
+    }
+    pub fn mean_pred_error(&self) -> f64 {
+        if self.ticks == 0 { 0.0 } else { self.pred_error_sum / self.ticks as f64 }
+    }
 }
 
 /// Phase 35 energy bookkeeping pools. Pure observability — methods only
@@ -572,6 +610,9 @@ pub struct EnergyLedger {
     /// Phase 36: cumulative brain-upkeep drain (`BRAIN_PER_NEURON_COST × n_hidden`
     /// per tick). Zeroed while `BRAIN_UPKEEP_ON` is off.
     pub brain_cost: f64,
+    /// Phase 41: cumulative triune-brain drain (maintenance + rollout decision
+    /// cost + inhibition cost). Zeroed while `triune_upkeep_on` is off.
+    pub triune_cost: f64,
 }
 
 impl EnergyLedger {
@@ -583,6 +624,7 @@ impl EnergyLedger {
     pub fn total_loss(&self) -> f64 {
         self.evaporation + self.metabolism_loss + self.repro_loss
             + self.mineralized + self.offspring_invest + self.info_cost + self.brain_cost
+            + self.triune_cost
     }
 }
 
@@ -724,6 +766,12 @@ pub struct Agent {
     pub brain_last_fsm_action: u8,
     /// Phase 36: the brain one-hot action of the most recent tick (shadow book).
     pub brain_last_brain_action: u8,
+    /// Phase 41: the triune brain (instinct / emotion / reason). Runs every
+    /// tick as a zero-RNG shadow decision layer; its maintenance + rollout
+    /// cost is drained as real energy (`ledger.triune_cost`), so brain size
+    /// is under selection. Behaviour authority stays behind the existing
+    /// `brain_switch_enabled` gate.
+    pub triune: aether_brain::triune::TriuneBrain,
     /// Phase 37: knowledge tokens this agent has learned (id list, in learning order).
     pub known_tokens: Vec<u32>,
     /// Phase 39.1: group membership (0 = solitary). Groups are behavioural
@@ -1306,6 +1354,12 @@ pub struct Ecology {
     pub brain_switch_enabled: bool,
     /// Phase 36: global learning telemetry (pure observability).
     pub brain_learning: BrainLearningStats,
+    /// Phase 41: triune-brain toggles. `triune_on` runs the three-layer
+    /// shadow (decision + learning); `triune_upkeep_on` charges its energy.
+    pub triune_on: bool,
+    pub triune_upkeep_on: bool,
+    /// Phase 41: triune-brain aggregate telemetry (observability only).
+    pub triune_stats: TriuneLearningStats,
     /// Phase 36: dedicated RNG stream for brain structural mutation
     /// (`seed ^ BRAIN_RNG_TAG`). Never mixed with `rng`/`prng`/`fish_rng`,
     /// so the main/prng/fish streams stay bit-identical.
@@ -1465,6 +1519,11 @@ impl Ecology {
             brain_switch_enabled: BRAIN_SWITCH_ENABLED,
             brain_learning: BrainLearningStats::default(),
             brain_learning_rng: Mulberry32::new(seed ^ BRAIN_RNG_TAG),
+            // Phase 41: triune brain runs every tick and pays real upkeep;
+            // behaviour authority remains with the FSM (shadow decision layer).
+            triune_on: true,
+            triune_upkeep_on: true,
+            triune_stats: TriuneLearningStats::default(),
             // Phase 37: culture layer — ON by default for this dynamics stage,
             // with a dedicated RNG stream separate from all ecology streams.
             culture_on: crate::culture::CULTURE_ON,
@@ -1629,6 +1688,11 @@ impl Ecology {
             brain_switch_enabled: BRAIN_SWITCH_ENABLED,
             brain_learning: BrainLearningStats::default(),
             brain_learning_rng: Mulberry32::new(seed ^ BRAIN_RNG_TAG),
+            // Phase 41: triune brain runs every tick and pays real upkeep;
+            // behaviour authority remains with the FSM (shadow decision layer).
+            triune_on: true,
+            triune_upkeep_on: true,
+            triune_stats: TriuneLearningStats::default(),
             // Phase 37: culture layer — ON by default for this dynamics stage,
             // with a dedicated RNG stream separate from all ecology streams.
             culture_on: crate::culture::CULTURE_ON,
@@ -1668,6 +1732,15 @@ impl Ecology {
         b.perturb(&mut nrng, BRAIN_NOISE_SIGMA);
         b
     }
+
+    /// Phase 41: seed the triune brain from the kind's reference genome plus
+    /// per-agent deterministic noise (agent-id-derived stream, zero main RNG).
+    pub fn initial_triune(&self, kind: SpeciesKind, agent_id: u32) -> aether_brain::triune::TriuneBrain {
+        aether_brain::triune::TriuneBrain::reference(self.kind_name(kind), agent_id)
+    }
+
+    /// Phase 41: aggregate triune telemetry (observability only).
+    pub fn triune_stats(&self) -> &TriuneLearningStats { &self.triune_stats }
 
     /// Sample an 8-channel sense vector from the live agent state **after** the
     /// FSM has made its decision this tick (inputs are already committed to
@@ -1770,29 +1843,42 @@ impl Ecology {
     /// The dual-controller switchover itself runs only at speciation-check
     /// boundaries (sample() cadence), not here, to avoid per-tick overhead.
     pub fn brain_shadow(&mut self, idx: usize, h: f64) {
-        if !self.brain_on { return; }
+        if !self.brain_on && !self.triune_on { return; }
         // Pre-fetch immutable state BEFORE acquiring any mutable alias, so
         // downstream mutations can coexist with reads without NLL conflicts.
         let a_ref = &self.agents[idx];
         let mut sense = [0.0f64; aether_brain::INPUT_CHANNELS];
         self.sample_sense_vector(a_ref, &self.grass, |x, z| self.cell_index(x, z), self.daylight, &mut sense);
         let fsm_act = Self::fsm_action_from(a_ref);
-        let up_keep = if self.brain_upkeep_on && a_ref.brain.n_hid > 0 {
+        let legacy_up = if self.brain_on && self.brain_upkeep_on && a_ref.brain.n_hid > 0 {
             Some(a_ref.brain.upkeep() * h)
         } else { None };
+        let triune_up = if self.triune_on && self.triune_upkeep_on {
+            Some(a_ref.triune.upkeep() * h)
+        } else { None };
         // Upkeep drain (books into ledger).
-        if let Some(cost) = up_keep {
+        if let Some(cost) = legacy_up {
             let a = &mut self.agents[idx];
             a.energy = (a.energy - cost).max(0.0);
             self.ledger.brain_cost += cost;
             self.brain_learning.brain_energy_drained += cost;
         }
-        // Forward + Hebbian + streak bookkeeping (all within one mutable block).
-        {
+        if let Some(cost) = triune_up {
+            let a = &mut self.agents[idx];
+            a.energy = (a.energy - cost).max(0.0);
+            self.ledger.triune_cost += cost;
+            self.triune_stats.upkeep_energy += cost;
+        }
+        // Shared chemotaxis-style reward (energy vs slow EMA baseline).
+        let reward = {
+            let a = &mut self.agents[idx];
+            a.brain.taxis_reward(a.energy)
+        };
+        // Legacy single-layer shadow: forward + Hebbian + streak bookkeeping.
+        if self.brain_on {
             let a = &mut self.agents[idx];
             let _out = a.brain.forward(&sense); // out unused — shadow only
             self.brain_learning.forward_count += 1;
-            let reward = a.brain.taxis_reward(a.energy);
             a.brain.hebbian_update(&sense, reward, h);
             self.brain_learning.hebbian_updates += 1;
             a.brain_last_fsm_action = fsm_act;
@@ -1808,6 +1894,39 @@ impl Ecology {
             if a.brain_equiv_streak > self.brain_learning.equiv_streak_max {
                 self.brain_learning.equiv_streak_max = a.brain_equiv_streak;
             }
+        }
+        // Phase 41: three-layer shadow. Zero RNG; the executed action is the
+        // FSM's current pick (the shadow learns the real transition).
+        if self.triune_on {
+            let outcome = {
+                let a = &mut self.agents[idx];
+                a.triune.tick(&sense, reward, h, fsm_act)
+            };
+            let decision_cost = if self.triune_upkeep_on {
+                outcome.decision_rate * h
+            } else { 0.0 };
+            if decision_cost > 0.0 {
+                let a = &mut self.agents[idx];
+                a.energy = (a.energy - decision_cost).max(0.0);
+                self.ledger.triune_cost += decision_cost;
+                self.triune_stats.decision_energy += decision_cost;
+            }
+            let st = &mut self.triune_stats;
+            st.ticks += 1;
+            st.fear_events += outcome.fear_event as u64;
+            st.fear_conditioning += outcome.fear_conditioning as u64;
+            st.memory_retrievals += outcome.memory_retrieved as u64;
+            st.wm_updates += outcome.wm_updates as u64;
+            st.rollout_steps += outcome.rollout_steps as u64;
+            st.planned_overrides += outcome.planned_override as u64;
+            st.inhibitions += outcome.inhibition as u64;
+            st.prediction_updates += outcome.prediction_updated as u64;
+            st.high_confidence_ticks += (outcome.confidence > 0.7) as u64;
+            st.max_fear = st.max_fear.max(outcome.fear);
+            st.fear_sum += outcome.fear;
+            st.confidence_sum += outcome.confidence;
+            st.pred_error_sum += outcome.pred_error;
+            st.action_hist[outcome.decision.action as usize] += 1;
         }
     }
 
@@ -2602,6 +2721,9 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             // reference network plus per-agent deterministic noise (zero main
             // RNG draws; the noise stream is agent-id derived).
             brain: self.initial_brain(kind, self.next_id - 1),
+            // Phase 41: three-layer brain seeded from the kind's reference
+            // genome (agents of the same kind still differ via id noise).
+            triune: self.initial_triune(kind, self.next_id - 1),
             brain_authority: BRAIN_AUTHORITY_FSM,
             brain_equiv_streak: 0,
             brain_equiv_start: 0,
@@ -3131,10 +3253,14 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             let mut child_brain = parent_brain;
             child_brain.mutate_structure(&mut self.brain_learning_rng, BRAIN_MUTATE_P_ADD, BRAIN_MUTATE_P_DEL);
             child_brain.perturb(&mut self.brain_learning_rng, BRAIN_PERTURB_SIGMA);
+            let mut child_triune = self.agents[idx].triune.clone();
+            child_triune.mutate(&mut self.brain_learning_rng, TRIUNE_MUTATE_SIGMA);
+            child_triune.reset_transients();
             if let Some(child) = self.spawn(child_kind, child_x, child_z, Some(g), max_gen_child, 0.0) {
                 child.lineage = a_lineage.or(b_lineage);
                 child.clade_id = parent_clade;
                 child.brain = child_brain;
+                child.triune = child_triune;
                 let (drain_herb, drain_pred) = self.kind_def(self.agents[idx].kind).repro_drain_pair;
                 self.ledger.repro_loss += drain_herb + drain_pred;
                 // Phase 35 MTE_ON: body-mass reproduction fee (size^3).
@@ -3179,11 +3305,15 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             let mut child_brain_a2 = parent_brain_a2;
             child_brain_a2.mutate_structure(&mut self.brain_learning_rng, BRAIN_MUTATE_P_ADD, BRAIN_MUTATE_P_DEL);
             child_brain_a2.perturb(&mut self.brain_learning_rng, BRAIN_PERTURB_SIGMA);
+            let mut child_triune_a2 = self.agents[idx].triune.clone();
+            child_triune_a2.mutate(&mut self.brain_learning_rng, TRIUNE_MUTATE_SIGMA);
+            child_triune_a2.reset_transients();
             if let Some(child) = self.spawn(child_kind_a2, cx, cz, Some(g), a_gen_a2 + 1, 0.0) {
                 child.lineage = a_lineage_a2;
                 child.clade_id = parent_clade;
                 // Phase 36: inherit parent brain via cloning + structural mutation.
                 child.brain = child_brain_a2;
+                child.triune = child_triune_a2;
                 let drain = self.kind_def(self.agents[idx].kind).repro_drain_solo;
                 self.ledger.repro_loss += drain;
                 #[cfg(any(test, feature = "phase35_mte"))]
@@ -5762,6 +5892,9 @@ fn agent_to_save(a: &Agent, kinds: &KindRegistry) -> save_state::SaveAgent {
         group_id: a.group_id,
         role: a.role,
         somatic_damage: a.somatic_damage,
+        // Phase 41: three-layer brain as a compact JSON string (flat visitor
+        // footprint, same trick as SavedClades).
+        triune: serde_json::to_string(&a.triune).unwrap_or_default(),
     }
 }
 
@@ -6154,6 +6287,9 @@ impl Ecology {
             TrophicEffActive: self.trophic_eff_active,
             BrainSwitchEnabled: self.brain_switch_enabled,
             BrainLearningRngState: self.brain_learning_rng.state(),
+            // Phase 41: triune-brain toggles.
+            TriuneOn: self.triune_on,
+            TriuneUpkeepOn: self.triune_upkeep_on,
             // Phase 37: culture layer serialization.
             TokenRegistry: self.token_registry.tokens.iter().map(|t| {
                 save_state::SaveToken { id: t.id, vec: t.vec.clone() }
@@ -6613,6 +6749,22 @@ impl Ecology {
                         b.last_reward = a.brain_last_reward;
                         b
                     },
+                    // Phase 41: triune brain. Pre-v12 archives carry an empty
+                    // string and land on a deterministic reference brain.
+                    triune: {
+                        let mut t = if a.triune.is_empty() {
+                            aether_brain::triune::TriuneBrain::reference(
+                                kinds.name(kind_ids[i]), a.id,
+                            )
+                        } else {
+                            serde_json::from_str::<aether_brain::triune::TriuneBrain>(&a.triune)
+                                .unwrap_or_else(|_| aether_brain::triune::TriuneBrain::reference(
+                                    kinds.name(kind_ids[i]), a.id,
+                                ))
+                        };
+                        t.normalize_saved();
+                        t
+                    },
                     brain_authority: a.brain_authority,
                     brain_equiv_streak: a.brain_equiv_streak,
                     brain_equiv_start: 0,
@@ -6743,6 +6895,9 @@ impl Ecology {
             trophic_eff_active: state.TrophicEffActive,
             brain_switch_enabled: state.BrainSwitchEnabled,
             brain_learning: BrainLearningStats::default(),
+            triune_on: state.TriuneOn,
+            triune_upkeep_on: state.TriuneUpkeepOn,
+            triune_stats: TriuneLearningStats::default(),
             brain_learning_rng: if state.BrainLearningRngState != 0 {
                 Mulberry32::from_state(state.BrainLearningRngState)
             } else {

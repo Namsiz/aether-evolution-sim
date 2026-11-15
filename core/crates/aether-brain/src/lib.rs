@@ -33,6 +33,9 @@
 
 use aether_libm;
 
+/// Phase 41: 三脑架构（本能 / 情绪 / 理智）。
+pub mod triune;
+
 /// sense 输入通道数。
 pub const INPUT_CHANNELS: usize = 8;
 /// 输出 action 数（move_forward / turn_left / turn_right / eat / flee /

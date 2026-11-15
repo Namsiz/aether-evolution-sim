@@ -7,8 +7,14 @@
 //! 1.0×max_energy at saturation (an absorbing zero-birth state → one-cohort
 //! ageing → extinction). `REPRO_THRESHOLD_MAX = 0.90` caps the brake.
 //!
-//! PHASE 40.2 ANCHORS (current, de-novo invention activates the culture
-//! layer between t=300 and t=3000 — the 300-tick anchors are unchanged):
+//! PHASE 41 ANCHORS (current, triune brain: three-layer shadow + real
+//! maintenance/rollout/inhibition cost — the extra energy drain feeds back
+//! into behaviour immediately, so every checkpoint moves):
+//!   seed 20261102 @300  v2 0xe82f6b44f4871bf7
+//!   seed 20261102 @3000 v2 0x1142f4862637a383
+//!   seed 20261105 @300  v2 0x9d060128d2ff9a87
+//!   seed 20261102 @300  v1 0x44b3fda76ab6c427
+//! PHASE 40.2 ANCHORS (previous):
 //!   seed 20261102 @300  v2 0xbbee72352ef4468d
 //!   seed 20261102 @3000 v2 0x23aca66c0c68ba69
 //!   seed 20261105 @300  v2 0xfa11ea50ba7ef71a
@@ -73,25 +79,25 @@ fn checksum_at(seed: u32, ticks: u32) -> String {
 
 #[test]
 fn golden_seed_20261102_300_ticks() {
-    // Phase 40.1 re-baseline (REPRO_THRESHOLD_MAX density-brake cap).
+    // Phase 41 re-baseline (triune-brain energy cost).
     let ck = checksum_at(20261102, 300);
-    assert_eq!(ck, "0xbbee72352ef4468d",
+    assert_eq!(ck, "0xe82f6b44f4871bf7",
         "300-tick v2 checksum drifted: {} — see file docs + Phase 40.1 report", ck);
 }
 
 #[test]
 fn golden_seed_20261102_3000_ticks() {
-    // Phase 40.2 re-baseline (culture layer activated by de-novo invention).
+    // Phase 41 re-baseline (triune-brain energy cost).
     let ck = checksum_at(20261102, 3000);
-    assert_eq!(ck, "0x23aca66c0c68ba69",
+    assert_eq!(ck, "0x1142f4862637a383",
         "3000-tick v2 long-run checksum drifted: {} — if this change is an approved re-baseline, pin the new value here and record it in the phase report", ck);
 }
 
 #[test]
 fn golden_seed_20261105_300_ticks() {
-    // Phase 40.1 re-baseline (REPRO_THRESHOLD_MAX density-brake cap).
+    // Phase 41 re-baseline (triune-brain energy cost).
     let ck = checksum_at(20261105, 300);
-    assert_eq!(ck, "0xfa11ea50ba7ef71a",
+    assert_eq!(ck, "0x9d060128d2ff9a87",
         "alt-seed v2 checksum drifted: {} — if this change is an approved re-baseline, pin the new value here and record it in the phase report", ck);
 }
 
@@ -101,8 +107,8 @@ fn golden_seed_20261105_300_ticks() {
 fn golden_300_tick_trajectory_bit_exact_to_v1() {
     let mut eco = Ecology::new(20261102);
     for t in 1..=300 { eco.update(0.1, daylight(t)); }
-    assert_eq!(eco.checksum_v1(), "0xfb8827f6b1b34b5a",
-        "the 300-tick v1 trajectory must stay at the pinned Phase 40.1 anchor");
+    assert_eq!(eco.checksum_v1(), "0x44b3fda76ab6c427",
+        "the 300-tick v1 trajectory must stay at the pinned Phase 41 anchor");
 }
 
 /// Determinism guard: same seed + same ticks must be bit-identical across

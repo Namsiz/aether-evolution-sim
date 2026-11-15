@@ -62,16 +62,24 @@
 /// All are `#[serde(default)]`, so a v10 archive loads as a solitary world
 /// (no groups, role = none, zero damage) and continues from its own state.
 /// Group telemetry (`GroupStats`) is observability only and is not persisted.
+/// v11 → v12 (Phase 41): triune brain. `SaveAgent.triune` is a compact JSON
+/// string holding the three-layer brain (genes, emotion state/memory, working
+/// memory, world model, metacognition, stats). `#[serde(default)]` → pre-v12
+/// archives restore a fresh reference triune brain seeded from the agent's
+/// kind/id. `TriuneOn`/`TriuneUpkeepOn` default to true so old archives land
+/// on the Phase-41 default world config.
 
 use serde::{Deserialize, Serialize};
 
 
-pub const SAVE_STATE_VERSION: u32 = 11;
+pub const SAVE_STATE_VERSION: u32 = 12;
 pub const SAVE_STATE_SCHEMA_NAME: &str = "aether-sim-save-state";
 
 /// DECO selection-pressure mode selector (persisted in SaveState v2).
 /// mode=0 → legacy neutral (Phase 6 behavior, no efficiency-driven fitness).
 /// mode=1 → selective pressure active (Phase 7+; threshold = 0.96*(2-eff), metabolic term).
+fn default_true() -> bool { true }
+
 pub const DECO_CHOICE_LEGACY: u8 = 0;
 pub const DECO_CHOICE_SELECTIVE: u8 = 1;
 
@@ -279,6 +287,11 @@ pub struct SaveAgent {
     /// amplitude). Restored verbatim — it feeds `mutate` on the next birth.
     #[serde(default)]
     pub somatic_damage: f64,
+    /// Phase 41: the full triune brain serialized as a compact JSON string
+    /// (same flat-visitor trick as `SavedClades`). Empty on pre-v12 saves →
+    /// the loader seeds a fresh reference brain from the agent's kind/id.
+    #[serde(default)]
+    pub triune: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -785,6 +798,13 @@ pub struct SaveState {
     /// a fresh run start from a deterministic seed anyway.
     #[serde(default)]
     pub BrainLearningRngState: u32,
+    /// Phase 41: triune-brain toggles. `#[serde(default = "default_true")]`
+    /// → pre-v12 saves restore with the three-layer shadow ON and its upkeep
+    /// charged (the default world config for this dynamics stage).
+    #[serde(default = "default_true")]
+    pub TriuneOn: bool,
+    #[serde(default = "default_true")]
+    pub TriuneUpkeepOn: bool,
     /// Phase 37: knowledge token registry (open, growable).
     /// `#[serde(default)]` → pre-v10 saves restore with empty registry.
     #[serde(default)]

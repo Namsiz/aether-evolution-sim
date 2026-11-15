@@ -12,6 +12,8 @@ version = "0.1.0"
 dependencies = [
  "aether-libm",
  "aether-rng",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

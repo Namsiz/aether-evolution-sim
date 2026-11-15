@@ -118,18 +118,19 @@ fn checksum_at(seed: u32, ticks: u32, group_on: bool) -> String {
 fn group_off_is_bit_exact_phase36_anchor() {
     // With `group_on = false` there are no scans, no draws, no energy flows —
     // the layer is a pure no-op. These anchors are the group-off trajectory
-    // after the Phase 40.1 reproduction-brake fix (REPRO_THRESHOLD_MAX); the
-    // old Phase 36 values no longer apply because the brake fix shifts every
-    // trajectory, group layer or not.
-    assert_eq!(checksum_at(20261102, 300, false), "0x8e59843d4f009045");
-    assert_eq!(checksum_at(20261102, 3000, false), "0xa3dd655b64f18333");
-    assert_eq!(checksum_at(20261105, 300, false), "0x8f981cd0b42a58d7");
+    // after Phase 41's triune-brain cost (the extra energy term shifts every
+    // trajectory, group layer or not). Pre-Phase-41 values:
+    //   @300 0x8e59843d4f009045 · @3000 0xa3dd655b64f18333
+    //   seed2 @300 0x8f981cd0b42a58d7 · v1 @300 0x771a11f1bd8ce316
+    assert_eq!(checksum_at(20261102, 300, false), "0xf0d9487bf2497095");
+    assert_eq!(checksum_at(20261102, 3000, false), "0xec820a13793f9780");
+    assert_eq!(checksum_at(20261105, 300, false), "0x27af4bd0b8bb57c5");
 
     // Same v1 anchor (the historical stream must not see the group hash).
     let mut eco = Ecology::new(20261102);
     eco.group_on = false;
     run_ticks(&mut eco, 1, 300);
-    assert_eq!(eco.checksum_v1(), "0x771a11f1bd8ce316");
+    assert_eq!(eco.checksum_v1(), "0x6addfa3f6fff573e");
 }
 
 // ---------------------------------------------------------------------------
@@ -407,7 +408,7 @@ fn save_v11_roundtrip_is_bit_exact() {
     let mut eco = grouped_world(600);
     let state = eco.to_save_state();
     assert_eq!(state.version, save_state::SAVE_STATE_VERSION);
-    assert_eq!(save_state::SAVE_STATE_VERSION, 11);
+    assert_eq!(save_state::SAVE_STATE_VERSION, 12);
     assert!(!state.Groups.is_empty());
 
     let json = serde_json::to_string(&state).expect("save serializes");
@@ -450,16 +451,17 @@ fn legacy_v10_archive_loads_as_solitary_world() {
     let eco = grouped_world(400);
     let json = serde_json::to_string(&eco.to_save_state()).unwrap();
     let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(v["Version"], 11);
+    assert_eq!(v["Version"], 12);
     // Strip every v11 addition — this is exactly what a v10 archive looks like.
     v["Version"] = serde_json::json!(10);
     let obj = v.as_object_mut().unwrap();
-    for k in ["Groups", "NextGroupId", "GroupOn", "GroupRngState"] {
+    for k in ["Groups", "NextGroupId", "GroupOn", "GroupRngState",
+              "TriuneOn", "TriuneUpkeepOn"] {
         obj.remove(k);
     }
     for a in obj["Agents"].as_array_mut().unwrap() {
         let ao = a.as_object_mut().unwrap();
-        for k in ["GroupId", "Role", "SomaticDamage"] {
+        for k in ["GroupId", "Role", "SomaticDamage", "Triune"] {
             ao.remove(k);
         }
     }
