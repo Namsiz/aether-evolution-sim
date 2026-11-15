@@ -529,6 +529,44 @@ pub const BRAIN_NOISE_SIGMA: f64 = 0.25;
 pub const TRIUNE_MUTATE_SIGMA: f64 = 0.6;
 /// Dedicated-stream seed for brain structural mutation (never main/prng/fish).
 pub const BRAIN_RNG_TAG: u32 = 0x42_52_41_49;
+
+// ----- Phase 43: abiogenesis（生命再起源）-----
+//
+// 米勒-尤里/热泉口化学演化：生命从无机化学自发产生。这是神之手退役后
+// 「接入现实规律」的重新起源路径 —— 不是复活机制，是化学→生命的自然通道。
+// 触发是涌现式的：全局存活个体 < ABIO_MIN_POP（世界接近死寂）时每 tick
+// 以 p = ABIO_P_BASE × mean(候选格强度) 的概率自发萌发一个祖先个体。
+// 生态饱和抑制：健康世界（pop ≥ 8）零触发、零 RNG draw。
+//
+// RNG 纪律：决策（触发/选格/选祖先）走专用 `seed ^ ABIO_RNG_TAG` 流；
+// draw 预算固定可审计 —— pop < ABIO_MIN_POP 且候选非空时每 tick ≤ 1 次触发
+// roll，命中后 +1 选格 +1 选祖先；spawn 内部的出生 draw（朝向/初始能量/
+// 基因组）沿用 seed_life 同一主流路径。
+
+/// Dedicated abiogenesis RNG stream tag (`seed ^ ABIO_RNG_TAG`).
+pub const ABIO_RNG_TAG: u32 = 0x41_42_49_4F; // "ABIO"
+/// Abiogenesis toggle (default ON; the A/B arm flips it to false).
+pub const ABIOGENESIS_ON: bool = true;
+/// Birth-inheritance toggle (default ON; the A/B arm flips it to false).
+pub const TEACH_ON: bool = true;
+/// 全局存活个体低于该值时化学演化才可能萌发（生态饱和抑制的硬门）。
+pub const ABIO_MIN_POP: usize = 8;
+/// 每 tick 基础萌发概率（乘以候选格平均强度 ∈ (0,1]）。
+/// 标定：强度 ~0.4 时 p_eff ≈ 2.4e-4/tick → 死世界平均 ~4k tick 首萌发，
+/// 数千~数万 tick 内自然重启；繁荣世界被 pop 门结构性抑制。
+pub const ABIO_P_BASE: f64 = 0.0006;
+/// 候选格阈值 —— 矿化活跃（DECO 沉积场仍在工作）。
+/// mineral_field ∈ [0,1] 按活性分解位点沉积、每 tick ×MINERAL_DECAY 衰减：
+/// 0.15 是「衰减间隙中仍可辨认为活跃矿化」的下限（实测基线 0.35+ 活跃格）。
+pub const ABIO_MINERAL_TH: f32 = 0.15;
+/// 候选格阈值 —— 水缘高湿。moist 由岸边 BFS 生成（0.45 − 0.035·d，上限
+/// 0.45）：moist > 0.3 ⇔ 距水线 ~4 格内的湿润带（任务建议的 0.6 超出该场
+/// 值域，永不触发；0.3 是值域内的等效「高湿」分位）。
+pub const ABIO_MOIST_TH: f32 = 0.30;
+/// 候选格阈值 —— 植物适宜度上半个值域（suit ∈ [0,1]，草生长需 > 0.1，
+/// > 0.5 是肥沃土壤：化学能可支撑自养生存的格子）。
+pub const ABIO_SUIT_TH: f32 = 0.5;
+
 /// Authority markers on `Agent.brain_authority`.
 pub const BRAIN_AUTHORITY_FSM: u8 = 0;
 pub const BRAIN_AUTHORITY_BRAIN: u8 = 1;
@@ -632,6 +670,9 @@ pub struct EnergyLedger {
     pub light_in: f64,
     /// Cumulative FISH filter-feeding open-boundary input.
     pub filter_in: f64,
+    /// Phase 43: cumulative hot-spring chemical energy booked into
+    /// abiogenesis spawns (与 light_in/filter_in 同级的开放输入通道).
+    pub chemo_in: f64,
     /// Cumulative carcass evaporation (formerly 1.4/tick leak with no sink).
     pub evaporation: f64,
     /// Cumulative metabolic drain across all agents.
@@ -663,7 +704,7 @@ pub struct EnergyLedger {
 impl EnergyLedger {
     pub fn new() -> Self { EnergyLedger::default() }
     /// Σ of all inputs booked so far.
-    pub fn total_in(&self) -> f64 { self.light_in + self.filter_in }
+    pub fn total_in(&self) -> f64 { self.light_in + self.filter_in + self.chemo_in }
     /// Σ of all losses booked so far (leaves the closed system), including
     /// the Phase 36 brain-upkeep drain.
     pub fn total_loss(&self) -> f64 {
@@ -1434,6 +1475,17 @@ pub struct Ecology {
     pub culture_fidelity: f64,
     /// Phase 37: default bias channel for social learning.
     pub culture_bias_channel: u8, // 0=content, 1=prestige, 2=conformist, 3=all
+    /// Phase 43: birth-time cultural inheritance toggle (default `TEACH_ON`).
+    /// When false, birth teaching is a bit-exact no-op (zero draws, zero cost).
+    pub teach_on: bool,
+    /// Phase 43: abiogenesis toggle (default `ABIOGENESIS_ON`).
+    pub abiogenesis_on: bool,
+    /// Phase 43: dedicated abiogenesis stream (`seed ^ ABIO_RNG_TAG`).
+    pub abio_rng: Mulberry32,
+    /// Phase 43: cumulative abiogenesis events (telemetry).
+    pub abiogenesis_events: u64,
+    /// Phase 43: tick of the most recent abiogenesis event (telemetry).
+    pub abiogenesis_ticks: u32,
     /// Phase 39.1: live group entities (behavioural aggregates with their own
     /// energy pool, reproduction and death). Empty ⇒ individual-level
     /// selection only.
@@ -1590,6 +1642,12 @@ impl Ecology {
             culture_stats: crate::culture::CultureStats::default(),
             culture_fidelity: crate::culture::DEFAULT_FIDELITY,
             culture_bias_channel: 3, // all channels enabled by default
+            // Phase 43: cultural ratchet + abiogenesis defaults.
+            teach_on: TEACH_ON,
+            abiogenesis_on: ABIOGENESIS_ON,
+            abio_rng: Mulberry32::new(seed ^ ABIO_RNG_TAG),
+            abiogenesis_events: 0,
+            abiogenesis_ticks: 0,
             // Phase 39.1: group layer — ON by default with its own RNG stream;
             // empty groups ⇒ no draws and no energy flows until cohesion
             // conditions are actually met.
@@ -1761,6 +1819,12 @@ impl Ecology {
             culture_stats: crate::culture::CultureStats::default(),
             culture_fidelity: crate::culture::DEFAULT_FIDELITY,
             culture_bias_channel: 3, // all channels enabled by default
+            // Phase 43: cultural ratchet + abiogenesis defaults.
+            teach_on: TEACH_ON,
+            abiogenesis_on: ABIOGENESIS_ON,
+            abio_rng: Mulberry32::new(seed ^ ABIO_RNG_TAG),
+            abiogenesis_events: 0,
+            abiogenesis_ticks: 0,
             // Phase 39.1: group layer — ON by default with its own RNG stream;
             // empty groups ⇒ no draws and no energy flows until cohesion
             // conditions are actually met.
@@ -3166,6 +3230,60 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         Some(&mut self.agents[idx])
     }
 
+    // ----- Phase 43: abiogenesis（生命再起源）---------------------------------
+
+    /// 生命再起源：世界接近死寂时，热泉化学能自发萌发一个祖先个体。
+    ///
+    /// 候选格 = 矿化活跃（mineral ≥ ABIO_MINERAL_TH）或 水缘高湿×肥沃
+    /// （moist > ABIO_MOIST_TH && suit > ABIO_SUIT_TH）；强度 = 两路化学能
+    /// 代理各半（矿化度、湿度归一）。每 tick 以 ABIO_P_BASE × mean(强度)
+    /// 概率触发；命中后均匀选一个候选格，按 PARENT_KIND == None 的注册表
+    /// 序随机选一个与该格栖息地相容的祖先（水面格 → 鱼形，陆地格 → 非鱼形），
+    /// spawn 1 个个体；初始能量入账 `ledger.chemo_in`（热泉化学能输入通道）。
+    ///
+    /// Draw 预算固定可审计：pop < ABIO_MIN_POP 且候选非空时每 tick ≤ 1 次触发
+    /// roll，命中后 +1 选格 +1 选祖先；健康世界（pop ≥ 门限）零扫描零 draw。
+    fn try_abiogenesis(&mut self) {
+        if !self.abiogenesis_on { return; }
+        if self.agents.iter().filter(|a| a.alive).count() >= ABIO_MIN_POP { return; }
+        let n = (self.grid_n * self.grid_n) as usize;
+        let mut candidates: Vec<usize> = Vec::new();
+        let mut intensity_sum = 0.0f64;
+        for i in 0..n {
+            let mineral = self.mineral_field[i] as f64;
+            let moist = self.moist[i] as f64;
+            let suit = self.suit[i] as f64;
+            let mineral_ok = mineral >= ABIO_MINERAL_TH as f64;
+            let wet_ok = moist > ABIO_MOIST_TH as f64 && suit > ABIO_SUIT_TH as f64;
+            if !(mineral_ok || wet_ok) { continue; }
+            candidates.push(i);
+            intensity_sum += 0.5 * mineral + 0.5 * (moist / 0.45).min(1.0);
+        }
+        if candidates.is_empty() { return; }
+        let p = ABIO_P_BASE * (intensity_sum / candidates.len() as f64);
+        if self.abio_rng.next_f64() >= p { return; }
+        let cell = candidates[(self.abio_rng.next_f64() * candidates.len() as f64) as usize % candidates.len()];
+        let gi = (cell % self.grid_n as usize) as f64;
+        let gj = (cell / self.grid_n as usize) as f64;
+        let x = -GRID_SPAN / 2.0 + (gi + 0.5) * CELL;
+        let z = -GRID_SPAN / 2.0 + (gj + 0.5) * CELL;
+        let aquatic = terrain_height(x, z) < WATER_LEVEL;
+        let ancestors: Vec<SpeciesKind> = self.kinds.defs().iter()
+            .filter(|d| d.parent_kind.is_none())
+            .filter(|d| (d.behavior == BehaviorTemplate::Fish) == aquatic)
+            .map(|d| d.id)
+            .collect();
+        if ancestors.is_empty() { return; }
+        let kind = ancestors[(self.abio_rng.next_f64() * ancestors.len() as f64) as usize % ancestors.len()];
+        let spawned = self.spawn(kind, x, z, None, 0, 0.0).is_some();
+        if spawned {
+            let idx = self.agents.len() - 1;
+            self.ledger.chemo_in += self.agents[idx].energy;
+            self.abiogenesis_events += 1;
+            self.abiogenesis_ticks = self.tick_count;
+        }
+    }
+
     // ----- grass field helpers ----------------------------------------------
 
     pub(crate) fn cell_index(&self, x: f64, z: f64) -> isize {
@@ -3711,6 +3829,30 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 }
                 self.agents[idx].energy -= drain_herb;
                 self.agents[mate_j].energy -= drain_pred;
+                // Phase 43: 代际文化传承（cultural ratchet）。双亲各自教学：
+                // 每位教师按自己的 known_tokens 顺序传承，能量付不起下一位即停
+                // （贫穷约束，零 RNG）；保真度 roll 走专用 culture_rng，
+                // 失败的 token 不传承。教学在出生扣费之后结算 —— 付不起
+                // 繁殖代价的亲代自然也付不起教学。
+                if self.culture_on && self.teach_on {
+                    let parent_tokens = self.agents[idx].known_tokens.clone();
+                    let mate_tokens = self.agents[mate_j].known_tokens.clone();
+                    let mut parent_energy = self.agents[idx].energy;
+                    let mut mate_energy = self.agents[mate_j].energy;
+                    let child_idx = self.agents.len() - 1;
+                    let mut child_tokens = std::mem::take(&mut self.agents[child_idx].known_tokens);
+                    crate::culture::inherit_at_birth(
+                        &mut child_tokens, &parent_tokens, &mut parent_energy,
+                        &mut self.culture_rng, &mut self.culture_stats,
+                    );
+                    crate::culture::inherit_at_birth(
+                        &mut child_tokens, &mate_tokens, &mut mate_energy,
+                        &mut self.culture_rng, &mut self.culture_stats,
+                    );
+                    self.agents[child_idx].known_tokens = child_tokens;
+                    self.agents[idx].energy = parent_energy;
+                    self.agents[mate_j].energy = mate_energy;
+                }
                 if HELP_ENABLED && self.root_kind(self.agents[idx].kind) == HERB {
                     self.drain_e_h += 68.0;
                 }
@@ -3762,6 +3904,19 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                     self.ledger.repro_loss += MTE_REPRO_FEE * m.powi(3);
                 }
                 self.agents[idx].energy -= drain;
+                // Phase 43: 代际文化传承（无性路径：单亲教学，规则同有性路径）。
+                if self.culture_on && self.teach_on {
+                    let parent_tokens = self.agents[idx].known_tokens.clone();
+                    let mut parent_energy = self.agents[idx].energy;
+                    let child_idx = self.agents.len() - 1;
+                    let mut child_tokens = std::mem::take(&mut self.agents[child_idx].known_tokens);
+                    crate::culture::inherit_at_birth(
+                        &mut child_tokens, &parent_tokens, &mut parent_energy,
+                        &mut self.culture_rng, &mut self.culture_stats,
+                    );
+                    self.agents[child_idx].known_tokens = child_tokens;
+                    self.agents[idx].energy = parent_energy;
+                }
                 if HELP_ENABLED && self.root_kind(self.agents[idx].kind) == HERB {
                     self.drain_e_h += 52.0;
                 }
@@ -5142,6 +5297,14 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             if !self.agents.is_empty() && self.agents.iter().any(|a| !a.alive) {
                 self.agents.retain(|a| a.alive);
             }
+
+            // Phase 43: abiogenesis — life re-originates from hot-spring
+            // chemistry when the world approaches death. No-op (zero RNG,
+            // zero scan cost beyond one alive-count pass) while the world is
+            // healthy; the trigger, cell and ancestor choices draw from the
+            // dedicated ABIO stream, the spawn energy books into
+            // `ledger.chemo_in`.
+            self.try_abiogenesis();
 
             // Phase 34: the "hand of god" endangered-predator immigration is
             // RETIRED — extinction is now a real evolutionary outcome, and
@@ -6774,7 +6937,15 @@ impl Ecology {
                 extinct_token_count: self.culture_stats.extinct_token_count,
                 last_extinct_tick: self.culture_stats.last_extinct_tick,
                 token_holder_count: self.culture_stats.token_holder_count,
+                taught_count: self.culture_stats.taught_count,
+                teach_cost_total: self.culture_stats.teach_cost_total,
             },
+            // Phase 43: cultural ratchet + abiogenesis state.
+            TeachOn: self.teach_on,
+            AbiogenesisOn: self.abiogenesis_on,
+            AbioRngState: self.abio_rng.state(),
+            AbiogenesisEvents: self.abiogenesis_events,
+            AbiogenesisTicks: self.abiogenesis_ticks,
             // Phase 39.1: group layer. `founder_genome` is serialized in full —
             // it is the propagation bottleneck, so it must survive the hop for
             // a restored sim to keep breeding from the same single genome.
@@ -7405,7 +7576,21 @@ impl Ecology {
                 extinct_token_count: state.CultureStats.extinct_token_count,
                 last_extinct_tick: state.CultureStats.last_extinct_tick,
                 token_holder_count: state.CultureStats.token_holder_count,
+                taught_count: state.CultureStats.taught_count,
+                teach_cost_total: state.CultureStats.teach_cost_total,
             },
+            // Phase 43: cultural ratchet + abiogenesis. Pre-v14 archives carry
+            // no fields → toggles ON (default world config), counters zeroed,
+            // stream re-derived from seed ^ ABIO_RNG_TAG.
+            teach_on: state.TeachOn,
+            abiogenesis_on: state.AbiogenesisOn,
+            abio_rng: if state.AbioRngState != 0 {
+                Mulberry32::from_state(state.AbioRngState)
+            } else {
+                Mulberry32::new(state.seed ^ ABIO_RNG_TAG)
+            },
+            abiogenesis_events: state.AbiogenesisEvents,
+            abiogenesis_ticks: state.AbiogenesisTicks,
             culture_fidelity: state.CultureFidelity,
             culture_bias_channel: state.CultureBiasChannel,
             // Phase 39.1: group layer. Pre-v11 archives carry no groups →

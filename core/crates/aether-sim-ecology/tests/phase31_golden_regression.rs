@@ -7,7 +7,7 @@
 //! 1.0×max_energy at saturation (an absorbing zero-birth state → one-cohort
 //! ageing → extinction). `REPRO_THRESHOLD_MAX = 0.90` caps the brake.
 //!
-//! PHASE 42 ANCHORS (current; **eighth re-baseline** — the triune brain takes
+//! PHASE 42 ANCHORS (previous; **eighth re-baseline** — the triune brain takes
 //! behaviour authority once its own FSM-agreement gate + confidence floor is
 //! met, its arbitration actions are bridged into FSM states/motion intent, and
 //! offline replay consolidates the world model). Replay also shifts the shadow
@@ -17,6 +17,15 @@
 //!   seed 20261105 @300  v2 0x2e9539930abd8975
 //!   seed 20261102 @300  v1 0xe6404a7bee633eb8
 //!   (shadow-only @300 for the A/B arm: v2 0xf31c4501f764be29)
+//! PHASE 43 ANCHORS (current; **ninth re-baseline** — the cultural ratchet:
+//! birth-time token inheritance. @300 is UNCHANGED from Phase 42 — no de-novo
+//! invention has fired by tick 300, so teaching is a bit-exact no-op there;
+//! only the @3000 long-run anchor moves, where inventions already exist and
+//! children now inherit them).
+//!   seed 20261102 @300  v2 0xdc98f7d34a7af777  (= Phase 42)
+//!   seed 20261102 @3000 v2 0x9af70d3dc96532f2
+//!   seed 20261105 @300  v2 0x2e9539930abd8975  (= Phase 42)
+//!   seed 20261102 @300  v1 0xe6404a7bee633eb8  (= Phase 42)
 //! PHASE 41.1 ANCHORS (previous; Phase 41 triune brain + the 41.1 brain
 //! rhythm: each agent runs a full triune update every other tick, staggered
 //! by index parity, halving per-tick planning cost for the 16 ms wasm gate;
@@ -98,9 +107,9 @@ fn golden_seed_20261102_300_ticks() {
 
 #[test]
 fn golden_seed_20261102_3000_ticks() {
-    // Phase 42 re-baseline (triune behaviour authority + replay).
+    // Phase 43 re-baseline (cultural ratchet — children inherit parent tokens).
     let ck = checksum_at(20261102, 3000);
-    assert_eq!(ck, "0xafa833641ebfd5a8",
+    assert_eq!(ck, "0x9af70d3dc96532f2",
         "3000-tick v2 long-run checksum drifted: {} — if this change is an approved re-baseline, pin the new value here and record it in the phase report", ck);
 }
 

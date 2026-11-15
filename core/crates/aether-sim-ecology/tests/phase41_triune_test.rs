@@ -107,12 +107,12 @@ fn triune_cost_is_priced_and_ab_testable() {
 
 #[test]
 fn save_v12_roundtrip_is_bit_exact() {
-    // Phase 42 bumps the schema to v13 (triune authority bookkeeping + ReplayOn),
+    // Phase 43 bumps the schema to v14 (cultural ratchet + abiogenesis),
     // but the triune-state roundtrip contract is unchanged.
     let mut eco = Ecology::new(20261102);
     run_ticks(&mut eco, 1, 120);
     let json = serde_json::to_string(&eco.to_save_state()).unwrap();
-    assert!(json.contains("\"Version\":13"), "schema version must be v13");
+    assert!(json.contains("\"Version\":14"), "schema version must be v14");
     assert!(json.contains("\"Triune\""), "SaveAgent must carry the triune string");
     assert!(json.contains("\"ReplayOn\""), "v13 must carry the replay toggle");
     let restored = Ecology::from_save_state(serde_json::from_str(&json).unwrap());

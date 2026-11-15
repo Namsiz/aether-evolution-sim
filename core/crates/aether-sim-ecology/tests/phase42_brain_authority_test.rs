@@ -357,7 +357,7 @@ fn save_v13_roundtrip_continues_bit_exactly() {
     run_ticks(&mut eco, 1, 400);
     let state = eco.to_save_state();
     assert_eq!(state.version, save_state::SAVE_STATE_VERSION);
-    assert_eq!(save_state::SAVE_STATE_VERSION, 13);
+    assert_eq!(save_state::SAVE_STATE_VERSION, 14);
     let json = serde_json::to_string(&state).unwrap();
     assert!(json.contains("\"ReplayOn\":true"));
     let mut restored = Ecology::from_save_state(serde_json::from_str(&json).unwrap());

@@ -772,6 +772,23 @@ fn reproduce_group(
     cx /= dmg_n as f64;
     cz /= dmg_n as f64;
 
+    // Phase 43: 代际文化传承 —— founder 是教学者。存活的 founder 对每个
+    // propagule 子代按自己的 known_tokens 顺序教学（每位孩子都学同一份
+    // 课程；founder 能量逐孩子递减，付不起即对后续孩子停课）。founder
+    // 已死/不在场则无传承（无教师）。
+    let founder_teaching: Option<(Vec<u32>, f64)> = idx_of.get(&founder_id).and_then(|&fi| {
+        if eco.agents[fi].alive && !eco.agents[fi].known_tokens.is_empty() {
+            Some((eco.agents[fi].known_tokens.clone(), eco.agents[fi].energy))
+        } else {
+            None
+        }
+    });
+    let (founder_tokens, mut founder_energy) = match founder_teaching {
+        Some(x) => (x.0, x.1),
+        None => (Vec::new(), 0.0),
+    };
+    let founder_teaches = eco.culture_on && eco.teach_on && !founder_tokens.is_empty();
+
     let mut ids: Vec<u32> = Vec::with_capacity(GROUP_PROPAGULE_SIZE);
     for _ in 0..GROUP_PROPAGULE_SIZE {
         let g = eco.mutate(&founder_genome, kind, mut_scale);
@@ -785,7 +802,24 @@ fn reproduce_group(
                 eco.agents[ai].clade_id = clade_id;
                 eco.agents[ai].lineage = founder_lineage;
             }
+            if founder_teaches {
+                let child_idx = eco.agents.len() - 1;
+                let mut child_tokens = std::mem::take(&mut eco.agents[child_idx].known_tokens);
+                crate::culture::inherit_at_birth(
+                    &mut child_tokens, &founder_tokens, &mut founder_energy,
+                    &mut eco.culture_rng, &mut eco.culture_stats,
+                );
+                eco.agents[child_idx].known_tokens = child_tokens;
+            }
             ids.push(id);
+        }
+    }
+    // founder 教学支出结算回本体。
+    if founder_teaches {
+        if let Some(&fi) = idx_of.get(&founder_id) {
+            if eco.agents[fi].alive {
+                eco.agents[fi].energy = founder_energy;
+            }
         }
     }
     if ids.is_empty() { return; }

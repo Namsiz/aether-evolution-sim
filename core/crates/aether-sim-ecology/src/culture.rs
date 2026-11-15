@@ -21,6 +21,10 @@ pub const CULTURE_ON: bool = true;
 pub const TOKEN_DIM: usize = 8;
 /// 习得成本（每次学习支付能量，进 ledger）。
 pub const LEARNING_COST: f64 = 0.5;
+/// 教学成本（亲代为每个传承 token 支付的能量）。标定：LEARNING_COST × 0.5 ——
+/// 传授已掌握的知识比从零习得便宜（示范 vs 试错），但多 token 家庭每个孩子
+/// 累计支付 TEACH_COST × len，亲代投入随知识存量线性增长（代际流动约束）。
+pub const TEACH_COST: f64 = LEARNING_COST * 0.5;
 /// 传播保真度 ∈ [0,1]（示范→模仿时 token 向量加噪，噪声幅度 ∝ (1-f)）。
 pub const DEFAULT_FIDELITY: f64 = 0.9;
 /// 重组创新概率（两个已知 token → 重组向量产生新 token）。
@@ -235,6 +239,10 @@ pub struct CultureStats {
     pub last_extinct_tick: u32,
     /// 当前持有 token 的 agent 数（遥测）。
     pub token_holder_count: u64,
+    /// Phase 43: 传承 token 总数（出生教学成功传递的 token 次数）。
+    pub taught_count: u64,
+    /// Phase 43: 教学总成本（亲代支付的 TEACH_COST 累计）。
+    pub teach_cost_total: f64,
 }
 
 /// 三通道偏见枚举。
@@ -548,4 +556,48 @@ pub fn try_invent_token(
     registry.register(KnowledgeToken::new(id, vec));
     agent.known_tokens.push(id);
     Some(id)
+}
+
+// ---------------------------------------------------------------------------
+// Phase 43: cultural ratchet (parent → child token inheritance)
+// ---------------------------------------------------------------------------
+//
+// Tomasello ratchet: children acquire accumulated culture through parental
+// teaching; teaching is paid parental investment, and inheritance is an
+// acquisition (DEFAULT_FIDELITY per-token roll: a failed roll = teaching
+// failure / critical-period miss), not a copy. Without this pathway every
+// population turnover resets culture to zero (the Phase 42 observatory saw
+// bearers stuck at 0-5 despite 792 inventions).
+//
+// Determinism discipline: at most ONE culture_rng draw per (teacher, token)
+// pair, scanned in the teacher's known_tokens order; the poverty break (can't
+// afford the next lesson → teaching window closes) is zero-RNG. Duplicate
+// tokens (already known by the child via the other parent) are skipped before
+// any roll — no draw, no payment.
+
+/// 出生传承：教师按自己的 known_tokens 顺序向 child 传授。
+/// 每个 token：能量付不起 TEACH_COST → 停（贫穷约束，零 RNG）；
+/// 已被孩子从另一位教师处习得 → 跳过（零 RNG，不重复付费）；
+/// 否则 culture_rng 一次保真度 roll，成功则支付 TEACH_COST 并完整传承。
+/// 返回本次传承的 token 数。
+pub fn inherit_at_birth(
+    child_tokens: &mut Vec<u32>,
+    teacher_tokens: &[u32],
+    teacher_energy: &mut f64,
+    rng: &mut Mulberry32,
+    stats: &mut CultureStats,
+) -> u64 {
+    if teacher_tokens.is_empty() { return 0; }
+    let mut taught = 0u64;
+    for &tid in teacher_tokens {
+        if *teacher_energy < TEACH_COST { break; }
+        if child_tokens.contains(&tid) { continue; }
+        if rng.next_f64() >= DEFAULT_FIDELITY { continue; }
+        *teacher_energy -= TEACH_COST;
+        child_tokens.push(tid);
+        taught += 1;
+    }
+    stats.taught_count += taught;
+    stats.teach_cost_total += TEACH_COST * taught as f64;
+    taught
 }

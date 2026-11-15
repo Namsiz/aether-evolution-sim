@@ -75,11 +75,18 @@
 /// archives restore a fresh reference triune brain seeded from the agent's
 /// kind/id. `TriuneOn`/`TriuneUpkeepOn` default to true so old archives land
 /// on the Phase-41 default world config.
+/// v13 → v14 (Phase 43): cultural ratchet + abiogenesis. `SaveCultureStats`
+/// gains `taught_count`/`teach_cost_total` (birth-teaching telemetry); the
+/// sim level gains `TeachOn` / `AbiogenesisOn` toggles, the `AbioRngState`
+/// dedicated-stream snapshot, and the `AbiogenesisEvents` / `AbiogenesisTicks`
+/// counters. All are `#[serde(default)]`/`default_true` → a v13 archive
+/// restores with inheritance ON, abiogenesis ON, zero events and an abiogenesis
+/// stream re-derived from `seed ^ ABIO_RNG_TAG`, and continues bit-exactly.
 
 use serde::{Deserialize, Serialize};
 
 
-pub const SAVE_STATE_VERSION: u32 = 13;
+pub const SAVE_STATE_VERSION: u32 = 14;
 pub const SAVE_STATE_SCHEMA_NAME: &str = "aether-sim-save-state";
 
 /// DECO selection-pressure mode selector (persisted in SaveState v2).
@@ -590,6 +597,12 @@ pub struct SaveCultureStats {
     pub extinct_token_count: u64,
     pub last_extinct_tick: u32,
     pub token_holder_count: u64,
+    /// Phase 43: birth-teaching telemetry. `#[serde(default)]` → pre-v14
+    /// saves restore at zero (no teaching happened before Phase 43).
+    #[serde(default)]
+    pub taught_count: u64,
+    #[serde(default)]
+    pub teach_cost_total: f64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -866,6 +879,26 @@ pub struct SaveState {
     /// Phase 39.1: in-flight cohesion trackers (persistence clocks).
     #[serde(default)]
     pub GroupPending: Vec<SaveCohesion>,
+    /// Phase 43: birth-time cultural inheritance toggle. `#[serde(default =
+    /// "default_true")]` → pre-v14 saves land on inheritance ON.
+    #[serde(default = "default_true")]
+    pub TeachOn: bool,
+    /// Phase 43: abiogenesis toggle. `#[serde(default = "default_true")]` →
+    /// pre-v14 saves land on abiogenesis ON.
+    #[serde(default = "default_true")]
+    pub AbiogenesisOn: bool,
+    /// Phase 43: dedicated abiogenesis RNG stream snapshot. Restored as zeroed
+    /// `Mulberry32::new(0)` re-derivation for pre-v14 saves (same pattern as
+    /// the culture/group streams).
+    #[serde(default)]
+    pub AbioRngState: u32,
+    /// Phase 43: cumulative abiogenesis event count. `#[serde(default)]` →
+    /// 0 on pre-v14 saves (no abiogenesis before Phase 43).
+    #[serde(default)]
+    pub AbiogenesisEvents: u64,
+    /// Phase 43: tick of the most recent abiogenesis event.
+    #[serde(default)]
+    pub AbiogenesisTicks: u32,
 }
 
 fn default_group_on() -> bool {
