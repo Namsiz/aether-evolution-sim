@@ -136,12 +136,12 @@ fn fourth_plant_grows_feeds_seeds_and_is_deterministic() {
 fn default_3_plant_checksum_unchanged_by_registry() {
     // Registering nothing: the default world must reproduce the golden anchor
     // (guards that the Vec-based layers are bit-identical to the former arrays).
-    // Phase 34: the anchor is the v2 primary value (300-tick trajectory is
-    // bit-exact; historical v1 value 0x790184996f3acefd).
+    // Phase 39.1: the anchor is the v2 primary value (historical v1 value
+    // 0x790184996f3acefd, Phase 36 v2 value 0xa4d54e1aadbe83c6).
     let mut eco = Ecology::new(20261102);
     run_ticks(&mut eco, 0, 300);
     assert_eq!(eco.plant_count(), 3);
-    assert_eq!(eco.checksum(), "0xa4d54e1aadbe83c6");
+    assert_eq!(eco.checksum(), "0x32c496b54efc9626");
 }
 
 #[test]
@@ -153,7 +153,7 @@ fn fish_deco_upkeep_default_is_noop() {
     run_ticks(&mut eco, 0, 300);
     assert!(eco.living().iter().filter(|a| a.alive).all(|a| a.genome.ext.is_empty()),
         "default genesis-OFF world must keep every ext list empty");
-    assert_eq!(eco.checksum(), "0xa4d54e1aadbe83c6");
+    assert_eq!(eco.checksum(), "0x32c496b54efc9626");
 }
 
 #[test]

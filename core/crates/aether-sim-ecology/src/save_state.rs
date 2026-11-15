@@ -55,11 +55,18 @@
 /// strings gain additive keys: clades `kindId`/`derivedKind`/`axes`, events
 /// `kindId` (all `#[serde(default)]`-style, older clade JSON loads with
 /// kindId = u32::MAX / derivedKind = null / axes = []).
+/// v10 → v11 (Phase 39.1): major-transition layer. `Groups` (live group
+/// entities, each carrying its members' ids + the founder genome that is the
+/// single-point propagation bottleneck), `NextGroupId`, `GroupOn`, and
+/// `GroupRngState`, plus per-agent `group_id` / `role` / `somatic_damage`.
+/// All are `#[serde(default)]`, so a v10 archive loads as a solitary world
+/// (no groups, role = none, zero damage) and continues from its own state.
+/// Group telemetry (`GroupStats`) is observability only and is not persisted.
 
 use serde::{Deserialize, Serialize};
 
 
-pub const SAVE_STATE_VERSION: u32 = 10;
+pub const SAVE_STATE_VERSION: u32 = 11;
 pub const SAVE_STATE_SCHEMA_NAME: &str = "aether-sim-save-state";
 
 /// DECO selection-pressure mode selector (persisted in SaveState v2).
@@ -261,6 +268,17 @@ pub struct SaveAgent {
     /// Phase 37: learned knowledge tokens (id list, in learning order).
     #[serde(default)]
     pub known_tokens: Vec<u32>,
+    /// Phase 39.1: group membership (0 = solitary). `#[serde(default)]` →
+    /// pre-v11 saves restore as solitary individuals.
+    #[serde(default)]
+    pub group_id: u32,
+    /// Phase 39.1: sub-task role (0=GO 1=FEED 2=GUARD 3=REPRO, 255=none).
+    #[serde(default = "default_role_none")]
+    pub role: u8,
+    /// Phase 39.1: somatic damage from dirty work (drives offspring mutation
+    /// amplitude). Restored verbatim — it feeds `mutate` on the next birth.
+    #[serde(default)]
+    pub somatic_damage: f64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -545,6 +563,48 @@ pub struct SaveCultureStats {
     pub token_holder_count: u64,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "PascalCase")]
+pub struct SaveGroup {
+    pub id: u32,
+    pub kind: u32,
+    pub members: Vec<u32>,
+    pub founder_id: u32,
+    pub energy_pool: f64,
+    pub birth_tick: u32,
+    pub parent_group: Option<u32>,
+    /// Parallel to `members`.
+    #[serde(default)]
+    pub roles: Vec<u8>,
+    #[serde(default)]
+    pub clade_id: u32,
+    /// The single-point bottleneck: group offspring read only this genome.
+    pub founder_genome: SaveGenome,
+    /// Open-locus slots of the founder genome (`SaveGenome` has no ext field;
+    /// without this the restored bottleneck would drop its ext loci and the
+    /// propagule's mutation path would fork).
+    #[serde(default)]
+    pub founder_ext: Vec<SaveLocus>,
+    #[serde(default)]
+    pub founder_lineage: Option<String>,
+    #[serde(default)]
+    pub last_repro_tick: u32,
+    #[serde(default)]
+    pub generation: u32,
+}
+
+/// Phase 39.1: one cohesion-persistence tracker (a cluster that has been seen
+/// across consecutive scans). This is dynamics state, not telemetry: losing it
+/// on restore would delay the next formation and fork the trajectory.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "PascalCase")]
+pub struct SaveCohesion {
+    pub anchor: u32,
+    pub kind: u32,
+    pub clade_id: u32,
+    pub first_tick: u32,
+}
+
 /// Full sim state for save/restore. Independent from render-packet `Snapshot`
 /// (Meta.version=3): this schema's `Version` starts at 1 and only counts
 /// save-state revisions.
@@ -749,6 +809,31 @@ pub struct SaveState {
     /// Phase 37: global culture learning telemetry.
     #[serde(default)]
     pub CultureStats: SaveCultureStats,
+    /// Phase 39.1: live group entities. `#[serde(default)]` → pre-v11 saves
+    /// restore with no groups (solitary world).
+    #[serde(default)]
+    pub Groups: Vec<SaveGroup>,
+    /// Phase 39.1: group id allocator. `#[serde(default)]` → pre-v11 saves
+    /// restore to 0, then clamped to max(id)+1 in `from_save_state`.
+    #[serde(default)]
+    pub NextGroupId: u32,
+    /// Phase 39.1: group layer toggle (default ON, matching `GROUP_ON`).
+    #[serde(default = "default_group_on")]
+    pub GroupOn: bool,
+    /// Phase 39.1: dedicated group RNG stream state.
+    #[serde(default)]
+    pub GroupRngState: u32,
+    /// Phase 39.1: in-flight cohesion trackers (persistence clocks).
+    #[serde(default)]
+    pub GroupPending: Vec<SaveCohesion>,
+}
+
+fn default_group_on() -> bool {
+    true
+}
+
+fn default_role_none() -> u8 {
+    0xFF
 }
 
 fn default_culture_on() -> bool {

@@ -714,6 +714,19 @@ pub struct Agent {
     pub brain_last_brain_action: u8,
     /// Phase 37: knowledge tokens this agent has learned (id list, in learning order).
     pub known_tokens: Vec<u32>,
+    /// Phase 39.1: group membership (0 = solitary). Groups are behavioural
+    /// aggregates, not multicellular bodies — the member stays a first-class
+    /// individual with its own energy, genome and death.
+    pub group_id: u32,
+    /// Phase 39.1: sub-task role inside the group (0=GO, 1=FEED, 2=GUARD,
+    /// 3=REPRO, `ROLE_NONE`=unassigned). Assigned by `group::role_scores`
+    /// (genome + brain state), never scripted.
+    pub role: u8,
+    /// Phase 39.1: somatic damage accumulated by dirty work (GO role in a
+    /// hazardous cell). Raises the offspring mutation amplitude via
+    /// `1 + SOMATIC_MUTAGEN × damage`; the germline stays clean simply because
+    /// REPRO-role individuals do not take dirty work.
+    pub somatic_damage: f64,
 }
 
 #[derive(Debug)]
@@ -1300,6 +1313,24 @@ pub struct Ecology {
     pub culture_fidelity: f64,
     /// Phase 37: default bias channel for social learning.
     pub culture_bias_channel: u8, // 0=content, 1=prestige, 2=conformist, 3=all
+    /// Phase 39.1: live group entities (behavioural aggregates with their own
+    /// energy pool, reproduction and death). Empty ⇒ individual-level
+    /// selection only.
+    pub groups: Vec<crate::group::Group>,
+    /// Phase 39.1: group id allocator (never reused).
+    pub next_group_id: u32,
+    /// Phase 39.1: group layer toggle (default `GROUP_ON`). When false the
+    /// layer is a bit-exact no-op (zero draws, zero energy) — the A/B arm
+    /// for every group acceptance test.
+    pub group_on: bool,
+    /// Phase 39.1: dedicated RNG stream (`seed ^ GROUP_RNG_TAG`) for group
+    /// formation probability and propagule placement jitter.
+    pub group_rng: Mulberry32,
+    /// Phase 39.1: group-layer telemetry (observability only).
+    pub group_stats: crate::group::GroupStats,
+    /// Phase 39.1: persistence trackers for cohesion candidates (same anchor
+    /// + clade seen across consecutive scans). Bookkeeping only.
+    pub(crate) group_pending: Vec<crate::group::CohesionTracker>,
 }
 
 fn default_fidelity() -> f64 {
@@ -1431,6 +1462,15 @@ impl Ecology {
             culture_stats: crate::culture::CultureStats::default(),
             culture_fidelity: crate::culture::DEFAULT_FIDELITY,
             culture_bias_channel: 3, // all channels enabled by default
+            // Phase 39.1: group layer — ON by default with its own RNG stream;
+            // empty groups ⇒ no draws and no energy flows until cohesion
+            // conditions are actually met.
+            groups: Vec::new(),
+            next_group_id: 1,
+            group_on: crate::group::GROUP_ON,
+            group_rng: Mulberry32::new(seed ^ crate::group::GROUP_RNG_TAG),
+            group_stats: crate::group::GroupStats::default(),
+            group_pending: Vec::new(),
         };
         eco.init_grass();
         eco.seed_life();
@@ -1586,6 +1626,15 @@ impl Ecology {
             culture_stats: crate::culture::CultureStats::default(),
             culture_fidelity: crate::culture::DEFAULT_FIDELITY,
             culture_bias_channel: 3, // all channels enabled by default
+            // Phase 39.1: group layer — ON by default with its own RNG stream;
+            // empty groups ⇒ no draws and no energy flows until cohesion
+            // conditions are actually met.
+            groups: Vec::new(),
+            next_group_id: 1,
+            group_on: crate::group::GROUP_ON,
+            group_rng: Mulberry32::new(seed ^ crate::group::GROUP_RNG_TAG),
+            group_stats: crate::group::GroupStats::default(),
+            group_pending: Vec::new(),
         };
         eco.init_grass();
         eco.seed_life();
@@ -2274,36 +2323,43 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         }
     }
 
-    fn mutate(&mut self, g: &Genome, kind: SpeciesKind) -> Genome {
+    /// Genome mutation. `mut_scale` multiplies every locus' mutation amplitude
+    /// (1.0 = the Phase 36 trajectory exactly, since `x * 1.0` is bit-exact).
+    /// Phase 39.1 feeds `1 + SOMATIC_MUTAGEN × parent_damage` here — the
+    /// dirty-work mutagenesis channel. Public so research tools / acceptance
+    /// tests can measure the amplitude directly; consumes the normal RNG
+    /// streams (`rng`/`prng`/`fish_rng`) exactly like every birth.
+    pub fn mutate(&mut self, g: &Genome, kind: SpeciesKind, mut_scale: f64) -> Genome {
         let mut out = g.clone();
+        let ms = if mut_scale.is_finite() && mut_scale > 0.0 { mut_scale } else { 1.0 };
         let pop_size = self.count(kind);
         let (sp_lo, sp_hi) = self.kind_def(kind).speed_clamp;
         let mut_fin = self.kind_def(kind).mutates_fin_color;
         let mut_deco = self.kind_def(kind).mutates_deco_eff;
         let drift = if pop_size < 20 { 1.0 + (20.0 - pop_size as f64) / 20.0 } else { 1.0 };
-        out.speed = (g.speed * (1.0 + (self.rng.next_f64() - 0.5) * 0.09 * drift)).clamp(sp_lo, sp_hi);
-        out.sense = (g.sense * (1.0 + (self.rng.next_f64() - 0.5) * 0.1 * drift)).clamp(14.0, 130.0);
-        out.size = (g.size * (1.0 + (self.rng.next_f64() - 0.5) * 0.07 * drift)).clamp(0.58, 1.7);
-        out.metabolism = (g.metabolism * (1.0 + (self.rng.next_f64() - 0.5) * 0.06 * drift)).clamp(0.62, 1.6);
-        out.lifespan = (g.lifespan * (1.0 + (self.rng.next_f64() - 0.5) * 0.08 * drift)).clamp(180.0, 560.0);
-        out.hue = (g.hue + (self.rng.next_f64() - 0.5) * 0.06 * drift + 1.0) % 1.0;
-        out.bold = (g.bold + (self.prng.next_f64() - 0.5) * 0.14 * drift).clamp(0.0, 1.0);
-        out.curious = (g.curious + (self.prng.next_f64() - 0.5) * 0.14 * drift).clamp(0.0, 1.0);
-        out.social = (g.social + (self.prng.next_f64() - 0.5) * 0.14 * drift).clamp(0.0, 1.0);
+        out.speed = (g.speed * (1.0 + (self.rng.next_f64() - 0.5) * 0.09 * drift * ms)).clamp(sp_lo, sp_hi);
+        out.sense = (g.sense * (1.0 + (self.rng.next_f64() - 0.5) * 0.1 * drift * ms)).clamp(14.0, 130.0);
+        out.size = (g.size * (1.0 + (self.rng.next_f64() - 0.5) * 0.07 * drift * ms)).clamp(0.58, 1.7);
+        out.metabolism = (g.metabolism * (1.0 + (self.rng.next_f64() - 0.5) * 0.06 * drift * ms)).clamp(0.62, 1.6);
+        out.lifespan = (g.lifespan * (1.0 + (self.rng.next_f64() - 0.5) * 0.08 * drift * ms)).clamp(180.0, 560.0);
+        out.hue = (g.hue + (self.rng.next_f64() - 0.5) * 0.06 * drift * ms + 1.0) % 1.0;
+        out.bold = (g.bold + (self.prng.next_f64() - 0.5) * 0.14 * drift * ms).clamp(0.0, 1.0);
+        out.curious = (g.curious + (self.prng.next_f64() - 0.5) * 0.14 * drift * ms).clamp(0.0, 1.0);
+        out.social = (g.social + (self.prng.next_f64() - 0.5) * 0.14 * drift * ms).clamp(0.0, 1.0);
         if mut_fin {
-            out.fin_color = (g.fin_color + (self.fish_rng.next_f64() - 0.5) * 0.1 * drift).clamp(0.0, 1.0);
+            out.fin_color = (g.fin_color + (self.fish_rng.next_f64() - 0.5) * 0.1 * drift * ms).clamp(0.0, 1.0);
         }
         if mut_deco {
-            out.deco_efficiency = (g.deco_efficiency * (1.0 + (self.rng.next_f64() - 0.5) * 0.1 * drift)).clamp(0.5, 1.5);
+            out.deco_efficiency = (g.deco_efficiency * (1.0 + (self.rng.next_f64() - 0.5) * 0.1 * drift * ms)).clamp(0.5, 1.5);
         }
         if let Some(h) = g.help_thr {
-            out.help_thr = Some((h + (self.rng.next_f64() - 0.5) * 1.2 * drift).clamp(-5.0, 5.0));
+            out.help_thr = Some((h + (self.rng.next_f64() - 0.5) * 1.2 * drift * ms).clamp(-5.0, 5.0));
         }
         if let Some(p) = g.pref_sig {
-            out.pref_sig = Some((p + (self.rng.next_f64() - 0.5) * 2.0 * SIG_MUT_PREF * drift).clamp(0.58, 1.7));
+            out.pref_sig = Some((p + (self.rng.next_f64() - 0.5) * 2.0 * SIG_MUT_PREF * drift * ms).clamp(0.58, 1.7));
         }
         if let Some(t) = g.tol_sig {
-            out.tol_sig = Some((t + (self.rng.next_f64() - 0.5) * 2.0 * SIG_MUT_TOL * drift).clamp(SIG_TOL_MIN, SIG_TOL_MAX));
+            out.tol_sig = Some((t + (self.rng.next_f64() - 0.5) * 2.0 * SIG_MUT_TOL * drift * ms).clamp(SIG_TOL_MIN, SIG_TOL_MAX));
         }
         // Phase 32: gene-duplication operator. When genesis is ON exactly ONE
         // extra main-stream draw (`dup_roll`) is made here, at this fixed
@@ -2364,7 +2420,10 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         self.agents.iter().filter(|a| a.alive && a.kind == kind).count()
     }
 
-    fn mix_genome(&mut self, a: &Genome, b: &Genome, kind: SpeciesKind) -> Genome {
+    /// Mendelian mix + mutation. `mut_scale` comes from the reproducing
+    /// partner's somatic damage (Phase 39.1: dirty work raises the offspring
+    /// mutation amplitude; 1.0 keeps the pre-39.1 trajectory bit-exact).
+    fn mix_genome(&mut self, a: &Genome, b: &Genome, kind: SpeciesKind, mut_scale: f64) -> Genome {
         let mut g = Genome {
             speed: (a.speed + b.speed) * 0.5,
             sense: (a.sense + b.sense) * 0.5,
@@ -2391,7 +2450,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         // operator, which runs inside the mutate call below). Core-locus
         // averaging above is unchanged.
         g.ext = Self::mix_ext(&a.ext, &b.ext);
-        self.mutate(&g, kind)
+        self.mutate(&g, kind, mut_scale)
     }
 
     /// Phase 32: id-paired ext-locus inheritance. Over the UNION of the two
@@ -2427,7 +2486,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
 
     // ----- entity management ------------------------------------------------
 
-    fn spawn(&mut self, kind: SpeciesKind, x: f64, z: f64, genome: Option<Genome>, generation: u32, age: f64) -> Option<&mut Agent> {
+    pub(crate) fn spawn(&mut self, kind: SpeciesKind, x: f64, z: f64, genome: Option<Genome>, generation: u32, age: f64) -> Option<&mut Agent> {
         // Use biome-specific cap when available; otherwise fall back to global.
         let def_max_e = self.kind_def(kind).max_energy;
         let def_repro_cd = self.kind_def(kind).repro_cooldown;
@@ -2438,7 +2497,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             Some(g) => g,
             None => {
                 let rg = self.random_genome(kind);
-                self.mutate(&rg, kind)
+                self.mutate(&rg, kind, 1.0)
             }
         };
         let max_e = def_max_e;
@@ -2510,6 +2569,10 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             brain_last_brain_action: 0,
             // Phase 37: empty token set at birth — inherited via learning.
             known_tokens: Vec::new(),
+            // Phase 39.1: newborns start solitary with no role and no damage.
+            group_id: 0,
+            role: crate::group::ROLE_NONE,
+            somatic_damage: 0.0,
         };
         let idx = self.agents.len();
         self.agents.push(a);
@@ -2518,7 +2581,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
 
     // ----- grass field helpers ----------------------------------------------
 
-    fn cell_index(&self, x: f64, z: f64) -> isize {
+    pub(crate) fn cell_index(&self, x: f64, z: f64) -> isize {
         let i = ((x + self.grid_span / 2.0) / self.cell).floor() as isize;
         let j = ((z + self.grid_span / 2.0) / self.cell).floor() as isize;
         if i < 0 || j < 0 || i as u32 >= self.grid_n || j as u32 >= self.grid_n { return -1; }
@@ -2997,7 +3060,8 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             let b_gen = self.agents[mate_j].generation;
             let a_lineage = self.agents[idx].lineage;
             let b_lineage = self.agents[mate_j].lineage;
-            let g = self.mix_genome(&a_geno, &b_geno, a_kind);
+            let mut_scale = crate::group::mutation_scale(&self.agents[idx]);
+            let g = self.mix_genome(&a_geno, &b_geno, a_kind, mut_scale);
             let (jx, jz) = if a_kind == FISH {
                 ((self.fish_rng.next_f64() - 0.5) * 2.5, (self.fish_rng.next_f64() - 0.5) * 2.5)
             } else {
@@ -3051,7 +3115,8 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             let a_kind_a2 = self.agents[idx].kind;
             let a_gen_a2 = self.agents[idx].generation;
             let a_lineage_a2 = self.agents[idx].lineage;
-            let g = self.mutate(&a_geno_a2, a_kind_a2);
+            let mut_scale = crate::group::mutation_scale(&self.agents[idx]);
+            let g = self.mutate(&a_geno_a2, a_kind_a2, mut_scale);
             let ang = if a_kind_a2 == FISH { self.fish_rng.next_f64() } else { self.rng.next_f64() } * std::f64::consts::PI * 2.0;
             let cx = self.agents[idx].x + aether_libm::cos(ang) * 3.0;
             let cz = self.agents[idx].z + aether_libm::sin(ang) * 3.0;
@@ -4384,6 +4449,13 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 // Decay structures over time
                 culture::decay_structures(&mut self.structure_registry, culture::STRUCTURE_DECAY);
             }
+
+            // Phase 39.1: major-transition layer (group entities, task
+            // switching, dirty-work mutagenesis). Zero side effects while
+            // `group_on` is false or no group has formed: the scan is read-only
+            // and consumes no RNG until a cohesion candidate passes the
+            // persistence gate.
+            crate::group::group_step(self, h);
             
             for c in self.carcasses.iter_mut() { c.age += h; }
             // Phase 8: prune stale occupancy locks.
@@ -5421,6 +5493,20 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         mix(self.deaths as u64);
         mix(self.kills as u64);
         mix(self.speciation_fired as u64);
+        if mix_ext {
+            // Phase 39.1: group-layer state. Empty groups mix nothing, so a
+            // group-free world keeps the pre-39.1 v2 value; once groups exist
+            // the checksum reflects pool energy, membership and birth timing
+            // (the group layer becomes part of the save/restore contract).
+            // Mixed in v2 only — `checksum_v1` stays the historical stream.
+            for g in &self.groups {
+                mix(g.id as u64);
+                mix(g.kind as u32 as u64);
+                mix(g.members.len() as u64);
+                mix((g.energy_pool * 100.0).floor() as i64 as u64);
+                mix(g.birth_tick as u64);
+            }
+        }
         format!("0x{:016x}", h as u64)
     }
 
@@ -5467,6 +5553,9 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         }
     }
     pub fn tick_count(&self) -> u32 { self.tick_count }
+
+    /// Phase 39.1: number of in-flight cohesion trackers (research readout).
+    pub fn group_pending_len(&self) -> usize { self.group_pending.len() }
 
     /// Phase 32: enable/disable the open-locus gene-duplication operator.
     /// `false` (default) keeps the pre-Phase-32 bit-exact trajectory (zero
@@ -5601,6 +5690,10 @@ fn agent_to_save(a: &Agent, kinds: &KindRegistry) -> save_state::SaveAgent {
         brain_last_reward: a.brain.last_reward,
         // Phase 37: learned knowledge tokens (in learning order).
         known_tokens: a.known_tokens.clone(),
+        // Phase 39.1: group membership, role and somatic damage.
+        group_id: a.group_id,
+        role: a.role,
+        somatic_damage: a.somatic_damage,
     }
 }
 
@@ -6017,6 +6110,34 @@ impl Ecology {
                 last_extinct_tick: self.culture_stats.last_extinct_tick,
                 token_holder_count: self.culture_stats.token_holder_count,
             },
+            // Phase 39.1: group layer. `founder_genome` is serialized in full —
+            // it is the propagation bottleneck, so it must survive the hop for
+            // a restored sim to keep breeding from the same single genome.
+            Groups: self.groups.iter().map(|g| save_state::SaveGroup {
+                id: g.id,
+                kind: g.kind as u32,
+                members: g.members.clone(),
+                founder_id: g.founder_id,
+                energy_pool: g.energy_pool,
+                birth_tick: g.birth_tick,
+                parent_group: g.parent_group,
+                roles: g.roles.clone(),
+                clade_id: g.clade_id,
+                founder_genome: genome_to_save(&g.founder_genome),
+                founder_ext: g.founder_genome.ext.iter().map(locus_to_save).collect(),
+                founder_lineage: g.founder_lineage.map(|s| s.to_string()),
+                last_repro_tick: g.last_repro_tick,
+                generation: g.generation,
+            }).collect(),
+            NextGroupId: self.next_group_id,
+            GroupOn: self.group_on,
+            GroupRngState: self.group_rng.state(),
+            GroupPending: self.group_pending.iter().map(|t| save_state::SaveCohesion {
+                anchor: t.anchor,
+                kind: t.kind as u32,
+                clade_id: t.clade_id,
+                first_tick: t.first_tick,
+            }).collect(),
         }
     }
 
@@ -6317,6 +6438,33 @@ impl Ecology {
             }
         }
 
+        // Phase 39.1: materialize the group table + id allocator before the
+        // struct literal consumes the rest of the save state.
+        let (restored_groups, restored_next_group_id) = {
+            let max_id = state.Groups.iter().map(|g| g.id).max().unwrap_or(0);
+            let next = state.NextGroupId.max(max_id + 1).max(1);
+            let groups = state.Groups.into_iter().map(|sg| crate::group::Group {
+                id: sg.id,
+                kind: sg.kind.min(u16::MAX as u32) as SpeciesKind,
+                members: sg.members,
+                founder_id: sg.founder_id,
+                energy_pool: sg.energy_pool,
+                birth_tick: sg.birth_tick,
+                parent_group: sg.parent_group,
+                roles: sg.roles,
+                clade_id: sg.clade_id,
+                founder_genome: {
+                    let mut gm = genome_from_save(sg.founder_genome);
+                    gm.ext = sg.founder_ext.into_iter().map(locus_from_save).collect();
+                    gm
+                },
+                founder_lineage: sg.founder_lineage.as_deref().map(save_state::intern_str),
+                last_repro_tick: sg.last_repro_tick,
+                generation: sg.generation,
+            }).collect::<Vec<_>>();
+            (groups, next)
+        };
+
         Ecology {
             rng: Mulberry32::from_state(state.rng_state.state),
             prng: Mulberry32::from_state(state.prng_state.state),
@@ -6406,6 +6554,15 @@ impl Ecology {
                     brain_last_brain_action: 0,
                     // Phase 37: learned knowledge tokens (empty on pre-v10 saves).
                     known_tokens: a.known_tokens,
+                    // Phase 39.1: group membership / role / somatic damage
+                    // (serde defaults make pre-v11 archives solitary & clean).
+                    group_id: a.group_id,
+                    role: a.role,
+                    somatic_damage: if a.somatic_damage.is_finite() {
+                        a.somatic_damage.clamp(0.0, crate::group::SOMATIC_MAX)
+                    } else {
+                        0.0
+                    },
                 }
             }).collect(),
             carcasses: state.carcasses.into_iter().map(|c| Carcass {
@@ -6561,6 +6718,24 @@ impl Ecology {
             },
             culture_fidelity: state.CultureFidelity,
             culture_bias_channel: state.CultureBiasChannel,
+            // Phase 39.1: group layer. Pre-v11 archives carry no groups →
+            // solitary world; the id allocator is clamped past every restored
+            // group id so a post-restore formation can never reuse an id.
+            groups: restored_groups,
+            next_group_id: restored_next_group_id,
+            group_on: state.GroupOn,
+            group_rng: if state.GroupRngState != 0 {
+                Mulberry32::from_state(state.GroupRngState)
+            } else {
+                Mulberry32::new(state.seed ^ crate::group::GROUP_RNG_TAG)
+            },
+            group_stats: crate::group::GroupStats::default(),
+            group_pending: state.GroupPending.into_iter().map(|t| crate::group::CohesionTracker {
+                anchor: t.anchor,
+                kind: t.kind.min(u16::MAX as u32) as SpeciesKind,
+                clade_id: t.clade_id,
+                first_tick: t.first_tick,
+            }).collect(),
         }
     }
 }

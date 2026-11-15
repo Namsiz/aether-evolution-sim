@@ -1,6 +1,21 @@
 //! Phase 31+ golden regression anchors — Phase 34 re-baselined, Phase 36
 //! updated again (INFO_COST_ON + TROPHIC_EFF active changes the dynamics vs
-//! the ledger-only Phase 35 skeleton).
+//! the ledger-only Phase 35 skeleton), Phase 39.1 re-baselined a third time
+//! (group entities + task-switching cost + dirty-work mutagenesis).
+//!
+//! PHASE 39.1 ANCHORS (current, group layer ON by default):
+//!   seed 20261102 @300  v2 0x32c496b54efc9626
+//!   seed 20261102 @3000 v2 0xb900f6366f38cc47
+//!   seed 20261105 @300  v2 0x786979c7e9c84a93
+//!   seed 20261102 @300  v1 0x5fa905f98eb6546e
+//! PHASE 36 ANCHORS (previous, kept for the record):
+//!   seed 20261102 @300  v2 0xa4d54e1aadbe83c6
+//!   seed 20261102 @3000 v2 0xdd79b5ab74f3545d
+//!   seed 20261105 @300  v2 0x777cd6c33bb3345c
+//!   seed 20261102 @300  v1 0x3782a36aee6f1ff5
+//! The Phase 36 values are still reachable bit-exactly by switching the group
+//! layer off (`eco.group_on = false`) — pinned in
+//! `phase39_1_transition_test::group_off_is_bit_exact_phase36_anchor`.
 //!
 //! Phase 31 pinned the v1 checksum (kind field = the kind NAME's first byte).
 //! Phase 34 (Q2 ruling) promotes the v2 checksum to primary: the kind field
@@ -46,25 +61,25 @@ fn checksum_at(seed: u32, ticks: u32) -> String {
 
 #[test]
 fn golden_seed_20261102_300_ticks() {
-    // Phase 36 re-baseline (INFO_COST_ON + TROPHIC_EFF active by default).
+    // Phase 39.1 re-baseline (group layer ON by default).
     let ck = checksum_at(20261102, 300);
-    assert_eq!(ck, "0xa4d54e1aadbe83c6",
-        "300-tick v2 checksum drifted: {} — see file docs + Phase 36 report", ck);
+    assert_eq!(ck, "0x32c496b54efc9626",
+        "300-tick v2 checksum drifted: {} — see file docs + Phase 39.1 report", ck);
 }
 
 #[test]
 fn golden_seed_20261102_3000_ticks() {
-    // Phase 36 re-baseline (INFO_COST_ON + TROPHIC_EFF active by default).
+    // Phase 39.1 re-baseline (group layer ON by default).
     let ck = checksum_at(20261102, 3000);
-    assert_eq!(ck, "0xdd79b5ab74f3545d",
+    assert_eq!(ck, "0xb900f6366f38cc47",
         "3000-tick v2 long-run checksum drifted: {} — if this change is an approved re-baseline, pin the new value here and record it in the phase report", ck);
 }
 
 #[test]
 fn golden_seed_20261105_300_ticks() {
-    // Phase 36 re-baseline (INFO_COST_ON + TROPHIC_EFF active by default).
+    // Phase 39.1 re-baseline (group layer ON by default).
     let ck = checksum_at(20261105, 300);
-    assert_eq!(ck, "0x777cd6c33bb3345c",
+    assert_eq!(ck, "0x786979c7e9c84a93",
         "alt-seed v2 checksum drifted: {} — if this change is an approved re-baseline, pin the new value here and record it in the phase report", ck);
 }
 
@@ -77,11 +92,11 @@ fn golden_seed_20261105_300_ticks() {
 fn golden_300_tick_trajectory_bit_exact_to_v1() {
     let mut eco = Ecology::new(20261102);
     for t in 1..=300 { eco.update(0.1, daylight(t)); }
-    // Phase 36 re-baseline: the v1 trajectory has shifted because every
-    // per-tick perception sweep now drains a small amount of energy when
-    // `info_cost_on` is true (the default). Pin the new anchor.
-    assert_eq!(eco.checksum_v1(), "0x3782a36aee6f1ff5",
-        "the 300-tick v1 trajectory must stay at the pinned Phase 36 anchor");
+    // Phase 39.1 re-baseline: the group layer shifts energy flows (task
+    // switching, pooled feeding), so the v1 stream moves with them. The group
+    // table itself is mixed into v2 only.
+    assert_eq!(eco.checksum_v1(), "0x5fa905f98eb6546e",
+        "the 300-tick v1 trajectory must stay at the pinned Phase 39.1 anchor");
 }
 
 /// Determinism guard: same seed + same ticks must be bit-identical across

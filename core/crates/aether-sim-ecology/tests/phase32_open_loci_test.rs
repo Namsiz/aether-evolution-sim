@@ -58,10 +58,9 @@ fn genesis_off_is_bit_exact_noop() {
     assert!(eco.genesis_on == false);
     assert_eq!(eco.ext_dup_events, 0, "genesis off must never fire a dup event");
     assert_eq!(eco.ext_total_loci(), 0, "genesis off must keep ext empty");
-    // The pinned golden anchor (Phase 35 v2 primary) reflects TROPHIC_EFF
-    // wiring into predation gains; the trajectory itself shifted from
-    // Phase 34.
-    assert_eq!(eco.checksum(), "0xa4d54e1aadbe83c6");
+    // The pinned golden anchor is the Phase 39.1 v2 primary (group layer ON
+    // by default); the trajectory shifted from Phase 34 → 36 → 39.1.
+    assert_eq!(eco.checksum(), "0x32c496b54efc9626");
 }
 
 /// Acceptance #3: determinism under genesis ON. Two fresh instances with the

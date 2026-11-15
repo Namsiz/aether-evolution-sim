@@ -22,6 +22,7 @@ mod cataclysm; // Phase 17: cataclysms + recovery dynamics
 mod geology; // Phase 18: plate tectonics + eustatic sea level
 mod biochemistry; // Phase 18: fast/slow nutrient pools + fertility feedback
 mod culture; // Phase 37: knowledge tokens + niche construction
+mod group; // Phase 39.1: major-transition layer
 
 use ecology::{Agent, Ecology, Genome};
 use std::collections::HashMap;
@@ -656,10 +657,49 @@ fn main() {
             // kind field) plus the v2 primary (registry id + ext-locus hash).
             let _ = writeln!(out, "SNAPSHOT {} {} {} {}", i, s.h, s.p, eco.checksum_v1());
             let _ = writeln!(out, "SNAPSHOT_V2 {} {} {} {}", i, s.h, s.p, eco.checksum_v2());
+            // Phase 39.1: major-transition readout (group layer + selection levels).
+            let g = &eco.group_stats;
+            let mean_size = if eco.groups.is_empty() {
+                0.0
+            } else {
+                eco.groups.iter().map(|x| x.members.len() as f64).sum::<f64>()
+                    / eco.groups.len() as f64
+            };
+            let rc = eco.groups.iter().fold([0usize; 4], |mut acc, g| {
+                for &r in &g.roles { if (r as usize) < 4 { acc[r as usize] += 1; } }
+                acc
+            });
+            let mean_life = if g.lifetime_n == 0 { 0.0 } else { g.lifetime_sum / g.lifetime_n as f64 };
+            let _ = writeln!(
+                out,
+                "GROUPS {} n={} mean_size={:.2} max={} levels={} formed={} prop={} dissolved={} repro={} switches={} switch_cost={:.1} dirty={} somatic={:.3} mean_life={:.0} roles=go{},feed{},guard{},repro{}",
+                i,
+                eco.groups.len(),
+                mean_size,
+                eco.groups.iter().map(|x| x.members.len()).max().unwrap_or(0),
+                group::selection_levels(&eco),
+                g.formed,
+                g.propagules,
+                g.dissolved,
+                g.reproductions,
+                g.switches,
+                g.switch_cost_total,
+                g.dirty_work_events,
+                g.somatic_total,
+                mean_life,
+                rc[0], rc[1], rc[2], rc[3],
+            );
         }
     }
     if !buf.is_empty() {
         let _ = out.write_all(buf.as_bytes());
+    }
+    // Phase 39.1: group-layer time series (100-tick sampling, last 240 samples).
+    let _ = writeln!(out, "GROUP_HISTORY_BEGIN");
+    for s in &eco.group_stats.history {
+        let _ = writeln!(out, "GROUP_HISTORY {} {} {:.2} {} {} {:.2} {:.0}",
+            s.t, s.groups, s.mean_size, s.max_size, s.selection_levels,
+            s.pool_total, s.mean_group_age);
     }
     let _ = writeln!(out, "CHECKSUM_FINAL_V1 {}", eco.checksum_v1());
     let _ = writeln!(out, "CHECKSUM_FINAL {}", eco.checksum());

@@ -163,6 +163,13 @@ fn pin_effs(eco: &mut Ecology, root_eff: f64, child_eff: f64, child: u32) {
 /// Returns (eco, child_clade_id, anchors).
 fn setup_split() -> (Ecology, u32, [(f64, f64); 2]) {
     let mut eco = Ecology::new(SEED);
+    // Phase 39.1 instrumentation: this A/B isolates the Phase 16 competitive
+    // burden, so the orthogonal group layer runs OFF in BOTH arms (the same
+    // discipline as clearing `clade_burdens` in the control arm every tick
+    // below). With the group layer on, its extra chaotic amplification hides
+    // the burden's time-averaged signature (measured: 84.3 vs 83.6); with it
+    // off the same A/B shows 69.3 vs 88.5.
+    eco.group_on = false;
     eco.deco_eff_choice_mode = save_state::DECO_CHOICE_SELECTIVE;
     let (a, b) = seed_two_clusters(&mut eco);
     let anchors = [a, b];

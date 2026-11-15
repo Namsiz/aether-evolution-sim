@@ -82,8 +82,8 @@ pub struct InformationStock {
 /// Tainter-style marginal-return slope + selection hierarchy count.
 #[derive(Clone, Debug, Default)]
 pub struct ComplexityTelemetry {
-    /// Number of active selection levels (1 = individual-level only;
-    /// higher values require group entities, which don't exist yet).
+    /// Number of active selection levels: 1 = individual-level only,
+    /// 2 = individual + live group layer (Phase 39.1).
     pub selection_levels: usize,
     /// Per-clade energy throughput / metabolic investment, as a running
     /// slope. Negative = complexity is outrunning its energy base.
@@ -206,8 +206,11 @@ fn measure_complexity(eco: &Ecology) -> ComplexityTelemetry {
     let slope = if clades <= 0.0 { 0.0 } else { (throughput - maintenance) / clades };
     let niche_occupancy = live.iter().filter(|c| c.niche_offset.abs() > 1e-9).count();
     ComplexityTelemetry {
-        // Selection levels: individual-level only until group entities exist.
-        selection_levels: 1,
+        // Selection levels: the individual layer is always present (1); a live
+        // group layer adds the second level (Phase 39.1: group entities with
+        // their own energy pool, reproduction and death). Levels are counted
+        // from live state, never unlocked by a flag.
+        selection_levels: crate::group::selection_levels(eco),
         tainter_slope: slope,
         niche_occupancy,
     }
