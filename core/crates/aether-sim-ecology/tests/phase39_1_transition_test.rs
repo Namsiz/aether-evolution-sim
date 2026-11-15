@@ -122,7 +122,7 @@ fn group_off_is_bit_exact_phase36_anchor() {
     // old Phase 36 values no longer apply because the brake fix shifts every
     // trajectory, group layer or not.
     assert_eq!(checksum_at(20261102, 300, false), "0x8e59843d4f009045");
-    assert_eq!(checksum_at(20261102, 3000, false), "0xa62405ff14bfbcad");
+    assert_eq!(checksum_at(20261102, 3000, false), "0xa3dd655b64f18333");
     assert_eq!(checksum_at(20261105, 300, false), "0x8f981cd0b42a58d7");
 
     // Same v1 anchor (the historical stream must not see the group hash).

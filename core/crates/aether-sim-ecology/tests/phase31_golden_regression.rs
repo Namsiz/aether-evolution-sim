@@ -7,11 +7,14 @@
 //! 1.0×max_energy at saturation (an absorbing zero-birth state → one-cohort
 //! ageing → extinction). `REPRO_THRESHOLD_MAX = 0.90` caps the brake.
 //!
-//! PHASE 40.1 ANCHORS (current):
+//! PHASE 40.2 ANCHORS (current, de-novo invention activates the culture
+//! layer between t=300 and t=3000 — the 300-tick anchors are unchanged):
 //!   seed 20261102 @300  v2 0xbbee72352ef4468d
-//!   seed 20261102 @3000 v2 0x00bd6cd1892d6c10
+//!   seed 20261102 @3000 v2 0x23aca66c0c68ba69
 //!   seed 20261105 @300  v2 0xfa11ea50ba7ef71a
 //!   seed 20261102 @300  v1 0xfb8827f6b1b34b5a
+//! PHASE 40.1 ANCHORS (previous):
+//!   seed 20261102 @3000 v2 0x00bd6cd1892d6c10
 //! PHASE 39.1 ANCHORS (previous, kept for the record):
 //!   seed 20261102 @300  v2 0x32c496b54efc9626
 //!   seed 20261102 @3000 v2 0xb900f6366f38cc47
@@ -78,9 +81,9 @@ fn golden_seed_20261102_300_ticks() {
 
 #[test]
 fn golden_seed_20261102_3000_ticks() {
-    // Phase 40.1 re-baseline (REPRO_THRESHOLD_MAX density-brake cap).
+    // Phase 40.2 re-baseline (culture layer activated by de-novo invention).
     let ck = checksum_at(20261102, 3000);
-    assert_eq!(ck, "0x00bd6cd1892d6c10",
+    assert_eq!(ck, "0x23aca66c0c68ba69",
         "3000-tick v2 long-run checksum drifted: {} — if this change is an approved re-baseline, pin the new value here and record it in the phase report", ck);
 }
 

@@ -1714,6 +1714,36 @@ impl Ecology {
         out[7] = (d / scale).clamp(0.0, 1.0);
     }
 
+    /// Phase 40.2: environment signature sampled at the agent's current cell,
+    /// used as the seed vector for de-novo token invention. All channels are
+    /// clamped to [-1, 1] so invented tokens live in the same space as
+    /// recombined ones.
+    ///
+    /// 0 grass · 1 plant suitability · 2 moisture · 3 x (normalised) ·
+    /// 4 z (normalised) · 5 energy fraction · 6 daylight · 7 hydration
+    pub fn sample_env_features(&self, a: &Agent) -> [f64; crate::culture::TOKEN_DIM] {
+        let ci = self.cell_index(a.x, a.z);
+        let (grass, suit, moist) = if ci >= 0 {
+            let gi = ci as usize;
+            (
+                if gi < self.grass.len() { self.grass[gi] as f64 } else { 0.0 },
+                if gi < self.suit.len() { self.suit[gi] as f64 } else { 0.0 },
+                if gi < self.moist.len() { self.moist[gi] as f64 } else { 0.0 },
+            )
+        } else { (0.0, 0.0, 0.0) };
+        let half = GRID_SPAN / 2.0;
+        [
+            (grass * 2.0 - 1.0).clamp(-1.0, 1.0),
+            (suit * 2.0 - 1.0).clamp(-1.0, 1.0),
+            (moist * 2.0 - 1.0).clamp(-1.0, 1.0),
+            (a.x / half).clamp(-1.0, 1.0),
+            (a.z / half).clamp(-1.0, 1.0),
+            ((a.energy / a.max_energy.max(1.0)) * 2.0 - 1.0).clamp(-1.0, 1.0),
+            (self.daylight * 2.0 - 1.0).clamp(-1.0, 1.0),
+            (a.hydration * 2.0 - 1.0).clamp(-1.0, 1.0),
+        ]
+    }
+
     /// Derive a deterministic 7-dim one-hot action index from an agent's FSM
     /// state / speed / repro readiness. Mirrors the high-level intent encoded
     /// in `update_*`: flee/hunt/eat/wander → move_forward, reproduce when
@@ -4407,12 +4437,28 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
 
             // Phase 37: cultural dynamics — only when CULTURE_ON is true.
             // Zero-RNG discipline: all draws use the dedicated culture_rng stream.
-            if self.culture_on && !self.token_registry.is_empty() {
+            // Phase 40.2: the gate no longer requires a non-empty registry —
+            // the de-novo invention path (try_invent_token) is the only legal
+            // source of the first token, so the loop must run from tick zero.
+            if self.culture_on {
                 // Collect living agent indices first to avoid borrow checker issues
                 let alive_indices: Vec<usize> = self.agents.iter().enumerate()
                     .filter(|(_, a)| a.alive)
                     .map(|(i, _)| i)
                     .collect();
+
+                // Phase 40.2: de-novo invention for token-less agents (the
+                // first-token pathway). Environment signature is sampled
+                // before the mutable borrow of the agent.
+                for &idx in &alive_indices {
+                    if !self.agents[idx].known_tokens.is_empty() { continue; }
+                    let env = self.sample_env_features(&self.agents[idx]);
+                    if culture::try_invent_token(
+                        &mut self.agents[idx], &mut self.token_registry, &env, &mut self.culture_rng,
+                    ).is_some() {
+                        self.culture_stats.innovation_count += 1;
+                    }
+                }
                 
                 // Try learning and innovation for each living agent with tokens
                 for &idx in &alive_indices {

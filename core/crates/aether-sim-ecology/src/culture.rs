@@ -491,3 +491,61 @@ pub fn check_cultural_extinction(
 pub fn count_token_holders(agents: &[Agent]) -> u64 {
     agents.iter().filter(|a| !a.known_tokens.is_empty() && a.alive).count() as u64
 }
+
+// ---------------------------------------------------------------------------
+// Phase 40.2: de-novo invention (the first-token pathway)
+// ---------------------------------------------------------------------------
+//
+// Phase 37 shipped `try_innovate_token`, which only RECOMBINES two known
+// tokens. With an empty registry there is no way to produce the first token —
+// a deadlock the 100k-tick observatory confirmed (zero inventions in 300k
+// simulated ticks). This adds the missing pathway: guided variation / trial
+// and error. An explorer (high `curious` gene) with spare energy occasionally
+// invents a token that encodes its current environment experience. It costs
+// twice a learned token (trial-and-error is dearer than imitation) and the
+// token vector is the environment signature plus small noise — so invented
+// knowledge is coupled to where it was invented, giving niche construction a
+// real gradient to work with. Zero preset semantics: the token means whatever
+// its vector's effect on the environment turns out to be.
+
+/// Per-agent per-tick probability of a de-novo invention attempt (before the
+/// energy / curiosity gates). Sized so a 400-agent world sees a handful of
+/// inventions per thousand ticks.
+pub const INVENT_P: f64 = 0.000005;
+/// Minimum energy fraction (of max) required to attempt invention.
+pub const INVENT_MIN_ENERGY_FRAC: f64 = 0.70;
+/// Minimum `curious` gene value for invention — explorers invent, settled
+/// individuals imitate.
+pub const INVENT_MIN_CURIOUS: f64 = 0.50;
+/// Invention costs this multiple of LEARNING_COST (trial-and-error premium).
+pub const INVENT_COST_MULT: f64 = 2.0;
+
+/// Agent 进行 de-novo 发明（个体试错 / 指导性变异）：从其当前环境体验
+/// 编码出一个新 token。这是首个 token 的唯一合法来源。
+/// 消耗专用 RNG 流；`env_features` 由调用方从 agent 位置采样。
+pub fn try_invent_token(
+    agent: &mut Agent,
+    registry: &mut CultureRegistry,
+    env_features: &[f64; TOKEN_DIM],
+    rng: &mut Mulberry32,
+) -> Option<u32> {
+    if !agent.alive { return None; }
+    if agent.genome.curious < INVENT_MIN_CURIOUS { return None; }
+    if agent.energy < agent.max_energy * INVENT_MIN_ENERGY_FRAC { return None; }
+    // Fixed per-attempt draw budget: one roll for the attempt, then (only on
+    // success) TOKEN_DIM draw for the noise.
+    if rng.next_f64() >= INVENT_P { return None; }
+    let cost = LEARNING_COST * INVENT_COST_MULT;
+    if agent.energy < cost { return None; }
+    agent.energy -= cost;
+    let mut vec = Vec::with_capacity(TOKEN_DIM);
+    for i in 0..TOKEN_DIM {
+        let v = env_features[i] + (rng.next_f64() * 2.0 - 1.0) * 0.05;
+        vec.push(v.clamp(-1.0, 1.0));
+    }
+    let id = registry.next_token_id;
+    registry.next_token_id += 1;
+    registry.register(KnowledgeToken::new(id, vec));
+    agent.known_tokens.push(id);
+    Some(id)
+}
