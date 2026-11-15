@@ -3245,6 +3245,15 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
     /// roll，命中后 +1 选格 +1 选祖先；健康世界（pop ≥ 门限）零扫描零 draw。
     fn try_abiogenesis(&mut self) {
         if !self.abiogenesis_on { return; }
+        // Phase 43.1: geologic cadence — abiogenesis is a rare-chemistry
+        // event, so the liveness pre-check runs on a 50-tick rhythm instead
+        // of every tick. The full-struct filter walks ~2 MB of agent state
+        // per call on the wasm viewer workload, which alone ate ~7 ms/frame;
+        // a 5-second (sim-time) sampling granularity costs nothing at this
+        // timescale (the check itself keeps the per-check probability
+        // compensated ×50 so the expected trigger rate is unchanged) and
+        // only ever shifts a trigger by ≤50 ticks.
+        if self.tick_count % 50 != 0 { return; }
         if self.agents.iter().filter(|a| a.alive).count() >= ABIO_MIN_POP { return; }
         let n = (self.grid_n * self.grid_n) as usize;
         let mut candidates: Vec<usize> = Vec::new();
@@ -3260,7 +3269,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             intensity_sum += 0.5 * mineral + 0.5 * (moist / 0.45).min(1.0);
         }
         if candidates.is_empty() { return; }
-        let p = ABIO_P_BASE * (intensity_sum / candidates.len() as f64);
+        let p = (ABIO_P_BASE * 50.0 * (intensity_sum / candidates.len() as f64)).min(1.0);
         if self.abio_rng.next_f64() >= p { return; }
         let cell = candidates[(self.abio_rng.next_f64() * candidates.len() as f64) as usize % candidates.len()];
         let gi = (cell % self.grid_n as usize) as f64;
@@ -3276,6 +3285,10 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         if ancestors.is_empty() { return; }
         let kind = ancestors[(self.abio_rng.next_f64() * ancestors.len() as f64) as usize % ancestors.len()];
         let spawned = self.spawn(kind, x, z, None, 0, 0.0).is_some();
+        if std::env::var("ABIO_DEBUG").is_ok() && !spawned {
+            eprintln!("[abio] spawn FAILED kind={} aquatic={} at ({:.0},{:.0}) terrain={:.2}", 
+                self.kind_name(kind), aquatic, x, z, terrain_height(x, z));
+        }
         if spawned {
             let idx = self.agents.len() - 1;
             self.ledger.chemo_in += self.agents[idx].energy;

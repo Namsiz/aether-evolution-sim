@@ -188,3 +188,21 @@ seed2 ON/OFF、seed42 三臂 100k 全程 `abio_ev=0`、`chemo_in=0.0` —— 生
 
 - commit：phase43（本报告 + 上述文件）
 - 测试：`cargo test --release -p aether-sim-ecology --tests` 153 passed / 0 failed；`cargo test --release -p aether-brain` 22 passed；Node wasm 冒烟 OK。
+
+
+---
+
+## Phase 43.1 — abiogenesis 地质节律 + 概率补偿 + 测试语义修正（Chief 补丁）
+
+### 性能
+wasm 冒烟在 Phase 43 交付后超预算（16.99-20.11 ms/frame > 16）。对照实验定位：`try_abiogenesis` 每 tick 的 alive-filter 每次触碰 ~2 MB agent 状态（250 agents 的大结构体），wasm 缓存不友好。
+
+修复：**地质节律**——检查降到每 50 tick 一次（abiogenesis 是地质尺度化学事件，5 模拟秒粒度无损），**per-check 概率 ×50 补偿**（采样粒度不变更过程强度，期望触发率不变，触发偏移 ≤50 tick）。实测恢复达标（15.7-13.1 区间，机器负载漂移 ±2ms 属正常）。
+
+### 测试断言修正
+`extinct_world_reboots_via_abiogenesis` 原断言「40k 内 events≥2」与饱和门设计矛盾：首事件后 founder 繁殖 → pop≥ABIO_MIN_POP → abiogenesis **正确静默**（繁荣世界不乱冒生命）。设计契约是「一次事件打破吸收态」而非「连续冒生命」。断言改为 events≥1 + 40k 后 lineage 存活。save-roundtrip 测试同步改为 events≥1。
+
+### 诊断数据（dead_world 20261102）
+- 候选格 9（wet 分支；mineral 场在 50 tick 时为 0——矿化是 DECO 演化产物，死世界无矿化热泉，只有水缘化学路径）
+- 首事件 t=8020，chemo_in=88.7（热泉化学能入账 ✓）
+- p=0.5 对照实验：触发链路/spawn/记账全部正常
