@@ -22,13 +22,16 @@ fn grass_spread_consistency_at_tick_40() {
     // JS oracle: node -e '...mix floor(eco.grass[i]*1000) after 40 ticks...' → 0x42ad7909a6ef600e
     // Phase 4-C rebase: DECO mineral deposits boost grass growth, shifting the
     // fingerprint (bit-exact golden waived for RS-only DECO dynamics).
+    // Phase 45 rebase: the fixed-seed regrowth-noise field multiplies per-cell
+    // growth from tick 1, so the t=40 fingerprint moves (pre-Phase-45 value:
+    // 7835318463236313578).
     let mut eco = Ecology::new(20261102);
     for t in 1..=40u32 {
         let daylight = 0.5 + 0.5 * aether_libm::sin((t as f64 / 300.0) * std::f64::consts::PI);
         eco.update(0.1, daylight);
     }
     assert_eq!(eco.tick_count(), 40, "tick_count must be exactly 40");
-    assert_eq!(grass_fingerprint(&eco), 7835318463236313578, "full-grid grass fingerprint at t=40 (post-spread, Phase 4-C: deco mineral boost shifts the field)");
+    assert_eq!(grass_fingerprint(&eco), 9711796204457772056, "full-grid grass fingerprint at t=40 (post-spread, Phase 45: regrowth-noise field)");
 }
 
 #[test]

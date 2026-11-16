@@ -1504,6 +1504,31 @@ pub struct Ecology {
     /// Phase 39.1: persistence trackers for cohesion candidates (same anchor
     /// + clade seen across consecutive scans). Bookkeeping only.
     pub(crate) group_pending: Vec<crate::group::CohesionTracker>,
+    /// Phase 45: patch disturbance toggle (default `PATCH_ON`).
+    pub patch_on: bool,
+    /// Phase 45: per-tick patch disturbance probability.
+    pub patch_p: f64,
+    /// Phase 45: dedicated patch stream (`seed ^ PATCH_RNG_TAG`).
+    pub patch_rng: Mulberry32,
+    /// Phase 45: cumulative patch events (telemetry).
+    pub patch_events: u64,
+    /// Phase 45: tick of the most recent patch event (telemetry).
+    pub patch_last_tick: u32,
+    /// Phase 45: world-x of the most recent patch center (telemetry).
+    pub patch_last_x: f64,
+    /// Phase 45: world-z of the most recent patch center (telemetry).
+    pub patch_last_z: f64,
+    /// Phase 45: static per-cell regrowth-noise multiplier (fixed-seed field,
+    /// identical across worlds/restores — a constant of the model).
+    pub regrow_noise: Vec<f32>,
+    /// Phase 45: per-kind clade-isolation telemetry (kind id → rolling
+    /// window). Pure observability — not persisted (same contract as
+    /// GroupStats); rebuilt from live clades after a restore.
+    pub isolation_by_kind: Vec<(u32, Vec<IsolationHistoryPoint>)>,
+    /// Phase 45: 文化价值选择开关（inherit/learn 按 use_gain 排序 + 保真度
+    /// 加成）。false = Phase 44.1 行为（插入序 + 基础保真度）——A/B 对照臂；
+    /// 价值 EMA 记账始终开启（零 RNG 零能量，不影响轨迹）。
+    pub culture_value_on: bool,
 }
 
 fn default_fidelity() -> f64 {
@@ -1657,6 +1682,16 @@ impl Ecology {
             group_rng: Mulberry32::new(seed ^ crate::group::GROUP_RNG_TAG),
             group_stats: crate::group::GroupStats::default(),
             group_pending: Vec::new(),
+            patch_on: crate::patch::PATCH_ON,
+            patch_p: crate::patch::PATCH_P,
+            patch_rng: Mulberry32::new(seed ^ crate::patch::PATCH_RNG_TAG),
+            patch_events: 0,
+            patch_last_tick: 0,
+            patch_last_x: 0.0,
+            patch_last_z: 0.0,
+            regrow_noise: crate::patch::generate_regrow_noise(),
+            isolation_by_kind: Vec::new(),
+            culture_value_on: true,
         };
         eco.init_grass();
         eco.seed_life();
@@ -1834,6 +1869,16 @@ impl Ecology {
             group_rng: Mulberry32::new(seed ^ crate::group::GROUP_RNG_TAG),
             group_stats: crate::group::GroupStats::default(),
             group_pending: Vec::new(),
+            patch_on: crate::patch::PATCH_ON,
+            patch_p: crate::patch::PATCH_P,
+            patch_rng: Mulberry32::new(seed ^ crate::patch::PATCH_RNG_TAG),
+            patch_events: 0,
+            patch_last_tick: 0,
+            patch_last_x: 0.0,
+            patch_last_z: 0.0,
+            regrow_noise: crate::patch::generate_regrow_noise(),
+            isolation_by_kind: Vec::new(),
+            culture_value_on: true,
         };
         eco.init_grass();
         eco.seed_life();
@@ -2472,8 +2517,18 @@ impl Ecology {
     /// (pre-first-detection sentinel 0) also fall back.
     pub fn clade_kind(&self, clade_id: u32, fallback: SpeciesKind) -> SpeciesKind {
         if let Some(c) = self.species_clades.iter().find(|c| c.id == clade_id) {
-            if let Some(dk) = c.derived_kind { return dk as SpeciesKind; }
-            if c.kind_id != u32::MAX { return c.kind_id as SpeciesKind; }
+            // Phase 45 fix: id 0 doubles as the "unassigned" sentinel, so an
+            // agent of another family that still carries 0 must NOT resolve
+            // through a materialized clade 0 (e.g. a DECO root): without the
+            // family check, every unassigned HERB/OMN/… birth inherited the
+            // DECO kind and died on the DECO cap — the first natural split
+            // silently froze all other kinds' reproduction.
+            let family_ok = c.kind_id != u32::MAX
+                && self.root_kind(c.kind_id as SpeciesKind) == self.root_kind(fallback);
+            if let Some(dk) = c.derived_kind {
+                if family_ok { return dk as SpeciesKind; }
+            }
+            if family_ok { return c.kind_id as SpeciesKind; }
         }
         fallback
     }
@@ -3856,10 +3911,12 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                     let mut child_tokens = std::mem::take(&mut self.agents[child_idx].known_tokens);
                     crate::culture::inherit_at_birth(
                         &mut child_tokens, &parent_tokens, &mut parent_energy,
+                        &self.token_registry, self.culture_value_on,
                         &mut self.culture_rng, &mut self.culture_stats,
                     );
                     crate::culture::inherit_at_birth(
                         &mut child_tokens, &mate_tokens, &mut mate_energy,
+                        &self.token_registry, self.culture_value_on,
                         &mut self.culture_rng, &mut self.culture_stats,
                     );
                     self.agents[child_idx].known_tokens = child_tokens;
@@ -3925,6 +3982,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                     let mut child_tokens = std::mem::take(&mut self.agents[child_idx].known_tokens);
                     crate::culture::inherit_at_birth(
                         &mut child_tokens, &parent_tokens, &mut parent_energy,
+                        &self.token_registry, self.culture_value_on,
                         &mut self.culture_rng, &mut self.culture_stats,
                     );
                     self.agents[child_idx].known_tokens = child_tokens;
@@ -5075,6 +5133,10 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             // Phase 17: per-substep cataclysm countdown (pure bookkeeping,
             // zero RNG).
             self.tick_cataclysms();
+            // Phase 45: patch disturbance roll (dedicated PATCH stream; zero
+            // draw when patch_on is false, so the A/B arm keeps the exact
+            // pre-Phase-45 trajectory).
+            self.tick_patch();
 
             self.season = ((self.time / 1800.0) as i32) % 4;
             let season_grass = [1.3f64, 0.6, 0.8, 0.25][self.season as usize];
@@ -5106,7 +5168,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 if total >= 1.0 { continue; }
                 let shade_f = 1.0 - self.shade[i] as f64 * 0.55;
                 let cell_grow = grow * (1.0 + self.mineral_field[i] as f64 * GROWTH_BONUS_PER_MINERAL)
-                    * fert_mult;
+                    * fert_mult * self.regrow_noise[i] as f64;
                 for sp in 0..pn {
                     let b = self.grass_p[sp][i] as f64;
                     let nb = b + self.suit_eff_by[sp][i] as f64 * cell_grow * rmax_eff(&self.plants[sp]) * (1.0 - total) * (0.42 + b) * shade_f * h;
@@ -5230,7 +5292,23 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                             let demoiser_idx = self.nearest(idx, self.agents[idx].kind, self.agents[idx].genome.sense, Some(|b: &Agent| !b.known_tokens.is_empty()))
                                 .map(|(j, _)| j)
                                 .unwrap_or_else(|| (self.agents[idx].id as usize + 1) % agent_len);
-                            let target_tid = self.agents[demoiser_idx].known_tokens.first().copied();
+                            let target_tid = {
+                                let dt = &self.agents[demoiser_idx].known_tokens;
+                                // Phase 45: value-sorted learning — the learner
+                                // targets the demoiser's highest-value token
+                                // (ties → earliest in the demoiser's list).
+                                if self.culture_value_on && dt.len() > 1 {
+                                    let mut best_i = 0usize;
+                                    for i in 1..dt.len() {
+                                        let vb = self.token_registry.value_of(dt[i]);
+                                        let va = self.token_registry.value_of(dt[best_i]);
+                                        if vb > va { best_i = i; }
+                                    }
+                                    Some(dt[best_i])
+                                } else {
+                                    dt.first().copied()
+                                }
+                            };
                             if let Some(tid) = target_tid {
                                 if !self.agents[idx].known_tokens.contains(&tid) {
                                     // Use split_at_mut to safely access both agents
@@ -5267,12 +5345,20 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                                 if culture::try_place_structure(&mut self.agents[idx], &mut self.structure_registry, first_token, x, z) {
                                     self.culture_stats.structure_place_count += 1;
                                     // Apply immediate environmental effect
-                                    self.agents[idx].energy += grass_mod * 10.0; // benefit feedback
+                                    let gain = grass_mod * 10.0;
+                                    self.agents[idx].energy += gain; // benefit feedback
+                                    // Phase 45: the same feedback credits the
+                                    // token's use_gain EMA (emergent value —
+                                    // pure bookkeeping, zero extra RNG).
+                                    self.token_registry.record_use(first_token, gain);
                                 }
                             }
                         }
                     }
                 }
+                // Phase 45: uncredited knowledge fades (value EMA decay,
+                // zero RNG, zero energy).
+                self.token_registry.decay_use_gains();
                 // Decay structures over time
                 culture::decay_structures(&mut self.structure_registry, culture::STRUCTURE_DECAY);
             }
@@ -5578,6 +5664,67 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                     if self.isolation_history.len() > 200 { self.isolation_history.remove(0); }
                 }
             }
+        }
+
+        // Phase 45: per-kind clade-isolation telemetry — the generalized
+        // successor of the HERB-only lineage scan above (task 1.2). For every
+        // kind with two or more living clades, the mean cross-clade trait
+        // distance is the isolation signal around speciation events. Pure
+        // bookkeeping (zero RNG), 600-tick cadence to keep the wasm frame
+        // budget; the cross-clade pair scan is skipped while a kind holds a
+        // single clade (the steady-state world pays nothing here).
+        if self.tick_count % 600 == 0 {
+            for k in 0..self.kinds.len() {
+                let kind = k as SpeciesKind;
+                let mut groups: Vec<(u32, Vec<usize>)> = Vec::new();
+                for (j, a) in self.agents.iter().enumerate() {
+                    if !a.alive || a.kind != kind { continue; }
+                    match groups.iter_mut().find(|(cid, _)| *cid == a.clade_id) {
+                        Some((_, m)) => m.push(j),
+                        None => groups.push((a.clade_id, vec![j])),
+                    }
+                }
+                if groups.len() < 2 { continue; }
+                let mut sum = 0.0f64;
+                let mut pairs = 0usize;
+                for gi in 0..groups.len() {
+                    for gj in (gi + 1)..groups.len() {
+                        for &ai in &groups[gi].1 {
+                            for &bi in &groups[gj].1 {
+                                sum += self.pair_trait_distance(ai, bi);
+                                pairs += 1;
+                            }
+                        }
+                    }
+                }
+                if pairs == 0 { continue; }
+                let pos = self.isolation_by_kind.iter().position(|(kid, _)| *kid == k as u32);
+                let entry = match pos {
+                    Some(p) => &mut self.isolation_by_kind[p].1,
+                    None => {
+                        self.isolation_by_kind.push((k as u32, Vec::new()));
+                        let n = self.isolation_by_kind.len();
+                        &mut self.isolation_by_kind[n - 1].1
+                    }
+                };
+                entry.push(IsolationHistoryPoint { t: self.time, dist: (sum / pairs as f64 * 10000.0).round() / 10000.0, pairs });
+                if entry.len() > 200 { entry.remove(0); }
+            }
+
+            // Phase 45: value-weighted bearer telemetry (task 2.3).
+            // Σ_alive Σ_token max(0, use_gain): raw bearer counts weight all
+            // knowledge equally; this weights held knowledge by its measured
+            // energy yield, so the bottleneck report can watch whether the
+            // ratchet concentrates VALUABLE knowledge.
+            let mut vwb = 0.0f64;
+            for a in self.agents.iter() {
+                if !a.alive || a.known_tokens.is_empty() { continue; }
+                for &tid in &a.known_tokens {
+                    let v = self.token_registry.value_of(tid);
+                    if v > 0.0 { vwb += v; }
+                }
+            }
+            self.culture_stats.value_weighted_bearers = vwb;
         }
 
         let herb_count = self.count(HERB);
@@ -6934,7 +7081,7 @@ impl Ecology {
             TriuneUpkeepOn: self.triune_upkeep_on,
             // Phase 37: culture layer serialization.
             TokenRegistry: self.token_registry.tokens.iter().map(|t| {
-                save_state::SaveToken { id: t.id, vec: t.vec.clone() }
+                save_state::SaveToken { id: t.id, vec: t.vec.clone(), use_gain: t.use_gain }
             }).collect(),
             StructureRegistry: self.structure_registry.structures.iter().map(|s| {
                 save_state::SaveStructure {
@@ -6957,6 +7104,7 @@ impl Ecology {
                 token_holder_count: self.culture_stats.token_holder_count,
                 taught_count: self.culture_stats.taught_count,
                 teach_cost_total: self.culture_stats.teach_cost_total,
+                value_weighted_bearers: self.culture_stats.value_weighted_bearers,
             },
             // Phase 43: cultural ratchet + abiogenesis state.
             TeachOn: self.teach_on,
@@ -6964,6 +7112,13 @@ impl Ecology {
             AbioRngState: self.abio_rng.state(),
             AbiogenesisEvents: self.abiogenesis_events,
             AbiogenesisTicks: self.abiogenesis_ticks,
+            // Phase 45: patch disturbance + cultural value selection.
+            PatchOn: self.patch_on,
+            PatchP: self.patch_p,
+            PatchRngState: self.patch_rng.state(),
+            PatchEvents: self.patch_events,
+            PatchLastTick: self.patch_last_tick,
+            CultureValueOn: self.culture_value_on,
             // Phase 39.1: group layer. `founder_genome` is serialized in full —
             // it is the propagation bottleneck, so it must survive the hop for
             // a restored sim to keep breeding from the same single genome.
@@ -7564,8 +7719,11 @@ impl Ecology {
             token_registry: {
                 let mut reg = crate::culture::CultureRegistry::new();
                 for st in state.TokenRegistry {
-                    reg.register(crate::culture::KnowledgeToken::new(st.id, st.vec));
+                    let mut tk = crate::culture::KnowledgeToken::new(st.id, st.vec);
+                    tk.use_gain = st.use_gain;
+                    reg.register(tk);
                 }
+                reg.rebuild_value_cache();
                 reg
             },
             structure_registry: {
@@ -7596,6 +7754,7 @@ impl Ecology {
                 token_holder_count: state.CultureStats.token_holder_count,
                 taught_count: state.CultureStats.taught_count,
                 teach_cost_total: state.CultureStats.teach_cost_total,
+                value_weighted_bearers: state.CultureStats.value_weighted_bearers,
             },
             // Phase 43: cultural ratchet + abiogenesis. Pre-v14 archives carry
             // no fields → toggles ON (default world config), counters zeroed,
@@ -7609,6 +7768,24 @@ impl Ecology {
             },
             abiogenesis_events: state.AbiogenesisEvents,
             abiogenesis_ticks: state.AbiogenesisTicks,
+            // Phase 45: patch disturbance + cultural value selection.
+            // Pre-v15 archives carry no fields → patches ON at the current
+            // calibration, stream re-derived from seed ^ PATCH_RNG_TAG,
+            // value selection ON, zero counters.
+            patch_on: state.PatchOn,
+            patch_p: state.PatchP,
+            patch_rng: if state.PatchRngState != 0 {
+                Mulberry32::from_state(state.PatchRngState)
+            } else {
+                Mulberry32::new(state.seed ^ crate::patch::PATCH_RNG_TAG)
+            },
+            patch_events: state.PatchEvents,
+            patch_last_tick: state.PatchLastTick,
+            patch_last_x: 0.0,
+            patch_last_z: 0.0,
+            regrow_noise: crate::patch::generate_regrow_noise(),
+            isolation_by_kind: Vec::new(),
+            culture_value_on: state.CultureValueOn,
             culture_fidelity: state.CultureFidelity,
             culture_bias_channel: state.CultureBiasChannel,
             // Phase 39.1: group layer. Pre-v11 archives carry no groups →

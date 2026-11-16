@@ -47,17 +47,31 @@ pub const STRUCTURE_RADIUS: f64 = 3.0;
 /// 结构影响强度（token 向量 → 局部场调制）。
 pub const STRUCTURE_MOD_STRENGTH: f64 = 0.05;
 
+/// Phase 45: token 价值 EMA 的新样本权重（记录一次结构放置能量反馈）。
+pub const USE_GAIN_ALPHA: f64 = 0.01;
+/// Phase 45: 无新样本时 token 价值的每 tick 衰减（0.999^1000 ≈ 0.37：
+/// 停止产出价值的知识在千 tick 尺度淡出）。
+pub const USE_GAIN_DECAY: f64 = 0.999;
+/// Phase 45: 高价值（use_gain > 0）token 的传承保真度加成——好知识
+/// 传得更准（涌现度量，价值完全来自能量学反馈，无预设语义）。
+pub const VALUE_FIDELITY_BONUS: f64 = 0.05;
+
 /// 知识 Token（开放向量编码，维度固定 ~8，无预设语义）。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct KnowledgeToken {
     pub id: u32,
     pub vec: Vec<f64>,
+    /// Phase 45: 涌现价值 EMA——持有者通过该 token 的结构放置获得的能量
+    /// 反馈的加权平均。纯观测记账：不消耗 RNG、不改能量路径，但
+    /// inherit_at_birth/try_learn_token 的候选排序读它（文化选择）。
+    #[serde(default)]
+    pub use_gain: f64,
 }
 
 impl KnowledgeToken {
     pub fn new(id: u32, vec: Vec<f64>) -> Self {
         assert!(vec.len() == TOKEN_DIM, "token vector must have fixed dim {}", TOKEN_DIM);
-        KnowledgeToken { id, vec }
+        KnowledgeToken { id, vec, use_gain: 0.0 }
     }
 
     /// 生成随机初始 token（用于"发明"——de-novo 新 token）。
@@ -93,11 +107,17 @@ impl KnowledgeToken {
 pub struct CultureRegistry {
     pub tokens: Vec<KnowledgeToken>,
     pub next_token_id: u32,
+    /// Phase 45: id 索引的价值 EMA 镜像（O(1) 查值）。热路径每 tick 需要
+    /// 几十次查值（学习目标选择/传承排序），线性扫 registry 在兆 tick
+    /// token 量下会撑爆帧预算；镜像非持久化（serde skip），从 tokens
+    /// 重建。不占 SaveState 空间。
+    #[serde(skip)]
+    value_cache: Vec<f64>,
 }
 
 impl CultureRegistry {
     pub fn new() -> Self {
-        CultureRegistry { tokens: Vec::new(), next_token_id: 1 }
+        CultureRegistry { tokens: Vec::new(), next_token_id: 1, value_cache: Vec::new() }
     }
 
     pub fn len(&self) -> usize { self.tokens.len() }
@@ -107,6 +127,9 @@ impl CultureRegistry {
     /// 注册新 token，返回其 id。
     pub fn register(&mut self, token: KnowledgeToken) -> u32 {
         let id = token.id;
+        let i = id as usize;
+        if self.value_cache.len() <= i { self.value_cache.resize(i + 1, 0.0); }
+        self.value_cache[i] = token.use_gain;
         self.tokens.push(token);
         self.next_token_id = self.next_token_id.max(id + 1);
         id
@@ -115,6 +138,53 @@ impl CultureRegistry {
     /// 获取指定 id 的 token。
     pub fn get(&self, id: u32) -> Option<&KnowledgeToken> {
         self.tokens.iter().find(|t| t.id == id)
+    }
+
+    /// 从 token 列表重建镜像（反序列化/恢复路径）。
+    pub fn rebuild_value_cache(&mut self) {
+        self.value_cache.clear();
+        self.value_cache.resize(self.next_token_id as usize, 0.0);
+        for t in &self.tokens {
+            let i = t.id as usize;
+            if i < self.value_cache.len() { self.value_cache[i] = t.use_gain; }
+        }
+    }
+
+    /// Phase 45: 涌现价值查询（id → value EMA；未知 token 得 0）。O(1)。
+    pub fn value_of(&self, id: u32) -> f64 {
+        self.value_cache.get(id as usize).copied().unwrap_or(0.0)
+    }
+
+    /// Phase 45: 记录一次能量反馈到 token 的价值 EMA（结构放置路径）。
+    pub fn record_use(&mut self, id: u32, gain: f64) {
+        if let Some(t) = self.tokens.iter_mut().find(|t| t.id == id) {
+            t.use_gain += USE_GAIN_ALPHA * (gain - t.use_gain);
+            let i = id as usize;
+            if i < self.value_cache.len() { self.value_cache[i] = t.use_gain; }
+        }
+    }
+
+    /// Phase 45: 每 tick 全注册表价值衰减（无新样本的知识淡出）。
+    /// 纯乘法、零 RNG——O(tokens) 每 tick，兆 tick 下 tokens ~7k 仍可忽略。
+    pub fn decay_use_gains(&mut self) {
+        for t in &mut self.tokens {
+            t.use_gain *= USE_GAIN_DECAY;
+        }
+        for v in &mut self.value_cache {
+            *v *= USE_GAIN_DECAY;
+        }
+    }
+
+    /// Phase 45: 传承/学习候选的价值排序：价值降序，同价值按 id 升序
+    /// （确定性，与注册表顺序无关）。
+    pub fn sorted_by_value(ids: &[u32], registry: &Self) -> Vec<u32> {
+        let mut out = ids.to_vec();
+        out.sort_by(|&a, &b| {
+            let va = registry.value_of(a);
+            let vb = registry.value_of(b);
+            vb.partial_cmp(&va).unwrap_or(std::cmp::Ordering::Equal).then(a.cmp(&b))
+        });
+        out
     }
 
     /// 重组+变异创新算子：两个已知 token → 重组向量产生新 token。
@@ -248,6 +318,9 @@ pub struct CultureStats {
     pub taught_count: u64,
     /// Phase 43: 教学总成本（亲代支付的 TEACH_COST 累计）。
     pub teach_cost_total: f64,
+    /// Phase 45: 价值加权持有者数——Σ_alive Σ_token max(0, use_gain)。
+    /// 文化健康的涌现度量：知识总量相同下，价值权重越高文化越「有效」。
+    pub value_weighted_bearers: f64,
 }
 
 /// 三通道偏见枚举。
@@ -585,19 +658,38 @@ pub fn try_invent_token(
 /// 已被孩子从另一位教师处习得 → 跳过（零 RNG，不重复付费）；
 /// 否则 culture_rng 一次保真度 roll，成功则支付 TEACH_COST 并完整传承。
 /// 返回本次传承的 token 数。
+///
+/// Phase 45 文化瓶颈：`value_on` 为 true 时候选按涌现价值降序排列
+/// （高价值优先传承；同价值按 id 升序，确定性），且 use_gain > 0 的
+/// token 传承保真度 +VALUE_FIDELITY_BONUS（上限 1.0）——好知识传得更早
+/// 更准。教学成本不变；价值完全来自能量学的涌现反馈。
 pub fn inherit_at_birth(
     child_tokens: &mut Vec<u32>,
     teacher_tokens: &[u32],
     teacher_energy: &mut f64,
+    registry: &CultureRegistry,
+    value_on: bool,
     rng: &mut Mulberry32,
     stats: &mut CultureStats,
 ) -> u64 {
     if teacher_tokens.is_empty() { return 0; }
+    let order: Vec<u32> = if value_on {
+        CultureRegistry::sorted_by_value(teacher_tokens, registry)
+    } else {
+        teacher_tokens.to_vec()
+    };
     let mut taught = 0u64;
-    for &tid in teacher_tokens {
+    for &tid in &order {
         if *teacher_energy < TEACH_COST { break; }
         if child_tokens.contains(&tid) { continue; }
-        if rng.next_f64() >= DEFAULT_FIDELITY { continue; }
+        let fidelity = if value_on {
+            (DEFAULT_FIDELITY
+                + (registry.value_of(tid) > 0.0) as u8 as f64 * VALUE_FIDELITY_BONUS)
+                .min(1.0)
+        } else {
+            DEFAULT_FIDELITY
+        };
+        if rng.next_f64() >= fidelity { continue; }
         *teacher_energy -= TEACH_COST;
         child_tokens.push(tid);
         taught += 1;

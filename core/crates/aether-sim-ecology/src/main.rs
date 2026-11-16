@@ -19,6 +19,7 @@ mod save_state;
 mod terrain;
 mod niche; // Phase 16: clade niche axis + competitive exclusion
 mod cataclysm; // Phase 17: cataclysms + recovery dynamics
+mod patch; // Phase 45: patch disturbance + resource heterogeneity
 mod geology; // Phase 18: plate tectonics + eustatic sea level
 mod biochemistry; // Phase 18: fast/slow nutrient pools + fertility feedback
 mod culture; // Phase 37: knowledge tokens + niche construction

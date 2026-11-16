@@ -17,10 +17,18 @@
 //!   seed 20261105 @300  v2 0x2e9539930abd8975
 //!   seed 20261102 @300  v1 0xe6404a7bee633eb8
 //!   (shadow-only @300 for the A/B arm: v2 0xf31c4501f764be29)
-//! PHASE 43 ANCHORS (current; **ninth re-baseline** — the cultural ratchet:
-//! birth-time token inheritance. @300 is UNCHANGED from Phase 42 — no de-novo
-//! invention has fired by tick 300, so teaching is a bit-exact no-op there;
-//! only the @3000 long-run anchor moves, where inventions already exist and
+//! PHASE 45 ANCHORS (current; **tenth re-baseline** — patch disturbance +
+//! static regrowth-noise heterogeneity + cultural value selection. All four
+//! anchors move: the fixed-seed noise field changes grass growth from tick 1,
+//! and the patch layer fires within the @3000 window on these seeds).
+//!   seed 20261102 @300  v2 0xa68939c089f4207f
+//!   seed 20261102 @3000 v2 0xda91fbd0e1d3d570
+//!   seed 20261105 @300  v2 0x009ddda639c5c149
+//!   seed 20261102 @300  v1 0xa774fb2033268005
+//! PHASE 43 ANCHORS (previous; **ninth re-baseline** — the cultural ratchet:
+//! birth-time token inheritance. @300 was UNCHANGED from Phase 42 — no de-novo
+//! invention had fired by tick 300, so teaching was a bit-exact no-op there;
+//! only the @3000 long-run anchor moved, where inventions already exist and
 //! children now inherit them).
 //!   seed 20261102 @300  v2 0xdc98f7d34a7af777  (= Phase 42)
 //!   seed 20261102 @3000 v2 0x9af70d3dc96532f2
@@ -99,25 +107,26 @@ fn checksum_at(seed: u32, ticks: u32) -> String {
 
 #[test]
 fn golden_seed_20261102_300_ticks() {
-    // Phase 42 re-baseline (triune behaviour authority + replay).
+    // Phase 45 re-baseline (patch disturbance + regrowth-noise field + value selection).
     let ck = checksum_at(20261102, 300);
-    assert_eq!(ck, "0xdc98f7d34a7af777",
-        "300-tick v2 checksum drifted: {} — see file docs + Phase 40.1 report", ck);
+    assert_eq!(ck, "0xa68939c089f4207f",
+        "300-tick v2 checksum drifted: {} — see file docs + Phase 45 report", ck);
 }
 
 #[test]
 fn golden_seed_20261102_3000_ticks() {
-    // Phase 43 re-baseline (cultural ratchet — children inherit parent tokens).
+    // Phase 45 re-baseline (patch events fire inside this window; the noise
+    // field shifts grass growth from tick 1).
     let ck = checksum_at(20261102, 3000);
-    assert_eq!(ck, "0x9af70d3dc96532f2",
+    assert_eq!(ck, "0xda91fbd0e1d3d570",
         "3000-tick v2 long-run checksum drifted: {} — if this change is an approved re-baseline, pin the new value here and record it in the phase report", ck);
 }
 
 #[test]
 fn golden_seed_20261105_300_ticks() {
-    // Phase 42 re-baseline (triune behaviour authority + replay).
+    // Phase 45 re-baseline.
     let ck = checksum_at(20261105, 300);
-    assert_eq!(ck, "0x2e9539930abd8975",
+    assert_eq!(ck, "0x009ddda639c5c149",
         "alt-seed v2 checksum drifted: {} — if this change is an approved re-baseline, pin the new value here and record it in the phase report", ck);
 }
 
@@ -127,8 +136,8 @@ fn golden_seed_20261105_300_ticks() {
 fn golden_300_tick_trajectory_bit_exact_to_v1() {
     let mut eco = Ecology::new(20261102);
     for t in 1..=300 { eco.update(0.1, daylight(t)); }
-    assert_eq!(eco.checksum_v1(), "0xe6404a7bee633eb8",
-        "the 300-tick v1 trajectory must stay at the pinned Phase 42 anchor");
+    assert_eq!(eco.checksum_v1(), "0xa774fb2033268005",
+        "the 300-tick v1 trajectory must stay at the pinned Phase 45 anchor");
 }
 
 /// Determinism guard: same seed + same ticks must be bit-identical across

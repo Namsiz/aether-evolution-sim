@@ -48,7 +48,7 @@ fn ext_by_id(eco: &Ecology) -> Vec<(u32, Vec<Locus>)> {
 /// operator never fires — zero ext slots, zero duplication events, and the
 /// 300-tick checksum is still the pinned golden anchor. Phase 34: `checksum()`
 /// is the v2 primary; the 300-tick trajectory is bit-exact so the anchor is
-/// the current Phase 42 v2 value (historical values are recorded in
+/// the current Phase 45 v2 value (historical values are recorded in
 /// phase31_golden_regression).
 #[test]
 fn genesis_off_is_bit_exact_noop() {
@@ -58,9 +58,10 @@ fn genesis_off_is_bit_exact_noop() {
     assert!(eco.genesis_on == false);
     assert_eq!(eco.ext_dup_events, 0, "genesis off must never fire a dup event");
     assert_eq!(eco.ext_total_loci(), 0, "genesis off must keep ext empty");
-    // The pinned golden anchor is the Phase 42 v2 primary (group layer ON by
-    // default); the trajectory shifted from Phase 34 → 36 → 39.1 → ... → 42.
-    assert_eq!(eco.checksum(), "0xdc98f7d34a7af777");
+    // The pinned golden anchor is the Phase 45 v2 primary (patch layer +
+    // regrowth-noise field + value selection on); the trajectory shifted from
+    // Phase 34 → 36 → 39.1 → 42 → 43 → 45.
+    assert_eq!(eco.checksum(), "0xa68939c089f4207f");
 }
 
 /// Acceptance #3: determinism under genesis ON. Two fresh instances with the

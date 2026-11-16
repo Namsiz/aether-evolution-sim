@@ -24,7 +24,7 @@
 //!      counts after the original holders have all died.
 
 use aether_rng::Mulberry32;
-use aether_sim_ecology::culture::{self, CultureStats, KnowledgeToken, TOKEN_DIM};
+use aether_sim_ecology::culture::{self, CultureRegistry, CultureStats, KnowledgeToken, TOKEN_DIM};
 use aether_sim_ecology::ecology::{Ecology, HERB};
 
 fn daylight(t: u32) -> f64 {
@@ -59,6 +59,9 @@ fn holds_curriculum(a: &aether_sim_ecology::ecology::Agent) -> bool {
 #[test]
 fn inherit_at_birth_paid_ordered_zero_rng_poverty() {
     let teacher: Vec<u32> = vec![11, 22, 33];
+    // Phase 45: these unit tests pin the ORDER-PRESERVING (A/B control) arm —
+    // an empty registry + value_on=false reproduces the pre-Phase-45 path.
+    let reg = CultureRegistry::new();
 
     // Poverty break: cannot afford the first lesson → teaches nothing and
     // consumes ZERO draws (rng state unchanged).
@@ -67,7 +70,7 @@ fn inherit_at_birth_paid_ordered_zero_rng_poverty() {
     let mut stats = CultureStats::default();
     let mut child = Vec::new();
     let mut energy = 0.1;
-    let taught = culture::inherit_at_birth(&mut child, &teacher, &mut energy, &mut rng, &mut stats);
+    let taught = culture::inherit_at_birth(&mut child, &teacher, &mut energy, &reg, false, &mut rng, &mut stats);
     assert_eq!(taught, 0);
     assert!(child.is_empty());
     assert_eq!(energy, 0.1);
@@ -82,7 +85,7 @@ fn inherit_at_birth_paid_ordered_zero_rng_poverty() {
     let mut stats = CultureStats::default();
     let mut child = Vec::new();
     let mut energy = 10.0;
-    let taught = culture::inherit_at_birth(&mut child, &teacher, &mut energy, &mut rng, &mut stats);
+    let taught = culture::inherit_at_birth(&mut child, &teacher, &mut energy, &reg, false, &mut rng, &mut stats);
     assert!(taught >= 1, "seeded run must transmit at least one token");
     assert!(taught <= teacher.len() as u64);
     assert_eq!(energy, 10.0 - culture::TEACH_COST * taught as f64);
@@ -94,7 +97,7 @@ fn inherit_at_birth_paid_ordered_zero_rng_poverty() {
     let mut stats2 = CultureStats::default();
     let mut child2 = Vec::new();
     let mut energy2 = 10.0;
-    let taught2 = culture::inherit_at_birth(&mut child2, &teacher, &mut energy2, &mut rng2, &mut stats2);
+    let taught2 = culture::inherit_at_birth(&mut child2, &teacher, &mut energy2, &reg, false, &mut rng2, &mut stats2);
     assert_eq!(taught, taught2);
     assert_eq!(child, child2);
 }
@@ -212,12 +215,13 @@ fn poor_parent_teaches_less() {
     // curriculum with energy for only ~10 lessons transmits strictly less
     // than the full list, in known_tokens order, with the exact fee math.
     let teacher: Vec<u32> = (TOKEN_LO..TOKEN_LO + 400).collect();
+    let reg = CultureRegistry::new();
     let budget = 2.5; // affords ⌊2.5 / 0.25⌋ = 10 lessons
     let mut child: Vec<u32> = Vec::new();
     let mut energy = budget;
     let mut stats = CultureStats::default();
     let mut rng = Mulberry32::new(99);
-    let taught = culture::inherit_at_birth(&mut child, &teacher, &mut energy, &mut rng, &mut stats);
+    let taught = culture::inherit_at_birth(&mut child, &teacher, &mut energy, &reg, false, &mut rng, &mut stats);
     let affordable = (budget / culture::TEACH_COST).floor() as u64;
     assert!(taught <= affordable, "poverty cap violated: {} > {}", taught, affordable);
     assert!(taught < teacher.len() as u64, "curriculum must be truncated by poverty");

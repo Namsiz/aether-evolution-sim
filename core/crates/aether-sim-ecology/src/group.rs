@@ -807,6 +807,7 @@ fn reproduce_group(
                 let mut child_tokens = std::mem::take(&mut eco.agents[child_idx].known_tokens);
                 crate::culture::inherit_at_birth(
                     &mut child_tokens, &founder_tokens, &mut founder_energy,
+                    &eco.token_registry, eco.culture_value_on,
                     &mut eco.culture_rng, &mut eco.culture_stats,
                 );
                 eco.agents[child_idx].known_tokens = child_tokens;

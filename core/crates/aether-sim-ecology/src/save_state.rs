@@ -82,11 +82,23 @@
 /// counters. All are `#[serde(default)]`/`default_true` → a v13 archive
 /// restores with inheritance ON, abiogenesis ON, zero events and an abiogenesis
 /// stream re-derived from `seed ^ ABIO_RNG_TAG`, and continues bit-exactly.
+/// v14 → v15 (Phase 45): patch disturbance + cultural value selection. The
+/// sim level gains `PatchOn` / `PatchP` (toggle + per-tick probability), the
+/// `PatchRngState` dedicated-stream snapshot and the `PatchEvents` /
+/// `PatchLastTick` counters, plus the `CultureValueOn` toggle. Each token
+/// gains `UseGain` (the emergent value EMA; `#[serde(default)]` → pre-v15
+/// tokens restore at zero value) and `SaveCultureStats` gains
+/// `ValueWeightedBearers`. All are `#[serde(default)]`/`default_true` → a v14
+/// archive restores with patches ON, patch stream re-derived from
+/// `seed ^ PATCH_RNG_TAG`, value selection ON and zero-valued tokens, and
+/// continues from its own state. The static regrowth-noise field is NOT
+/// persisted: it is a fixed-seed constant of the model and is re-derived
+/// identically on every construction/restore.
 
 use serde::{Deserialize, Serialize};
 
 
-pub const SAVE_STATE_VERSION: u32 = 14;
+pub const SAVE_STATE_VERSION: u32 = 15;
 pub const SAVE_STATE_SCHEMA_NAME: &str = "aether-sim-save-state";
 
 /// DECO selection-pressure mode selector (persisted in SaveState v2).
@@ -570,6 +582,10 @@ pub struct SaveSelectionPressure {
 pub struct SaveToken {
     pub id: u32,
     pub vec: Vec<f64>,
+    /// Phase 45: emergent value EMA (use_gain). `#[serde(default)]` →
+    /// pre-v15 tokens restore at zero value (no measured utility yet).
+    #[serde(default)]
+    pub use_gain: f64,
 }
 
 /// Phase 37: one serialized structure (mirrors `culture::Structure`).
@@ -603,6 +619,10 @@ pub struct SaveCultureStats {
     pub taught_count: u64,
     #[serde(default)]
     pub teach_cost_total: f64,
+    /// Phase 45: value-weighted bearer telemetry (Σ max(0, use_gain) over
+    /// held tokens). `#[serde(default)]` → pre-v15 saves restore at zero.
+    #[serde(default)]
+    pub value_weighted_bearers: f64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -899,6 +919,31 @@ pub struct SaveState {
     /// Phase 43: tick of the most recent abiogenesis event.
     #[serde(default)]
     pub AbiogenesisTicks: u32,
+    /// Phase 45: patch disturbance toggle. `#[serde(default = "default_true")]`
+    /// → pre-v15 saves land on patches ON (the Phase-45 default world).
+    #[serde(default = "default_true")]
+    pub PatchOn: bool,
+    /// Phase 45: per-tick patch probability. `#[serde(default =
+    /// "default_patch_p")]` → pre-v15 saves land on `PATCH_P` (0.0 would
+    /// silently disable the layer on legacy restores).
+    #[serde(default = "default_patch_p")]
+    pub PatchP: f64,
+    /// Phase 45: dedicated patch stream snapshot. Restored as zeroed
+    /// `Mulberry32::new(0)` re-derivation for pre-v15 saves (same pattern
+    /// as the culture/group/abio streams).
+    #[serde(default)]
+    pub PatchRngState: u32,
+    /// Phase 45: cumulative patch events (telemetry).
+    #[serde(default)]
+    pub PatchEvents: u64,
+    /// Phase 45: tick of the most recent patch event (telemetry).
+    #[serde(default)]
+    pub PatchLastTick: u32,
+    /// Phase 45: cultural value-selection toggle (inherit/learn bias by
+    /// token use_gain). `#[serde(default = "default_true")]` → pre-v15
+    /// saves land ON (the Phase-45 default world config).
+    #[serde(default = "default_true")]
+    pub CultureValueOn: bool,
 }
 
 fn default_group_on() -> bool {
@@ -938,8 +983,12 @@ pub(crate) fn intern_str(s: &str) -> &'static str {
     }
 }
 
-/// Default for the `CarcassLockEnabled` save-state field: new sims (without an
-/// explicit v1-era value) get Phase 8 locking enabled by default.
 fn default_carcass_lock_enabled() -> bool {
     true
+}
+
+/// Default for the Phase 45 `PatchP` save-state field: legacy restores land
+/// on the current calibration (0.0 would disable the layer entirely).
+fn default_patch_p() -> f64 {
+    crate::patch::PATCH_P
 }

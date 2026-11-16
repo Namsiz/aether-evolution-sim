@@ -121,18 +121,20 @@ fn group_off_is_bit_exact_phase36_anchor() {
     // after Phase 43's cultural ratchet (birth token inheritance; the culture
     // layer itself stays ON in the group-off arm, so inventions now propagate
     // to children and the @3000 anchor moves; @300 is unchanged — no invention
-    // has fired by then). Phase 42 values (previous):
-    //   @300 0xf5cc546cb068941f · @3000 0x615fbdaaa7fb0f4e
+    // has fired by then). Phase 45: the patch layer + regrowth-noise field
+    // also run in the group-off arm, so all four anchors move again. Phase 43
+    // values (previous):
+    //   @300 0xf5cc546cb068941f · @3000 0x1ec5282f975a354e
     //   seed2 @300 0x7a3fe91e7165c234 · v1 @300 0x5b514478b9799fa0
-    assert_eq!(checksum_at(20261102, 300, false), "0xf5cc546cb068941f");
-    assert_eq!(checksum_at(20261102, 3000, false), "0x1ec5282f975a354e");
-    assert_eq!(checksum_at(20261105, 300, false), "0x7a3fe91e7165c234");
+    assert_eq!(checksum_at(20261102, 300, false), "0xf7b865ce421aeb0e");
+    assert_eq!(checksum_at(20261102, 3000, false), "0x8f81c9041a132838");
+    assert_eq!(checksum_at(20261105, 300, false), "0xc56ee1f0c8d2528f");
 
     // Same v1 anchor (the historical stream must not see the group hash).
     let mut eco = Ecology::new(20261102);
     eco.group_on = false;
     run_ticks(&mut eco, 1, 300);
-    assert_eq!(eco.checksum_v1(), "0x5b514478b9799fa0");
+    assert_eq!(eco.checksum_v1(), "0x75c621a32eb86951");
 }
 
 // ---------------------------------------------------------------------------
@@ -410,8 +412,8 @@ fn save_v11_roundtrip_is_bit_exact() {
     let mut eco = grouped_world(600);
     let state = eco.to_save_state();
     assert_eq!(state.version, save_state::SAVE_STATE_VERSION);
-    // Phase 43 bumped the schema to v14 (cultural ratchet + abiogenesis).
-    assert_eq!(save_state::SAVE_STATE_VERSION, 14);
+    // Phase 45 bumped the schema to v15 (patch layer + cultural value).
+    assert_eq!(save_state::SAVE_STATE_VERSION, 15);
     assert!(!state.Groups.is_empty());
 
     let json = serde_json::to_string(&state).expect("save serializes");
@@ -454,17 +456,25 @@ fn legacy_v10_archive_loads_as_solitary_world() {
     let eco = grouped_world(400);
     let json = serde_json::to_string(&eco.to_save_state()).unwrap();
     let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
-    // Phase 43 bumped the schema to v14 (cultural ratchet + abiogenesis);
+    // Phase 45 bumped the schema to v15 (patch layer + cultural value);
     // older layers ride alongside (all serde-defaulted).
-    assert_eq!(v["Version"], 14);
+    assert_eq!(v["Version"], 15);
     // Strip every v10/v11/v13/v14 addition — this is exactly what a v10 archive looks like.
     v["Version"] = serde_json::json!(10);
     let obj = v.as_object_mut().unwrap();
     for k in ["Groups", "NextGroupId", "GroupOn", "GroupRngState",
               "TriuneOn", "TriuneUpkeepOn", "ReplayOn",
               "TeachOn", "AbiogenesisOn", "AbioRngState",
-              "AbiogenesisEvents", "AbiogenesisTicks"] {
+              "AbiogenesisEvents", "AbiogenesisTicks",
+              "PatchOn", "PatchP", "PatchRngState", "PatchEvents", "PatchLastTick",
+              "CultureValueOn"] {
         obj.remove(k);
+    }
+    if let Some(tokens) = obj.get_mut("TokenRegistry").and_then(|v| v.as_array_mut()) {
+        for t in tokens { t.as_object_mut().unwrap().remove("UseGain"); }
+    }
+    if let Some(stats) = obj.get_mut("CultureStats").and_then(|v| v.as_object_mut()) {
+        stats.remove("ValueWeightedBearers");
     }
     for a in obj["Agents"].as_array_mut().unwrap() {
         let ao = a.as_object_mut().unwrap();
