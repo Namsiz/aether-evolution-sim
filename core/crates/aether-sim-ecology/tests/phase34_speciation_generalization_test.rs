@@ -108,6 +108,11 @@ fn seed_two_pred_clusters(eco: &mut Ecology, co_located: bool) -> ((f64, f64), (
 #[test]
 fn forced_fork_mints_derived_kind() {
     let mut eco = Ecology::new(SEED);
+    // Phase 49: the production default SPECIATION_MIN_SIDE is 8. This test
+    // seeds two 7-member PRED clusters to exercise the kind-mint machinery,
+    // so it pins the legacy 2-member gate explicitly (the mint path is what
+    // is under test here, not the production threshold).
+    eco.speciation_min_side = aether_sim_ecology::ecology::SPECIATION_MIN_SIDE_LEGACY;
     let before = eco.kinds.len();
     assert_eq!(before, 6, "fresh world starts with the six ancestor kinds");
     let (a, b) = seed_two_pred_clusters(&mut eco, false);

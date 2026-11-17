@@ -17,17 +17,19 @@
 //!   seed 20261105 @300  v2 0x2e9539930abd8975
 //!   seed 20261102 @300  v1 0xe6404a7bee633eb8
 //!   (shadow-only @300 for the A/B arm: v2 0xf31c4501f764be29)
-//! PHASE 47 ANCHORS (current; **eleventh re-baseline** — geographic isolation
-//! maintenance: maternal philopatry, four home-region islands with balanced
-//! DECO founder clusters, region-local mating, priority-effect colonisation,
-//! DECO mutation ×5, threshold 0.25, viability gate, and one shared family
-//! carrying capacity. All four anchors move: initial DECO homes are now
-//! clustered by region and every DECO birth uses the amplified mutation
-//! amplitude, so the trajectory forks from the first DECO birth).
+//! PHASE 49 ANCHORS (current; **twelfth re-baseline** — fork budget: a fork
+//! carves an independent resource share out of the parent kind's capacity
+//! (grant = quarter of parent, clamped [5,20], floor 5, guild total conserved),
+//! and SPECIATION_MIN_SIDE rises 2 → 8 (Phase 48 showed 2-member lineages are
+//! sampling noise with a median 3840-tick lifespan). Phase 47's island layer
+//! stays: maternal philopatry, region-local mating, priority-effect
+//! colonisation, DECO mutation ×5).
 //!   seed 20261102 @300  v2 0x651cf47e6d54ca64
-//!   seed 20261102 @3000 v2 0xa022a6e2e2ca08f6
+//!   seed 20261102 @3000 v2 0xc94fc584ddfd6eb3
 //!   seed 20261105 @300  v2 0x5b9200b4b88d971a
 //!   seed 20261102 @300  v1 0xc6c4cdca821c064b
+//! PHASE 47 ANCHORS (previous):
+//!   seed 20261102 @3000 v2 0xa022a6e2e2ca08f6
 //! PHASE 45 ANCHORS (previous; **tenth re-baseline** — patch disturbance +
 //! static regrowth-noise heterogeneity + cultural value selection. All four
 //! anchors move: the fixed-seed noise field changes grass growth from tick 1,
@@ -128,7 +130,7 @@ fn golden_seed_20261102_300_ticks() {
 fn golden_seed_20261102_3000_ticks() {
     // Phase 47 re-baseline (the first region split fires inside this window).
     let ck = checksum_at(20261102, 3000);
-    assert_eq!(ck, "0xa022a6e2e2ca08f6",
+    assert_eq!(ck, "0xc94fc584ddfd6eb3",
         "3000-tick v2 long-run checksum drifted: {} — if this change is an approved re-baseline, pin the new value here and record it in the phase report", ck);
 }
 

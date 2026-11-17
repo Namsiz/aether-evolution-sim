@@ -58,6 +58,11 @@ fn initial_regions_are_balanced_and_deco_founders_cluster() {
 #[test]
 fn family_capacity_bounds_deco_total_across_splits() {
     let mut eco = Ecology::new(20261102);
+    // Phase 47 A/B arm: pin the Phase-47 behaviour (family-shared cap,
+    // legacy 2-member split gate) so this test keeps verifying exactly what
+    // it was written for. The Phase 49 default (per-kind budgets, 8-member
+    // gate) is covered by the Phase 49 tests.
+    eco.budget_fork_off();
     run_ticks(&mut eco, 0, 4_000);
     let cap = eco.kind_def(DECO).global_cap;
     assert!(eco.count_family(DECO) <= cap,

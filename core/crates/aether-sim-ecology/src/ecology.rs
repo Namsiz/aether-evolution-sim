@@ -1031,9 +1031,36 @@ pub const EXT_LOCUS_WEIGHT: f64 = 0.5;
 pub const GEO_ISOLATION_DIST: f64 = 100.0;
 /// Minimum ticks between two speciation events.
 pub const MIN_SPEC_TIME_TICKS: u32 = 200;
-/// A split is only declared when both sides keep at least this many members
-/// (a one-agent "species" is sampling noise and dies within a pass).
-const SPECIATION_MIN_SIDE: usize = 2;
+/// Minimum members BOTH sides of a cut must keep for the split to count as a
+/// species (Phase 49: a 2-member "species" is sampling noise — Phase 48's
+/// median-3840-tick daughter lineages were exactly that noise; 8 members is
+/// the smallest cohort with a real independent-evolution chance). Configurable
+/// per instance (`Ecology::speciation_min_side`) so the Phase 47 A/B arm can
+/// pin the legacy value.
+pub const SPECIATION_MIN_SIDE_DEFAULT: usize = 8;
+/// Phase 47 value (kept as the B-arm calibration for `budget_fork_off`).
+pub const SPECIATION_MIN_SIDE_LEGACY: usize = 2;
+
+// ----- Phase 49: fork budget (independent resource share per species) -------
+//
+// Phase 48's root cause ②③: the family cap made every derived kind share the
+// root's 80 slots (any family member could fill them), and niche_offset only
+// shifted the competition burden — no fork ever received its own resource
+// pool, so every daughter was crowded out (median 3840 ticks). Phase 49 moves
+// the carrying capacity itself: a fork CARVES a share out of the parent
+// kind's budget; each kind's births are gated by its own share only, so a
+// daughter's growth is no longer coupled to the root's occupancy. The guild
+// total is conserved (80 for DECO): the grant moves budget parent→child, an
+// extinct kind returns it up the fork lineage.
+/// Upper bound of a fork grant (the Phase-49 example: root 80 → 60 + 20).
+pub const FORK_BUDGET_GRANT: usize = 20;
+/// Floor of a grant AND of the parent's post-grant remainder: a kind with
+/// less than `2 × FORK_BUDGET_MIN` cannot fork again (80 → 60+20 → 45+15 →
+/// 15+5 is the deepest legal chain from 80).
+pub const FORK_BUDGET_MIN: usize = 5;
+/// Phase 49: is the fork-budget mechanism active? Default ON; the A/B arm
+/// (`budget_fork_off`) restores the Phase 47 family-shared-cap trajectory.
+pub const BUDGET_FORK_ON: bool = true;
 
 // ----- Phase 16: niche axis + competitive exclusion ---------------------------
 //
@@ -1206,6 +1233,11 @@ pub struct CladeSpeciationEvent {
     /// minted derived kind; extinction/exclusion: the dying clade's kind).
     /// Additive C-ABI tail; defaults to u32::MAX on pre-Phase-34 records.
     pub kind_id: u32,
+    /// Phase 49 (speciation events only): the forking kind's budget share
+    /// before the fork and the first child's grant. Extinction events keep
+    /// 0/0. Additive JSON/ABI tail; defaults to 0 on pre-Phase-49 records.
+    pub parent_budget: u32,
+    pub child_budget: u32,
 }
 
 /// Tiny union-find over MST vertex slots (n ≤ MAX_DECO = 80; no rank or
@@ -1600,6 +1632,18 @@ pub struct Ecology {
     /// Per-instance so mechanism-isolation tests can pin the legacy amplitude;
     /// the default world uses the island calibration.
     pub deco_mut_scale: f64,
+    /// Phase 49: fork-budget toggle (independent resource share per kind).
+    /// Default `BUDGET_FORK_ON`; `budget_fork_off()` restores the Phase 47
+    /// family-shared-cap behavior bit-exactly.
+    pub budget_fork: bool,
+    /// Phase 49: per-kind carrying-capacity share (index = registry kind id;
+    /// root kinds start at their `global_cap`, derived kinds at their fork
+    /// grant). The guild total is conserved: grants move budget parent→child,
+    /// extinctions move it back up the fork lineage.
+    pub kind_budgets: Vec<usize>,
+    /// Phase 49: minimum members on BOTH sides of a cut for a split to count
+    /// as a species (default `SPECIATION_MIN_SIDE_DEFAULT`).
+    pub speciation_min_side: usize,
 }
 
 fn default_fidelity() -> f64 {
@@ -1617,6 +1661,9 @@ impl Ecology {
         let kinds = KindRegistry::legacy();
         let evolution: Vec<Vec<EvolutionSample>> = (0..kinds.len()).map(|_| Vec::new()).collect();
         let generation_fitness: Vec<Vec<FitnessRecord>> = (0..kinds.len()).map(|_| Vec::new()).collect();
+        // Phase 49: every registered kind starts with its own global cap as
+        // resource share (root kinds; derived kinds are re-granted at fork).
+        let kind_budgets: Vec<usize> = kinds.defs().iter().map(|d| d.global_cap).collect();
         // Phase 33: plant registry default = the three legacy entries; the
         // per-species layers are all sized to `plants.len()` (3 by default).
         let plants = LEGACY_PLANTS.to_vec();
@@ -1769,6 +1816,12 @@ impl Ecology {
             dispersal_last_tick: 0,
             region_isolation: true,
             deco_mut_scale: DECO_MUT_SCALE,
+            // Phase 49: fork budget ON; every registered kind starts with its
+            // own global cap as share (root kinds; derived kinds are re-granted
+            // at fork time).
+            budget_fork: BUDGET_FORK_ON,
+            kind_budgets,
+            speciation_min_side: SPECIATION_MIN_SIDE_DEFAULT,
         };
         eco.init_grass();
         eco.seed_life();
@@ -1783,6 +1836,9 @@ impl Ecology {
         let kinds = KindRegistry::legacy();
         let evolution: Vec<Vec<EvolutionSample>> = (0..kinds.len()).map(|_| Vec::new()).collect();
         let generation_fitness: Vec<Vec<FitnessRecord>> = (0..kinds.len()).map(|_| Vec::new()).collect();
+        // Phase 49: every registered kind starts with its own global cap as
+        // resource share (root kinds; derived kinds are re-granted at fork).
+        let kind_budgets: Vec<usize> = kinds.defs().iter().map(|d| d.global_cap).collect();
         // Phase 33: plant registry default = the three legacy entries; the
         // per-species layers are all sized to `plants.len()` (3 by default).
         let plants = LEGACY_PLANTS.to_vec();
@@ -1962,6 +2018,12 @@ impl Ecology {
             dispersal_last_tick: 0,
             region_isolation: true,
             deco_mut_scale: DECO_MUT_SCALE,
+            // Phase 49: fork budget ON; every registered kind starts with its
+            // own global cap as share (root kinds; derived kinds are re-granted
+            // at fork time).
+            budget_fork: BUDGET_FORK_ON,
+            kind_budgets,
+            speciation_min_side: SPECIATION_MIN_SIDE_DEFAULT,
         };
         eco.init_grass();
         eco.seed_life();
@@ -2576,6 +2638,11 @@ impl Ecology {
         while self.evolution.len() <= id as usize { self.evolution.push(Vec::new()); }
         while self.generation_fitness.len() <= id as usize { self.generation_fitness.push(Vec::new()); }
         while self.last_spec_tick_by_kind.len() <= id as usize { self.last_spec_tick_by_kind.push(0); }
+        // Phase 49: a freshly registered kind starts at its (cloned) global
+        // cap; the fork path re-grants it from the parent's share immediately
+        // after, so this is only the transient default.
+        while self.kind_budgets.len() <= id as usize { self.kind_budgets.push(0); }
+        self.kind_budgets[id as usize] = self.kind_def(id).global_cap;
         id
     }
 
@@ -3214,6 +3281,70 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             .count()
     }
 
+    // ----- Phase 49: fork budget (independent resource share per species) ----
+
+    /// Phase 49: the current carrying-capacity share of `kind`. Root kinds
+    /// hold the family's budget (they start at `global_cap`); a derived kind
+    /// holds the share carved out of its parent at fork time (0 once its
+    /// lineage returned the share after extinction).
+    pub fn kind_budget(&self, kind: SpeciesKind) -> usize {
+        self.kind_budgets.get(kind as usize).copied()
+            .unwrap_or_else(|| self.kind_def(kind).global_cap)
+    }
+
+    /// Phase 49: set a kind's share (pads the table for kinds registered
+    /// after the last resize).
+    fn set_kind_budget(&mut self, kind: SpeciesKind, value: usize) {
+        while self.kind_budgets.len() <= kind as usize { self.kind_budgets.push(0); }
+        self.kind_budgets[kind as usize] = value;
+    }
+
+    /// Phase 49: how much budget a fork carves out of `parent_budget`, or
+    /// `None` when the parent cannot afford a fork. Grant = a quarter of the
+    /// parent's share, clamped to `[FORK_BUDGET_MIN, FORK_BUDGET_GRANT]`; the
+    /// parent must keep at least `FORK_BUDGET_MIN` (80 → 60+20 → 45+15 → 15+5,
+    /// and below 2 × FORK_BUDGET_MIN no fork fires at all). Pure function —
+    /// unit-tested (budget conservation + recursion floor).
+    pub fn fork_budget_grant(parent_budget: usize) -> Option<usize> {
+        if parent_budget < 2 * FORK_BUDGET_MIN { return None; }
+        let g = (parent_budget / 4).clamp(FORK_BUDGET_MIN, FORK_BUDGET_GRANT);
+        if parent_budget - g < FORK_BUDGET_MIN { return None; }
+        Some(g)
+    }
+
+    /// Phase 49: summed budget share of every kind in `root`'s guild. The
+    /// invariant: this is conserved across forks and extinctions (grants move
+    /// budget parent→child, returns move it back up), so a DECO family always
+    /// sums to 80 — Phase 45's biomass-explosion lesson.
+    pub fn family_budget_total(&self, root: SpeciesKind) -> usize {
+        (0..self.kinds.len())
+            .filter(|&k| self.root_kind(k as SpeciesKind) == root)
+            .map(|k| self.kind_budget(k as SpeciesKind))
+            .sum()
+    }
+
+    /// Phase 49 A/B arm switch: restore the full Phase 47 behavior — the
+    /// family-shared carrying capacity (no per-kind budget split) and the
+    /// legacy 2-member minimum side. With both set, the trajectory is
+    /// bit-exact with the Phase 47 anchors (pinned in
+    /// `phase49_budget_fork_test::budget_fork_off_is_bit_exact_phase47_anchor`).
+    pub fn budget_fork_off(&mut self) {
+        self.budget_fork = false;
+        self.speciation_min_side = SPECIATION_MIN_SIDE_LEGACY;
+    }
+
+    /// Phase 49: the density-dependent crowding denominator for `kind` — its
+    /// own budget share when the fork budget is active, the legacy global cap
+    /// otherwise. Before any fork these are identical (a root kind's share
+    /// starts at its global cap), so the pre-first-split trajectory is
+    /// bit-exact; after a fork each species feels crowding relative to the
+    /// resources it actually holds, which is the ecological consequence of
+    /// splitting a share.
+    fn crowd_cap(&self, kind: SpeciesKind) -> f64 {
+        if self.budget_fork { self.kind_budget(kind).max(1) as f64 }
+        else { self.kind_def(kind).global_cap as f64 }
+    }
+
     /// Mendelian mix + mutation. `mut_scale` comes from the reproducing
     /// partner's somatic damage (Phase 39.1: dirty work raises the offspring
     /// mutation amplitude; 1.0 keeps the pre-39.1 trajectory bit-exact).
@@ -3286,13 +3417,23 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         let def_repro_cd = self.kind_def(kind).repro_cooldown;
         let (se0, se1) = self.kind_def(kind).start_energy;
         let cap = self.biome_max_for(kind, x, z);
-        let root = self.root_kind(kind);
-        let family_total = if root == kind {
-            self.count(kind)
+        // Phase 49 A/B: with the fork budget active, each kind's births are
+        // gated by its OWN carved-out share (min with the local biome cap):
+        // a daughter's growth is decoupled from the root's occupancy. The
+        // legacy arm keeps the Phase 47 family-shared check bit-exact.
+        if self.budget_fork {
+            let budget = self.kind_budget(kind);
+            let eff_cap = if budget < cap { budget } else { cap };
+            if self.count(kind) >= eff_cap { return None; }
         } else {
-            self.count_family(root)
-        };
-        if family_total >= cap { return None; }
+            let root = self.root_kind(kind);
+            let family_total = if root == kind {
+                self.count(kind)
+            } else {
+                self.count_family(root)
+            };
+            if family_total >= cap { return None; }
+        }
         let g = match genome {
             Some(g) => g,
             None => {
@@ -6397,6 +6538,8 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 genetic_distance: 0.0,
                 event_kind: ek,
                 kind_id: kid,
+                parent_budget: 0,
+                child_budget: 0,
             });
         }
 
@@ -6580,8 +6723,8 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             } else {
                 (ka, kb)
             };
-            if comp_members[child_side].len() < SPECIATION_MIN_SIDE
-                || comp_members[parent_side].len() < SPECIATION_MIN_SIDE {
+            if comp_members[child_side].len() < self.speciation_min_side
+                || comp_members[parent_side].len() < self.speciation_min_side {
                 continue;
             }
             let dist = Self::min_cross_dist(
@@ -6610,6 +6753,24 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         let mut last_parent: Option<u32> = None;
         let mut event: Option<CladeSpeciationEvent> = None;
         for (parent, _min_id, members, w) in splits {
+            // The forking species: the parent clade's own kind (root ancestor
+            // or an earlier derived fork).
+            let family_kind = self.clade_kind(parent, kind);
+            // Phase 49: a fork carves the daughter's share out of the parent
+            // kind's budget. When the parent cannot afford a fork (share below
+            // 2 × FORK_BUDGET_MIN) the split does not fire at all — no
+            // carrying capacity, no new species; the lineage stays one kind.
+            let grant = if self.budget_fork {
+                match Self::fork_budget_grant(self.kind_budget(family_kind)) {
+                    Some(g) => {
+                        self.set_kind_budget(family_kind, self.kind_budget(family_kind) - g);
+                        Some(g)
+                    }
+                    None => continue,
+                }
+            } else {
+                None
+            };
             if last_parent != Some(parent) {
                 if let Some(ev) = event.take() {
                     self.speciation_events.push(ev);
@@ -6620,9 +6781,12 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                     child_clade_ids: Vec::new(),
                     genetic_distance: 0.0,
                     event_kind: EVENT_KIND_SPECIATION,
-                    // The forking species: the parent clade's own kind
-                    // (root ancestor or an earlier derived fork).
-                    kind_id: self.clade_kind(parent, kind) as u32,
+                    kind_id: family_kind as u32,
+                    // Telemetry: the parent's share before this fork and the
+                    // first child's grant (multi-child events are rare; each
+                    // child clade's share is also readable via kind_budget).
+                    parent_budget: self.kind_budget(family_kind) as u32,
+                    child_budget: 0,
                 });
                 last_parent = Some(parent);
             }
@@ -6635,13 +6799,20 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             // event: existing members KEEP their old kind; births INTO this
             // clade carry the new kind id (reproduce resolves via
             // `clade_kind`). The six ancestors stay the tree roots.
-            let family_kind = self.clade_kind(parent, kind);
             let label = clade_letter(cid);
             let derived_name = format!("{}-{}", self.kind_name(family_kind), label);
             let mut ddef = self.kind_def(family_kind).clone();
             ddef.name = Box::leak(derived_name.clone().into_boxed_str());
             ddef.parent_kind = Some(family_kind);
             let did = self.register_kind(ddef);
+            // Phase 49: the daughter's share is the grant carved out of the
+            // parent kind; the guild total is unchanged.
+            if let Some(g) = grant {
+                self.set_kind_budget(did, g);
+                if let Some(ev) = event.as_mut() {
+                    if ev.child_budget == 0 { ev.child_budget = g as u32; }
+                }
+            }
             let derived_kind_name = self.kind_name(did);
             let refs: Vec<&Agent> = members.iter().map(|&p| &self.agents[idxs[p]]).collect();
             let centroid = Self::mean_genome(&refs);
@@ -7304,9 +7475,12 @@ fn clade_event_to_json(e: &CladeSpeciationEvent) -> String {
         .map(|id| id.to_string())
         .collect::<Vec<String>>()
         .join(",");
+    // Phase 49 additive keys: the fork-budget telemetry (0 on extinction
+    // records and pre-Phase-49 archives).
     format!(
-        "{{\"tick\":{},\"parentCladeId\":{},\"childCladeIds\":[{}],\"geneticDistance\":{},\"kind\":{},\"kindId\":{}}}",
+        "{{\"tick\":{},\"parentCladeId\":{},\"childCladeIds\":[{}],\"geneticDistance\":{},\"kind\":{},\"kindId\":{},\"parentBudget\":{},\"childBudget\":{}}}",
         e.tick, e.parent_clade_id, children, e.genetic_distance, e.event_kind, e.kind_id,
+        e.parent_budget, e.child_budget,
     )
 }
 
@@ -7561,6 +7735,10 @@ impl Ecology {
             DispersalLastTick: self.dispersal_last_tick,
             RegionIsolation: self.region_isolation,
             DecoMutScale: self.deco_mut_scale,
+            // Phase 49: fork-budget state (independent per-kind shares).
+            BudgetForkOn: self.budget_fork,
+            KindBudgets: self.kind_budgets.clone(),
+            SpeciationMinSide: self.speciation_min_side,
             // Phase 39.1: group layer. `founder_genome` is serialized in full —
             // it is the propagation bottleneck, so it must survive the hop for
             // a restored sim to keep breeding from the same single genome.
@@ -7777,6 +7955,9 @@ impl Ecology {
                 // Phase 16: pre-v3 saves default to speciation (0).
                 event_kind: e.get("kind").and_then(|v| v.as_u64()).unwrap_or(0) as u8,
                 kind_id: ev_kind_id,
+                // Phase 49: pre-v17 saves carry no budget fields (0 = unknown).
+                parent_budget: e.get("parentBudget").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                child_budget: e.get("childBudget").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
             }
         }).collect();
         let next_clade_id = state.NextCladeId;
@@ -7918,6 +8099,10 @@ impl Ecology {
             }).collect::<Vec<_>>();
             (groups, next)
         };
+
+        // Phase 49: pre-v17 archives carry no budget table — rebuild the
+        // root shares from the caps before `kinds` moves into the struct.
+        let restored_kind_budgets: Vec<usize> = kinds.defs().iter().map(|d| d.global_cap).collect();
 
         let mut eco = Ecology {
             rng: Mulberry32::from_state(state.rng_state.state),
@@ -8245,6 +8430,17 @@ impl Ecology {
             dispersal_last_tick: state.DispersalLastTick,
             region_isolation: state.RegionIsolation,
             deco_mut_scale: state.DecoMutScale,
+            // Phase 49: fork budget. Pre-v17 archives carry an empty table →
+            // rebuild root shares from the caps (derived kinds re-grant at
+            // their next fork); the MIN_SIDE default keeps the Phase 47 arm
+            // bit-exact for old archives.
+            budget_fork: state.BudgetForkOn,
+            kind_budgets: if state.KindBudgets.is_empty() {
+                restored_kind_budgets
+            } else {
+                state.KindBudgets.clone()
+            },
+            speciation_min_side: state.SpeciationMinSide,
             culture_fidelity: state.CultureFidelity,
             culture_bias_channel: state.CultureBiasChannel,
             // Phase 39.1: group layer. Pre-v11 archives carry no groups →

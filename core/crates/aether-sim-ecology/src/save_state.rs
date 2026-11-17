@@ -109,7 +109,7 @@
 use serde::{Deserialize, Serialize};
 
 
-pub const SAVE_STATE_VERSION: u32 = 16;
+pub const SAVE_STATE_VERSION: u32 = 17;
 pub const SAVE_STATE_SCHEMA_NAME: &str = "aether-sim-save-state";
 
 /// DECO selection-pressure mode selector (persisted in SaveState v2).
@@ -984,6 +984,24 @@ pub struct SaveState {
     /// calibration; explicit values roundtrip for mechanism-isolation tests.
     #[serde(default = "default_deco_mut_scale")]
     pub DecoMutScale: f64,
+    /// Phase 49: fork-budget toggle (independent resource share per kind).
+    /// `#[serde(default = "default_true")]` → pre-v17 saves land ON.
+    #[serde(default = "default_true")]
+    pub BudgetForkOn: bool,
+    /// Phase 49: per-kind carrying-capacity share (index = registry kind id).
+    /// Pre-v17 saves restore an empty vector — the loader rebuilds it from
+    /// the root caps when empty (same rebuild pattern as the region map).
+    #[serde(default)]
+    pub KindBudgets: Vec<usize>,
+    /// Phase 49: minimum members on both sides of a cut for a split to count
+    /// as a species. Pre-v17 saves land on the legacy value (2) so the
+    /// Phase 47 A/B arm restores bit-exactly.
+    #[serde(default = "default_min_side_legacy")]
+    pub SpeciationMinSide: usize,
+}
+
+fn default_min_side_legacy() -> usize {
+    crate::ecology::SPECIATION_MIN_SIDE_LEGACY
 }
 
 fn default_group_on() -> bool {

@@ -128,8 +128,9 @@ fn group_off_is_bit_exact_phase36_anchor() {
     //   @300 0xf7b865ce421aeb0e · @3000 0x8f81c9041a132838
     //   seed2 @300 0xc56ee1f0c8d2528f · v1 @300 0x75c621a32eb86951
     // Phase 47: region islands + philopatry + DECO mutation ×5.
+    // Phase 49: fork budget + SPECIATION_MIN_SIDE=8 (twelfth re-baseline).
     assert_eq!(checksum_at(20261102, 300, false), "0x7d2c8613d01cb79d");
-    assert_eq!(checksum_at(20261102, 3000, false), "0x88a4b980bac4d925");
+    assert_eq!(checksum_at(20261102, 3000, false), "0xdb3aa647fa2e3a96");
     assert_eq!(checksum_at(20261105, 300, false), "0xbd6a86a9fe8264e7");
 
     // Same v1 anchor (the historical stream must not see the group hash).
@@ -414,8 +415,8 @@ fn save_v11_roundtrip_is_bit_exact() {
     let mut eco = grouped_world(600);
     let state = eco.to_save_state();
     assert_eq!(state.version, save_state::SAVE_STATE_VERSION);
-    // Phase 47 bumped the schema to v16 (dispersal + region islands).
-    assert_eq!(save_state::SAVE_STATE_VERSION, 16);
+    // Phase 49 bumped the schema to v17 (fork budget + speciation min-side).
+    assert_eq!(save_state::SAVE_STATE_VERSION, 17);
     assert!(!state.Groups.is_empty());
 
     let json = serde_json::to_string(&state).expect("save serializes");
@@ -458,9 +459,9 @@ fn legacy_v10_archive_loads_as_solitary_world() {
     let eco = grouped_world(400);
     let json = serde_json::to_string(&eco.to_save_state()).unwrap();
     let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
-    // Phase 47 bumped the schema to v16 (dispersal + region islands);
-    // older layers ride alongside (all serde-defaulted).
-    assert_eq!(v["Version"], 16);
+    // Phase 49 bumped the schema to v17 (fork budget); older layers ride
+    // alongside (all serde-defaulted).
+    assert_eq!(v["Version"], 17);
     // Strip every v10/v11/v13/v14 addition — this is exactly what a v10 archive looks like.
     v["Version"] = serde_json::json!(10);
     let obj = v.as_object_mut().unwrap();
@@ -470,7 +471,8 @@ fn legacy_v10_archive_loads_as_solitary_world() {
               "AbiogenesisEvents", "AbiogenesisTicks",
               "PatchOn", "PatchP", "PatchRngState", "PatchEvents", "PatchLastTick",
               "CultureValueOn", "DispersalP", "DispersalRngState", "DispersalEvents",
-              "DispersalLastTick", "RegionIsolation", "DecoMutScale"] {
+              "DispersalLastTick", "RegionIsolation", "DecoMutScale",
+              "BudgetForkOn", "KindBudgets", "SpeciationMinSide"] {
         obj.remove(k);
     }
     if let Some(tokens) = obj.get_mut("TokenRegistry").and_then(|v| v.as_array_mut()) {
