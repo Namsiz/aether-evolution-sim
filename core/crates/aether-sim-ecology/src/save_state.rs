@@ -105,11 +105,18 @@
 /// v15 archive restores with the dispersal stream re-derived from
 /// `seed ^ DISPERSAL_RNG_TAG`, zero events, balanced regions and continues
 /// from its own state.
+/// v17 → v18 (Phase 51): niche resource partition. The sim level gains the
+/// `NichePartitionOn` toggle (`#[serde(default = "default_true")]` → pre-v18
+/// archives land ON, the Phase 51 default world config). The preference
+/// multiplier itself is derived state (a pure function of clade niches + the
+/// live resource fields), so nothing else rides the schema; the O(1)
+/// `niche_by_clade` cache and the `NichePartitionShare` telemetry are rebuilt
+/// on load and never persisted.
 
 use serde::{Deserialize, Serialize};
 
 
-pub const SAVE_STATE_VERSION: u32 = 17;
+pub const SAVE_STATE_VERSION: u32 = 18;
 pub const SAVE_STATE_SCHEMA_NAME: &str = "aether-sim-save-state";
 
 /// DECO selection-pressure mode selector (persisted in SaveState v2).
@@ -998,6 +1005,12 @@ pub struct SaveState {
     /// Phase 47 A/B arm restores bit-exactly.
     #[serde(default = "default_min_side_legacy")]
     pub SpeciationMinSide: usize,
+    /// Phase 51: niche resource-partition toggle (niche_offset doubles as a
+    /// foraging resource-preference coordinate). `#[serde(default =
+    /// "default_true")]` → pre-v18 saves land ON (the Phase-51 default
+    /// world config).
+    #[serde(default = "default_true")]
+    pub NichePartitionOn: bool,
 }
 
 fn default_min_side_legacy() -> usize {

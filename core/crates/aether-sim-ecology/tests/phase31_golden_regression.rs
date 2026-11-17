@@ -17,7 +17,21 @@
 //!   seed 20261105 @300  v2 0x2e9539930abd8975
 //!   seed 20261102 @300  v1 0xe6404a7bee633eb8
 //!   (shadow-only @300 for the A/B arm: v2 0xf31c4501f764be29)
-//! PHASE 49 ANCHORS (current; **twelfth re-baseline** — fork budget: a fork
+//! PHASE 51 ANCHORS (current; **thirteenth re-baseline** — niche resource
+//! partition: niche_offset doubles as a resource-preference coordinate; beyond
+//! NICHE_PARTITION_BAND=0.3 a clade's foraging efficiency swings ±15% with the
+//! cell's local grass-vs-mineral gradient. ALL FOUR PINNED ANCHORS ARE
+//! UNCHANGED — the first banded clade (deco-A) forks at t=34680 on seed
+//! 20261102, far past the pinned windows, and the multiplier is exactly 1.0
+//! before any banded clade exists. Post-fork deep anchors (not pinned here;
+//! see phase51_niche_partition_test): partition-OFF @30000 = 0x516d99450971ff76,
+//! @60000 = 0x0ab6c03f2c29eec5 (bit-exact Phase 50); partition-ON @60000 =
+//! 0x105ab3f835ff4248 (the mechanism fires between t=40000 and t=60000).
+//!   seed 20261102 @300  v2 0x651cf47e6d54ca64  (= Phase 49)
+//!   seed 20261102 @3000 v2 0xc94fc584ddfd6eb3  (= Phase 49)
+//!   seed 20261105 @300  v2 0x5b9200b4b88d971a  (= Phase 49)
+//!   seed 20261102 @300  v1 0xc6c4cdca821c064b  (= Phase 49)
+//! PHASE 49 ANCHORS (previous; **twelfth re-baseline** — fork budget: a fork
 //! carves an independent resource share out of the parent kind's capacity
 //! (grant = quarter of parent, clamped [5,20], floor 5, guild total conserved),
 //! and SPECIATION_MIN_SIDE rises 2 → 8 (Phase 48 showed 2-member lineages are

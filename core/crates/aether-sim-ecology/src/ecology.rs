@@ -1086,6 +1086,29 @@ pub const COMPETITION_BURDEN: f64 = 0.15;
 /// Cap on the summed burden of one clade (multi-overlap stacking).
 pub const COMPETITION_BURDEN_MAX: f64 = 0.5;
 
+// ----- Phase 51: niche resource partition -----------------------------------
+//
+// Phase 50's residual problem: the granddaughter lineages of a radiating
+// ancestor (deco-A-*) still died out one by one. The niche axis carried only
+// a competition burden — every daughter foraged the same resource surface as
+// its parent, so separation never became a separate living.
+//
+// Phase 51 extends the semantics: niche_offset is also a resource-preference
+// coordinate. Beyond a band, a clade's members forage more efficiently in
+// cells whose LOCAL resource mix matches their side of the axis (grass-rich
+// for +, mineral-rich for −) and slightly less efficiently in the opposite
+// mix. The weight is a soft efficiency multiplier — never a hard switch, so
+// no absorbing state can form — and it keys off the local gradient (cell
+// grass vs mineral relative richness), so the effect only shows up where the
+// landscape is heterogeneous (Phase 45's regrowth-noise field).
+/// |niche| below this is the neutral band (Phase 50 behaviour for that clade).
+pub const NICHE_PARTITION_BAND: f64 = 0.3;
+/// Maximum foraging-efficiency swing of a fully banded clade (±15 %).
+pub const NICHE_PREF_GAIN: f64 = 0.15;
+/// Phase 51: is niche resource partition active? Default ON; the A/B arm
+/// (`niche_partition_off`) restores the Phase 50 foraging trajectory.
+pub const NICHE_PARTITION_ON: bool = true;
+
 // ----- Phase 47: natal dispersal (geographic isolation maintenance) --------
 //
 // Phase 46 showed the first split is a one-shot event: once niche_offset
@@ -1644,6 +1667,17 @@ pub struct Ecology {
     /// Phase 49: minimum members on BOTH sides of a cut for a split to count
     /// as a species (default `SPECIATION_MIN_SIDE_DEFAULT`).
     pub speciation_min_side: usize,
+    /// Phase 51: niche resource-partition toggle (default `NICHE_PARTITION_ON`).
+    /// `niche_partition_off()` restores the Phase 50 foraging trajectory
+    /// bit-exactly (the preference multiplier short-circuits to 1.0).
+    pub niche_partition: bool,
+    /// Phase 51: per-band member census (telemetry; rebuilt on every detection
+    /// pass). Not persisted — observability only, same contract as GroupStats.
+    pub niche_partition_share: crate::niche::NichePartitionShare,
+    /// Phase 51: O(1) niche lookup by clade id for the foraging hot path
+    /// (index = clade id; 0.0 for unassigned / unknown ids). Rebuilt on every
+    /// detection pass and after a restore — a pure cache of `species_clades`.
+    pub(crate) niche_by_clade: Vec<f64>,
 }
 
 fn default_fidelity() -> f64 {
@@ -1822,6 +1856,12 @@ impl Ecology {
             budget_fork: BUDGET_FORK_ON,
             kind_budgets,
             speciation_min_side: SPECIATION_MIN_SIDE_DEFAULT,
+            // Phase 51: niche resource partition ON by default (the preference
+            // multiplier is 1.0 for every clade inside the neutral band, so a
+            // pre-split world is bit-exact with Phase 50).
+            niche_partition: NICHE_PARTITION_ON,
+            niche_partition_share: crate::niche::NichePartitionShare::default(),
+            niche_by_clade: Vec::new(),
         };
         eco.init_grass();
         eco.seed_life();
@@ -2024,6 +2064,10 @@ impl Ecology {
             budget_fork: BUDGET_FORK_ON,
             kind_budgets,
             speciation_min_side: SPECIATION_MIN_SIDE_DEFAULT,
+            // Phase 51: niche resource partition ON by default (see `Ecology::new`).
+            niche_partition: NICHE_PARTITION_ON,
+            niche_partition_share: crate::niche::NichePartitionShare::default(),
+            niche_by_clade: Vec::new(),
         };
         eco.init_grass();
         eco.seed_life();
@@ -3331,6 +3375,15 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
     pub fn budget_fork_off(&mut self) {
         self.budget_fork = false;
         self.speciation_min_side = SPECIATION_MIN_SIDE_LEGACY;
+    }
+
+    /// Phase 51 A/B arm switch: restore the full Phase 50 foraging behaviour
+    /// (niche_offset carries no resource preference). With the switch off the
+    /// preference multiplier short-circuits to 1.0 on every intake path, so
+    /// the trajectory is bit-exact with the Phase 50 anchors (pinned in
+    /// `phase51_niche_partition_test::niche_partition_off_is_bit_exact_phase50_anchor`).
+    pub fn niche_partition_off(&mut self) {
+        self.niche_partition = false;
     }
 
     /// Phase 49: the density-dependent crowding denominator for `kind` — its
@@ -4774,7 +4827,9 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 let take = self.take_grass(idx, ci_val as usize, 0.2 * lineage_bite);
                         self.leaf_e_h += take * 62.0;
                 self.ledger.grazed += take * 62.0;
-                self.agents[idx].energy = (self.agents[idx].energy + take * 62.0).min(self.agents[idx].max_energy);
+                // Phase 51: niche resource-partition preference multiplier.
+                let pref = self.niche_pref_mult(self.agents[idx].clade_id, ci_val as usize);
+                self.agents[idx].energy = (self.agents[idx].energy + take * 62.0 * pref).min(self.agents[idx].max_energy);
                 self.agents[idx].hydration = (self.agents[idx].hydration + 0.18).min(1.0);
                 let interval = BITE_INTERVAL * (0.8 + self.rng.next_f64() * 0.4) / lineage_bite;
                 self.agents[idx].bite = interval;
@@ -4981,7 +5036,10 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                         gain * 0.8
                     };
                     self.ledger.predation_gain += pre_eff_gain;
-                    self.agents[idx].energy = (self.agents[idx].energy + pre_eff_gain).min(self.agents[idx].max_energy);
+                    // Phase 51: niche resource-partition preference multiplier
+                    // at the predator's foraging cell.
+                    let pref = self.niche_pref_at(self.agents[idx].clade_id, self.agents[idx].x, self.agents[idx].z);
+                    self.agents[idx].energy = (self.agents[idx].energy + pre_eff_gain * pref).min(self.agents[idx].max_energy);
                     self.agents[idx].hydration = (self.agents[idx].hydration + 0.4).min(1.0);
                     let bite_interval = PRED_BITE_INTERVAL + self.rng.next_f64() * 5.0;
                     self.agents[idx].bite = bite_interval;
@@ -5115,15 +5173,19 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 let take = 4.0f64.min(self.carcasses[ci].energy);
                 self.carcasses[ci].energy -= take;
                 self.ledger.scavenged += take * 7.0;
-                self.agents[idx].energy = (self.agents[idx].energy + take * 7.0).min(self.agents[idx].max_energy);
+                // Phase 51: niche resource-partition preference multiplier.
+                let pref = self.niche_pref_at(self.agents[idx].clade_id, self.agents[idx].x, self.agents[idx].z);
+                self.agents[idx].energy = (self.agents[idx].energy + take * 7.0 * pref).min(self.agents[idx].max_energy);
                 self.agents[idx].bite = 1.5;
                 if self.carcasses[ci].energy <= 0.2 { self.carcasses.remove(ci); }
             } else if self.agents[idx].energy < self.agents[idx].max_energy * 0.7 && self.agents[idx].bite <= 0.0 {
                 let gi = self.cell_index(self.agents[idx].x, self.agents[idx].z);
                 if gi >= 0 && (gi as usize) < self.grass.len() && (self.grass[gi as usize] as f64) > 0.1 {
                     let take = self.take_grass(idx, gi as usize, 0.15);
+                    // Phase 51: niche resource-partition preference multiplier.
+                    let pref = self.niche_pref_mult(self.agents[idx].clade_id, gi as usize);
                     self.ledger.grazed += take * 55.0;
-                    self.agents[idx].energy = (self.agents[idx].energy + take * 55.0).min(self.agents[idx].max_energy);
+                    self.agents[idx].energy = (self.agents[idx].energy + take * 55.0 * pref).min(self.agents[idx].max_energy);
                     self.agents[idx].bite = 2.0;
                 }
             }
@@ -5239,7 +5301,9 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             if self.agents[idx].bite <= 0.0 {
                 let take = 3.0f64.min(self.carcasses[ci].energy);
                 self.carcasses[ci].energy -= take;
-                self.agents[idx].energy = (self.agents[idx].energy + take * 8.0).min(self.agents[idx].max_energy);
+                // Phase 51: niche resource-partition preference multiplier.
+                let pref = self.niche_pref_at(self.agents[idx].clade_id, self.agents[idx].x, self.agents[idx].z);
+                self.agents[idx].energy = (self.agents[idx].energy + take * 8.0 * pref).min(self.agents[idx].max_energy);
                 self.agents[idx].bite = 1.8;
                 if self.carcasses[ci].energy <= 0.2 { self.carcasses.remove(ci); }
             }
@@ -5248,7 +5312,9 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             let gi = self.cell_index(self.agents[idx].x, self.agents[idx].z);
             if gi >= 0 && (gi as usize) < self.grass.len() && (self.grass[gi as usize] as f64) > 0.1 {
                 let take = self.take_grass(idx, gi as usize, 0.18);
-                self.agents[idx].energy = (self.agents[idx].energy + take * 58.0).min(self.agents[idx].max_energy);
+                // Phase 51: niche resource-partition preference multiplier.
+                let pref = self.niche_pref_mult(self.agents[idx].clade_id, gi as usize);
+                self.agents[idx].energy = (self.agents[idx].energy + take * 58.0 * pref).min(self.agents[idx].max_energy);
                 self.agents[idx].bite = 2.2;
             }
         }
@@ -5422,7 +5488,9 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             let want = if in_aquatic { 0.12 * 1.5 } else { 0.0 };
             if fish_eats_plant && want > 0.0 && gi >= 0 && (gi as usize) < self.grass.len() && (self.grass[gi as usize] as f64) > 0.1 {
                 let take = self.take_grass(idx, gi as usize, want);
-                self.agents[idx].energy = (self.agents[idx].energy + take * 62.0 * 1.5).min(self.agents[idx].max_energy);
+                // Phase 51: niche resource-partition preference multiplier.
+                let pref = self.niche_pref_mult(self.agents[idx].clade_id, gi as usize);
+                self.agents[idx].energy = (self.agents[idx].energy + take * 62.0 * 1.5 * pref).min(self.agents[idx].max_energy);
                 self.agents[idx].bite = FISH_BITE_INTERVAL;
             }
         }
@@ -5568,7 +5636,12 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             if self.agents[idx].bite <= 0.0 {
                 let take = DECO_BITE_INTERVAL.min(self.carcasses[ci].energy);
                 self.carcasses[ci].energy -= take;
-                self.agents[idx].energy = (self.agents[idx].energy + take * 62.0 * deco_eff).min(self.agents[idx].max_energy);
+                // Phase 51: niche resource-partition preference multiplier.
+                // For a DECO band member the multiplier keys off its own cell
+                // — the soil it mineralizes — so the mineral-preferring side
+                // of the axis feeds back into the very deposit it builds.
+                let pref = self.niche_pref_at(self.agents[idx].clade_id, self.agents[idx].x, self.agents[idx].z);
+                self.agents[idx].energy = (self.agents[idx].energy + take * 62.0 * deco_eff * pref).min(self.agents[idx].max_energy);
                 self.agents[idx].bite = DECO_BITE_INTERVAL;
 
                 // Mineral deposit: carcass mass → soil minerals at the deco's
@@ -7760,6 +7833,7 @@ impl Ecology {
             BudgetForkOn: self.budget_fork,
             KindBudgets: self.kind_budgets.clone(),
             SpeciationMinSide: self.speciation_min_side,
+            NichePartitionOn: self.niche_partition,
             // Phase 39.1: group layer. `founder_genome` is serialized in full —
             // it is the propagation bottleneck, so it must survive the hop for
             // a restored sim to keep breeding from the same single genome.
@@ -8462,6 +8536,12 @@ impl Ecology {
                 state.KindBudgets.clone()
             },
             speciation_min_side: state.SpeciationMinSide,
+            // Phase 51: niche resource partition. Pre-v18 archives carry no
+            // flag → the current default world config (partition ON); the
+            // O(1) niche cache is rebuilt from the restored clade table below.
+            niche_partition: state.NichePartitionOn,
+            niche_partition_share: crate::niche::NichePartitionShare::default(),
+            niche_by_clade: Vec::new(),
             culture_fidelity: state.CultureFidelity,
             culture_bias_channel: state.CultureBiasChannel,
             // Phase 39.1: group layer. Pre-v11 archives carry no groups →
@@ -8488,6 +8568,9 @@ impl Ecology {
         // save→restore→save hop is JSON-identical even when the restored world
         // has not yet reached its next detection pass.
         eco.refresh_clade_stats();
+        // Phase 51: rebuild the O(1) niche cache the same way — a restored
+        // world must not wait for the next detection pass to see its niches.
+        eco.rebuild_niche_cache();
         eco
     }
 }
