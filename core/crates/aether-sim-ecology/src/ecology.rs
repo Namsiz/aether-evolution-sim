@@ -6518,7 +6518,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         // kind 1 = plain death (resource loss / old age). A root clade
         // emptying is a TRUE species extinction — no rescue exists anymore
         // (the Phase 34 神之手 retirement makes this the real record).
-        let mut extinct: Vec<(u32, u8, u32)> = Vec::new();
+        let mut extinct: Vec<(u32, u8, u32, Option<u32>)> = Vec::new();
         for clade in self.species_clades.iter_mut() {
             if clade.members.is_empty() && clade.death_tick.is_none() {
                 clade.death_tick = Some(now);
@@ -6527,10 +6527,31 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 } else {
                     EVENT_KIND_EXTINCTION
                 };
-                extinct.push((clade.id, ek, clade.kind_id));
+                extinct.push((clade.id, ek, clade.kind_id, clade.derived_kind));
             }
         }
-        for (id, ek, kid) in extinct {
+        for (id, ek, kid, derived) in extinct {
+            // Phase 49: an extinct derived kind returns its budget share up
+            // the fork lineage — the guild total stays conserved across
+            // speciation/turnover cycles (a permanently leaking share would
+            // shrink the family one extinction at a time). Root kinds never
+            // return (they hold the family budget by definition). The return
+            // is idempotent: a second extinct clade of the same kind sees 0.
+            let mut ret_budget = 0u32;
+            if self.budget_fork {
+                if let Some(dk) = derived {
+                    let dk = dk as SpeciesKind;
+                    let share = self.kind_budget(dk);
+                    if share > 0 {
+                        if let Some(pk) = self.kind_def(dk).parent_kind {
+                            let parent_share = self.kind_budget(pk);
+                            self.set_kind_budget(pk, parent_share + share);
+                        }
+                        self.set_kind_budget(dk, 0);
+                        ret_budget = share as u32;
+                    }
+                }
+            }
             self.speciation_events.push(CladeSpeciationEvent {
                 tick: now,
                 parent_clade_id: id,
@@ -6539,7 +6560,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 event_kind: ek,
                 kind_id: kid,
                 parent_budget: 0,
-                child_budget: 0,
+                child_budget: ret_budget,
             });
         }
 
