@@ -124,17 +124,19 @@ fn group_off_is_bit_exact_phase36_anchor() {
     // has fired by then). Phase 45: the patch layer + regrowth-noise field
     // also run in the group-off arm, so all four anchors move again. Phase 43
     // values (previous):
-    //   @300 0xf5cc546cb068941f · @3000 0x1ec5282f975a354e
-    //   seed2 @300 0x7a3fe91e7165c234 · v1 @300 0x5b514478b9799fa0
-    assert_eq!(checksum_at(20261102, 300, false), "0xf7b865ce421aeb0e");
-    assert_eq!(checksum_at(20261102, 3000, false), "0x8f81c9041a132838");
-    assert_eq!(checksum_at(20261105, 300, false), "0xc56ee1f0c8d2528f");
+    // Phase 45 values (previous):
+    //   @300 0xf7b865ce421aeb0e · @3000 0x8f81c9041a132838
+    //   seed2 @300 0xc56ee1f0c8d2528f · v1 @300 0x75c621a32eb86951
+    // Phase 47: region islands + philopatry + DECO mutation ×5.
+    assert_eq!(checksum_at(20261102, 300, false), "0x7d2c8613d01cb79d");
+    assert_eq!(checksum_at(20261102, 3000, false), "0x88a4b980bac4d925");
+    assert_eq!(checksum_at(20261105, 300, false), "0xbd6a86a9fe8264e7");
 
     // Same v1 anchor (the historical stream must not see the group hash).
     let mut eco = Ecology::new(20261102);
     eco.group_on = false;
     run_ticks(&mut eco, 1, 300);
-    assert_eq!(eco.checksum_v1(), "0x75c621a32eb86951");
+    assert_eq!(eco.checksum_v1(), "0xc180a8890e5e4c5c");
 }
 
 // ---------------------------------------------------------------------------
@@ -412,8 +414,8 @@ fn save_v11_roundtrip_is_bit_exact() {
     let mut eco = grouped_world(600);
     let state = eco.to_save_state();
     assert_eq!(state.version, save_state::SAVE_STATE_VERSION);
-    // Phase 45 bumped the schema to v15 (patch layer + cultural value).
-    assert_eq!(save_state::SAVE_STATE_VERSION, 15);
+    // Phase 47 bumped the schema to v16 (dispersal + region islands).
+    assert_eq!(save_state::SAVE_STATE_VERSION, 16);
     assert!(!state.Groups.is_empty());
 
     let json = serde_json::to_string(&state).expect("save serializes");
@@ -456,9 +458,9 @@ fn legacy_v10_archive_loads_as_solitary_world() {
     let eco = grouped_world(400);
     let json = serde_json::to_string(&eco.to_save_state()).unwrap();
     let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
-    // Phase 45 bumped the schema to v15 (patch layer + cultural value);
+    // Phase 47 bumped the schema to v16 (dispersal + region islands);
     // older layers ride alongside (all serde-defaulted).
-    assert_eq!(v["Version"], 15);
+    assert_eq!(v["Version"], 16);
     // Strip every v10/v11/v13/v14 addition — this is exactly what a v10 archive looks like.
     v["Version"] = serde_json::json!(10);
     let obj = v.as_object_mut().unwrap();
@@ -467,7 +469,8 @@ fn legacy_v10_archive_loads_as_solitary_world() {
               "TeachOn", "AbiogenesisOn", "AbioRngState",
               "AbiogenesisEvents", "AbiogenesisTicks",
               "PatchOn", "PatchP", "PatchRngState", "PatchEvents", "PatchLastTick",
-              "CultureValueOn"] {
+              "CultureValueOn", "DispersalP", "DispersalRngState", "DispersalEvents",
+              "DispersalLastTick", "RegionIsolation", "DecoMutScale"] {
         obj.remove(k);
     }
     if let Some(tokens) = obj.get_mut("TokenRegistry").and_then(|v| v.as_array_mut()) {
@@ -479,7 +482,7 @@ fn legacy_v10_archive_loads_as_solitary_world() {
     for a in obj["Agents"].as_array_mut().unwrap() {
         let ao = a.as_object_mut().unwrap();
         for k in ["GroupId", "Role", "SomaticDamage", "Triune",
-                  "TriuneEquivStreak", "TriuneAgreeBits", "TriuneAgreeN"] {
+                  "TriuneEquivStreak", "TriuneAgreeBits", "TriuneAgreeN", "Region"] {
             ao.remove(k);
         }
     }

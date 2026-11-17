@@ -80,6 +80,11 @@ const JITTER: [(f64, f64); 8] = [
 /// Returns the two anchors.
 fn seed_two_clusters(eco: &mut Ecology, co_located: bool) -> ((f64, f64), (f64, f64)) {
     eco.deco_eff_choice_mode = save_state::DECO_CHOICE_LEGACY;
+    // Phase 47 instrumentation: the Phase 15 split fixture is orthogonal to
+    // the region-island mating rule and the amplified DECO mutation clock;
+    // pin both to the legacy behaviour so the seeded 0.9 gap is measured.
+    eco.region_isolation = false;
+    eco.deco_mut_scale = 1.0;
     let (a, b) = if co_located {
         let p = two_far_land_points().0;
         (p, p)

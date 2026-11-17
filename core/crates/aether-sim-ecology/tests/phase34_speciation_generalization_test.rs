@@ -388,6 +388,14 @@ fn save_v8_roundtrip_includes_derived_kinds() {
     }
     let v7ish: save_state::SaveState = serde_json::from_value(v).unwrap();
     let legacy = Ecology::from_save_state(v7ish);
-    assert_eq!(legacy.kinds.len(), 6, "a v7-style save restores the six legacy kinds");
+    // The six legacy kinds are backfilled unconditionally; agent kind names
+    // that a live derived fork introduced are re-registered on restore, so a
+    // v7-style document with derived agents legitimately lands above six.
+    assert!(legacy.kinds.len() >= 6, "a v7-style save restores the six legacy kinds");
+    for name in ["herb", "pred", "scav", "omn", "fish", "deco"] {
+        let id = legacy.kinds.id_of(name)
+            .unwrap_or_else(|| panic!("legacy kind {name} missing after v7 restore"));
+        assert_eq!(legacy.kind_name(id), name);
+    }
     assert!(legacy.last_spec_tick_by_kind.is_empty(), "v7 save → zeroed time gate");
 }

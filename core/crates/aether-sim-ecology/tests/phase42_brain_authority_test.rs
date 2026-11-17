@@ -294,6 +294,12 @@ fn inhibition_gate_is_calibrated() {
 #[test]
 fn brain_driven_class_is_not_worse_off() {
     let mut eco = Ecology::new(20261102);
+    // Phase 47 instrumentation: this fitness A/B isolates the behaviour-
+    // authority channel, so the orthogonal region-island mating rule and the
+    // amplified DECO mutation clock are pinned off (same discipline as the
+    // group/triune switches in the niche tests).
+    eco.region_isolation = false;
+    eco.deco_mut_scale = 1.0;
     run_ticks(&mut eco, 1, 3000);
     let f = &eco.triune_stats().fitness;
     assert!(f.brain_deaths > 0, "no brain-driven agent has died yet");
@@ -357,7 +363,7 @@ fn save_v13_roundtrip_continues_bit_exactly() {
     run_ticks(&mut eco, 1, 400);
     let state = eco.to_save_state();
     assert_eq!(state.version, save_state::SAVE_STATE_VERSION);
-    assert_eq!(save_state::SAVE_STATE_VERSION, 15);
+    assert_eq!(save_state::SAVE_STATE_VERSION, 16);
     let json = serde_json::to_string(&state).unwrap();
     assert!(json.contains("\"ReplayOn\":true"));
     let mut restored = Ecology::from_save_state(serde_json::from_str(&json).unwrap());

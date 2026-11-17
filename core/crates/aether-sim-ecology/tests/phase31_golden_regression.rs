@@ -17,7 +17,18 @@
 //!   seed 20261105 @300  v2 0x2e9539930abd8975
 //!   seed 20261102 @300  v1 0xe6404a7bee633eb8
 //!   (shadow-only @300 for the A/B arm: v2 0xf31c4501f764be29)
-//! PHASE 45 ANCHORS (current; **tenth re-baseline** — patch disturbance +
+//! PHASE 47 ANCHORS (current; **eleventh re-baseline** — geographic isolation
+//! maintenance: maternal philopatry, four home-region islands with balanced
+//! DECO founder clusters, region-local mating, priority-effect colonisation,
+//! DECO mutation ×5, threshold 0.25, viability gate, and one shared family
+//! carrying capacity. All four anchors move: initial DECO homes are now
+//! clustered by region and every DECO birth uses the amplified mutation
+//! amplitude, so the trajectory forks from the first DECO birth).
+//!   seed 20261102 @300  v2 0x651cf47e6d54ca64
+//!   seed 20261102 @3000 v2 0xa022a6e2e2ca08f6
+//!   seed 20261105 @300  v2 0x5b9200b4b88d971a
+//!   seed 20261102 @300  v1 0xc6c4cdca821c064b
+//! PHASE 45 ANCHORS (previous; **tenth re-baseline** — patch disturbance +
 //! static regrowth-noise heterogeneity + cultural value selection. All four
 //! anchors move: the fixed-seed noise field changes grass growth from tick 1,
 //! and the patch layer fires within the @3000 window on these seeds).
@@ -107,26 +118,25 @@ fn checksum_at(seed: u32, ticks: u32) -> String {
 
 #[test]
 fn golden_seed_20261102_300_ticks() {
-    // Phase 45 re-baseline (patch disturbance + regrowth-noise field + value selection).
+    // Phase 47 re-baseline (region islands + philopatry + DECO mutation ×5).
     let ck = checksum_at(20261102, 300);
-    assert_eq!(ck, "0xa68939c089f4207f",
+    assert_eq!(ck, "0x651cf47e6d54ca64",
         "300-tick v2 checksum drifted: {} — see file docs + Phase 45 report", ck);
 }
 
 #[test]
 fn golden_seed_20261102_3000_ticks() {
-    // Phase 45 re-baseline (patch events fire inside this window; the noise
-    // field shifts grass growth from tick 1).
+    // Phase 47 re-baseline (the first region split fires inside this window).
     let ck = checksum_at(20261102, 3000);
-    assert_eq!(ck, "0xda91fbd0e1d3d570",
+    assert_eq!(ck, "0xa022a6e2e2ca08f6",
         "3000-tick v2 long-run checksum drifted: {} — if this change is an approved re-baseline, pin the new value here and record it in the phase report", ck);
 }
 
 #[test]
 fn golden_seed_20261105_300_ticks() {
-    // Phase 45 re-baseline.
+    // Phase 47 re-baseline.
     let ck = checksum_at(20261105, 300);
-    assert_eq!(ck, "0x009ddda639c5c149",
+    assert_eq!(ck, "0x5b9200b4b88d971a",
         "alt-seed v2 checksum drifted: {} — if this change is an approved re-baseline, pin the new value here and record it in the phase report", ck);
 }
 
@@ -136,8 +146,8 @@ fn golden_seed_20261105_300_ticks() {
 fn golden_300_tick_trajectory_bit_exact_to_v1() {
     let mut eco = Ecology::new(20261102);
     for t in 1..=300 { eco.update(0.1, daylight(t)); }
-    assert_eq!(eco.checksum_v1(), "0xa774fb2033268005",
-        "the 300-tick v1 trajectory must stay at the pinned Phase 45 anchor");
+    assert_eq!(eco.checksum_v1(), "0xc6c4cdca821c064b",
+        "the 300-tick v1 trajectory must stay at the pinned Phase 47 anchor");
 }
 
 /// Determinism guard: same seed + same ticks must be bit-identical across

@@ -170,6 +170,11 @@ fn setup_split() -> (Ecology, u32, [(f64, f64); 2]) {
     // the burden's time-averaged signature (measured: 84.3 vs 83.6); with it
     // off the same A/B shows 69.3 vs 88.5.
     eco.group_on = false;
+    // Phase 47 instrumentation: the region-island model and its amplified
+    // DECO mutation clock are orthogonal to the Phase 16 niche instrument;
+    // pin both to the legacy Phase 45 behaviour for this A/B.
+    eco.region_isolation = false;
+    eco.deco_mut_scale = 1.0;
     // Phase 42: same discipline for the triune behaviour authority — the
     // taken-over agents steer their own bodies, which is another chaotic
     // amplifier orthogonal to the burden mechanism under test here.
@@ -199,6 +204,9 @@ fn clade_niche_diverges_from_parent() {
     // drift-stable bookkeeping with no competitive pressure.
     let mut eco = Ecology::new(SEED);
     eco.deco_eff_choice_mode = save_state::DECO_CHOICE_LEGACY;
+    // Phase 47 instrumentation (see setup_split).
+    eco.region_isolation = false;
+    eco.deco_mut_scale = 1.0;
     let (a, b) = seed_two_clusters(&mut eco);
     let anchors = [a, b];
     for t in 1..=600u32 {

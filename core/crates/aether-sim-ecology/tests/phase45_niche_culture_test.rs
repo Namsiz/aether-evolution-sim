@@ -102,22 +102,29 @@ fn patch_wipes_grass_and_pulses_mineral() {
 #[test]
 fn patch_tick_fires_and_changes_fields() {
     let mut eco = Ecology::new(20261102);
+    let mut control = Ecology::new(20261102);
     run_ticks(&mut eco, 0, 100);
-    let mineral_before: f64 = eco.mineral_field().iter().map(|&m| m as f64).sum();
-    let grass_before: f64 = eco.grass().iter().map(|&g| g as f64).sum();
+    run_ticks(&mut control, 0, 100);
     let events_before = eco.patch_event_count();
 
-    // Force-fire: patch_p = 1 guarantees the tick-101 roll triggers.
+    // Force-fire: patch_p = 1 guarantees the tick-101 roll triggers. The
+    // control twin skips the event for this tick, so one tick of ordinary
+    // regrowth cannot mask the wipe (the old direct before/after comparison
+    // became grass-density dependent once the Phase-47 founding layout moved).
     eco.patch_p = 1.0;
+    control.patch_p = 0.0;
     eco.update(0.1, daylight(101));
+    control.update(0.1, daylight(101));
     assert_eq!(eco.patch_event_count(), events_before + 1, "patch_p=1 must fire exactly one event");
+    assert_eq!(control.patch_event_count(), events_before, "control must not fire");
     let mineral_after: f64 = eco.mineral_field().iter().map(|&m| m as f64).sum();
-    assert!(mineral_after > mineral_before,
-        "mineral sum must rise after a pulse ({mineral_before} -> {mineral_after})");
+    let mineral_control: f64 = control.mineral_field().iter().map(|&m| m as f64).sum();
+    assert!(mineral_after > mineral_control,
+        "mineral sum must rise above the no-patch twin ({mineral_control} -> {mineral_after})");
     let grass_after: f64 = eco.grass().iter().map(|&g| g as f64).sum();
-    // The wipe removes grass far faster than one tick of regrowth can add it.
-    assert!(grass_after < grass_before,
-        "grass sum must drop after a wipe ({grass_before} -> {grass_after})");
+    let grass_control: f64 = control.grass().iter().map(|&g| g as f64).sum();
+    assert!(grass_after < grass_control,
+        "grass sum must drop below the no-patch twin ({grass_control} -> {grass_after})");
     assert_eq!(eco.patch_last_tick, eco.tick_count(), "last-event tick telemetry");
 }
 

@@ -94,11 +94,22 @@
 /// continues from its own state. The static regrowth-noise field is NOT
 /// persisted: it is a fixed-seed constant of the model and is re-derived
 /// identically on every construction/restore.
+/// v15 → v16 (Phase 47): natal dispersal + region islands. The sim level
+/// gains `DispersalP` (per-birth distant-founding probability;
+/// `default_dispersal_p` → v15 archives land on the current calibration), the
+/// `DispersalRngState` dedicated-stream snapshot, the `DispersalEvents` /
+/// `DispersalLastTick` counters, the `RegionIsolation` toggle and the
+/// `DecoMutScale` multiplier. Each agent
+/// gains `Region` (geographic home deme; `u8::MAX` sentinel on pre-v16 saves →
+/// the loader assigns balanced angular demes). All are `#[serde(default)]` → a
+/// v15 archive restores with the dispersal stream re-derived from
+/// `seed ^ DISPERSAL_RNG_TAG`, zero events, balanced regions and continues
+/// from its own state.
 
 use serde::{Deserialize, Serialize};
 
 
-pub const SAVE_STATE_VERSION: u32 = 15;
+pub const SAVE_STATE_VERSION: u32 = 16;
 pub const SAVE_STATE_SCHEMA_NAME: &str = "aether-sim-save-state";
 
 /// DECO selection-pressure mode selector (persisted in SaveState v2).
@@ -259,6 +270,11 @@ pub struct SaveAgent {
     /// pre-Phase-15 v2 saves loadable — they restore with clade_count = 0.
     #[serde(default)]
     pub clade_id: u32,
+    /// Phase 47: geographic home region (0..REGION_COUNT-1). Pre-v16 saves
+    /// carry the `u8::MAX` sentinel; the loader then assigns balanced angular
+    /// demes exactly as a fresh world does.
+    #[serde(default = "default_region_sentinel")]
+    pub Region: u8,
     pub offspring: u32,
     /// Phase 32: open-locus slots (variable-length; `#[serde(default)]` →
     /// pre-v6 saves restore with an empty ext list, i.e. genesis OFF).
@@ -944,6 +960,30 @@ pub struct SaveState {
     /// saves land ON (the Phase-45 default world config).
     #[serde(default = "default_true")]
     pub CultureValueOn: bool,
+    /// Phase 47: per-birth probability of founding a distant home range.
+    /// `#[serde(default = "default_dispersal_p")]` → pre-v16 saves land on
+    /// the current calibration (0.0 would silently disable the layer).
+    #[serde(default = "default_dispersal_p")]
+    pub DispersalP: f64,
+    /// Phase 47: dedicated dispersal stream snapshot. Restored as a zeroed
+    /// re-derivation for pre-v16 saves (same pattern as the other streams).
+    #[serde(default)]
+    pub DispersalRngState: u32,
+    /// Phase 47: cumulative successful distant-founding events (telemetry).
+    #[serde(default)]
+    pub DispersalEvents: u64,
+    /// Phase 47: tick of the most recent successful dispersal (telemetry).
+    #[serde(default)]
+    pub DispersalLastTick: u32,
+    /// Phase 47: region-island isolation toggle (same-region mating).
+    /// `#[serde(default = "default_true")]` → pre-v16 saves land ON.
+    #[serde(default = "default_true")]
+    pub RegionIsolation: bool,
+    /// Phase 47: DECO mutation-amplitude multiplier. `#[serde(default =
+    /// "default_deco_mut_scale")]` → pre-v16 saves land on the island
+    /// calibration; explicit values roundtrip for mechanism-isolation tests.
+    #[serde(default = "default_deco_mut_scale")]
+    pub DecoMutScale: f64,
 }
 
 fn default_group_on() -> bool {
@@ -952,6 +992,10 @@ fn default_group_on() -> bool {
 
 fn default_role_none() -> u8 {
     0xFF
+}
+
+fn default_region_sentinel() -> u8 {
+    u8::MAX
 }
 
 fn default_culture_on() -> bool {
@@ -991,4 +1035,14 @@ fn default_carcass_lock_enabled() -> bool {
 /// on the current calibration (0.0 would disable the layer entirely).
 fn default_patch_p() -> f64 {
     crate::patch::PATCH_P
+}
+
+/// Default for the Phase 47 `DispersalP` save-state field: legacy restores
+/// land on the current calibration rather than the layer's off value.
+fn default_dispersal_p() -> f64 {
+    crate::ecology::DISPERSAL_P
+}
+
+fn default_deco_mut_scale() -> f64 {
+    crate::ecology::DECO_MUT_SCALE
 }

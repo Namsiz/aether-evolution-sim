@@ -26,12 +26,20 @@ fn grass_spread_consistency_at_tick_40() {
     // growth from tick 1, so the t=40 fingerprint moves (pre-Phase-45 value:
     // 7835318463236313578).
     let mut eco = Ecology::new(20261102);
+    // Phase 47 instrumentation: the oracle fingerprint isolates the grass /
+    // gut-transit path, so the region mating rule and the amplified DECO
+    // mutation clock are pinned off.
+    eco.region_isolation = false;
+    eco.deco_mut_scale = 1.0;
     for t in 1..=40u32 {
         let daylight = 0.5 + 0.5 * aether_libm::sin((t as f64 / 300.0) * std::f64::consts::PI);
         eco.update(0.1, daylight);
     }
     assert_eq!(eco.tick_count(), 40, "tick_count must be exactly 40");
-    assert_eq!(grass_fingerprint(&eco), 9711796204457772056, "full-grid grass fingerprint at t=40 (post-spread, Phase 45: regrowth-noise field)");
+    // Phase 47 rebase: region-island founding relocates the DECO cohort, so
+    // its gut-transit deposits shift the grass field even with the Phase-47
+    // mating/mutation layers pinned off. Old value: 9711796204457772056.
+    assert_eq!(grass_fingerprint(&eco), 15612915205843477446, "full-grid grass fingerprint at t=40 (post-spread, Phase 47)");
 }
 
 #[test]
@@ -83,6 +91,9 @@ fn scav_omn_ecology_loop_active_and_counts_match_js_oracle() {
     use std::collections::HashSet;
 
     let mut eco = Ecology::new(20261102);
+    // Phase 47 instrumentation: this oracle isolates the SCAV/OMN loops.
+    eco.region_isolation = false;
+    eco.deco_mut_scale = 1.0;
     // Phase 8: carcass locks alter SCAV/OMN food competition, drifting the
     // exact population oracle. This test locks pre-Phase-8 JS counts, so the
     // new mechanism is disabled here; carcass-lock behavior is covered by
@@ -100,10 +111,12 @@ fn scav_omn_ecology_loop_active_and_counts_match_js_oracle() {
             // Phase 42 re-anchor: triune behaviour authority + replay + the
             // Allee relief shift the census again — SCAV stays 8 (9 at t=300)
             // and OMN climbs 12→13→14→16 (Phase 41.1: 8 / 12→13→14→15).
+            // Phase 47: the region-island founding layout moves the t=300 OMN
+            // count to 16 (only the final sample changes).
             let s_gold = 8usize;
             assert_eq!(s, s_gold, "scav count at t={}", t);
             let o_gold = match t {
-                300 => 14usize,
+                300 => 16usize,
                 250 => 14,
                 200 => 13,
                 _ => 12,

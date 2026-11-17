@@ -830,6 +830,10 @@ pub struct Agent {
     /// Phase 15: species clade membership. 0 = root clade of the kind (the
     /// value every fresh/legacy agent carries until the engine buckets it).
     pub clade_id: u32,
+    /// Phase 47: home region id (geographic deme). Initial members are
+    /// balanced across REGION_COUNT angular sectors; births inherit the
+    /// mother's region, migrants take the target region.
+    pub region: u8,
     pub offspring: u32,
     /// Phase 36: the agent's micro-brain (tiny recurrent network). Default
     /// zeroed; `spawn` seeds it from the kind's grandfather reference network
@@ -1004,13 +1008,19 @@ pub struct SpeciationEvent {
 const SPECIATION_CHECK_TICKS: u32 = 60;
 /// MST cut threshold on the weighted multi-axis trait distance (Phase 34:
 /// core speed/sense/size + ext loci + the DECO efficiency axis). All axes are
-/// normalized to roughly unit scale (see `pair_mst_distance`), so 0.35 is a
-/// real bimodal split, not mutation noise.
+/// normalized to roughly unit scale (see `pair_mst_distance`).
+///
+/// Phase 47 calibration (Plan C): the Phase-34 value 0.35 was calibrated on a
+/// single panmictic 80-agent population. The region-island model splits that
+/// population into four ≈20-agent demes, whose between-deme MST edge peaks in
+/// the 0.25-0.35 band (Phase-47 diagnostic); 0.25 is the lowest cut that still
+/// sits above the within-deme mutation noise floor. The instrument remains
+/// kind-uniform — only the scale changed.
 ///
 /// INSTRUMENT, NOT SCRIPT (Phase 34 ruling): this constant and the gates
 /// below are measurement parameters of the detector — they are applied
 /// identically to every kind (no per-species script, no directional bias).
-pub const SPECIATION_DISTANCE_THRESHOLD: f64 = 0.35;
+pub const SPECIATION_DISTANCE_THRESHOLD: f64 = 0.25;
 /// Per-paired-ext-locus contribution to the MST edge weight: the mean over
 /// id-paired loci of |Δvalue| (unit [0,1] band, already normalized) times
 /// this static weight. Unpaired (one-sided) loci contribute 0 — symmetric,
@@ -1048,6 +1058,52 @@ pub const NICHE_OVERLAP_THRESHOLD: f64 = 0.15;
 pub const COMPETITION_BURDEN: f64 = 0.15;
 /// Cap on the summed burden of one clade (multi-overlap stacking).
 pub const COMPETITION_BURDEN_MAX: f64 = 0.5;
+
+// ----- Phase 47: natal dispersal (geographic isolation maintenance) --------
+//
+// Phase 46 showed the first split is a one-shot event: once niche_offset
+// separates the two clades, competition vanishes and the tree freezes. The
+// missing ingredient is population structure. Natal dispersal gives the
+// world the standard philopatry/LDD mixture (Greenwood 1980): most juveniles
+// establish their home range at the natal site, a minority colonise a distant
+// habitat patch. Rare long-distance founding keeps local demes partially
+// isolated between colonisation waves, so drift can diverge them past the
+// speciation gate without any scripted selection.
+/// Per-birth probability that the juvenile's home range is founded in a
+/// different region (a vacant island) instead of the natal region. Default is
+/// the low-dispersal calibration; the field is public so the sweep test can
+/// set it per arm.
+pub const DISPERSAL_P: f64 = 0.05;
+/// Distance band of a dispersal event (world units). The lower bound sits
+/// well above GEO_ISOLATION_DIST so a founded deme starts as a geographic
+/// outlier rather than a neighbour of the natal one.
+pub const DISPERSAL_MIN_DIST: f64 = 180.0;
+pub const DISPERSAL_MAX_DIST: f64 = 420.0;
+/// Bounded rejection sampling for a habitat-legal landing cell. Each try
+/// consumes two dedicated-stream draws; falling through after this many
+/// misses returns the natal site (a failed disperser stays home).
+const DISPERSAL_TRIES: usize = 8;
+/// A land disperser must land at least this far (current-position clearance)
+/// from every live conspecific, otherwise the "founder" would be dropped
+/// inside the source cloud and be reabsorbed by gene flow. 100 = the
+/// detector's own geographic-isolation gate, so a successful founder start is
+/// by construction a geographic outlier.
+const DISPERSAL_CLEARANCE: f64 = GEO_ISOLATION_DIST;
+/// Dedicated dispersal stream (`seed ^ DISPERSAL_RNG_TAG`). Keeping it off
+/// the main/prng/fish streams means `dispersal_p=0` is a bit-exact no-op and
+/// the river of RNG draws every other subsystem sees never depends on how
+/// many juveniles dispersed.
+pub const DISPERSAL_RNG_TAG: u32 = 0x44_49_53_50; // "DISP"
+/// Phase 47: number of home-range regions (geographic demes) in the island
+/// model. Initial members of every kind are split into equal-sized angular
+/// sectors; mating is region-local and migration is the only cross-region
+/// gene flow.
+pub const REGION_COUNT: u8 = 4;
+/// Phase 47: DECO mutation-amplitude multiplier. Small island demes (≈20
+/// individuals) need a faster drift clock than the panmictic 80-agent world
+/// to cross the speciation gap inside a 200k-tick horizon. Applied to every
+/// DECO-family birth; other kinds keep their legacy amplitude.
+pub const DECO_MUT_SCALE: f64 = 5.0;
 /// Wander-heading bias in radians: a clade at niche +/-1 roams up to
 /// +/-0.9 rad off its unbiased random heading, spatially separating clades.
 pub const NICHE_HEADING_BIAS: f64 = 0.9;
@@ -1529,6 +1585,21 @@ pub struct Ecology {
     /// 加成）。false = Phase 44.1 行为（插入序 + 基础保真度）——A/B 对照臂；
     /// 价值 EMA 记账始终开启（零 RNG 零能量，不影响轨迹）。
     pub culture_value_on: bool,
+    /// Phase 47: natal dispersal probability (0.0 = bit-exact Phase-46 arm).
+    pub dispersal_p: f64,
+    /// Phase 47: dedicated dispersal stream (`seed ^ DISPERSAL_RNG_TAG`).
+    pub dispersal_rng: Mulberry32,
+    /// Phase 47: successful distant founding events (telemetry).
+    pub dispersal_events: u64,
+    /// Phase 47: tick of the most recent successful dispersal (telemetry).
+    pub dispersal_last_tick: u32,
+    /// Phase 47: region-island isolation toggle (same-region mating). Default
+    /// ON; persisted so a save can freeze the island model.
+    pub region_isolation: bool,
+    /// Phase 47: DECO mutation-amplitude multiplier (default `DECO_MUT_SCALE`).
+    /// Per-instance so mechanism-isolation tests can pin the legacy amplitude;
+    /// the default world uses the island calibration.
+    pub deco_mut_scale: f64,
 }
 
 fn default_fidelity() -> f64 {
@@ -1692,6 +1763,12 @@ impl Ecology {
             regrow_noise: crate::patch::generate_regrow_noise(),
             isolation_by_kind: Vec::new(),
             culture_value_on: true,
+            dispersal_p: DISPERSAL_P,
+            dispersal_rng: Mulberry32::new(seed ^ DISPERSAL_RNG_TAG),
+            dispersal_events: 0,
+            dispersal_last_tick: 0,
+            region_isolation: true,
+            deco_mut_scale: DECO_MUT_SCALE,
         };
         eco.init_grass();
         eco.seed_life();
@@ -1879,6 +1956,12 @@ impl Ecology {
             regrow_noise: crate::patch::generate_regrow_noise(),
             isolation_by_kind: Vec::new(),
             culture_value_on: true,
+            dispersal_p: DISPERSAL_P,
+            dispersal_rng: Mulberry32::new(seed ^ DISPERSAL_RNG_TAG),
+            dispersal_events: 0,
+            dispersal_last_tick: 0,
+            region_isolation: true,
+            deco_mut_scale: DECO_MUT_SCALE,
         };
         eco.init_grass();
         eco.seed_life();
@@ -2907,6 +2990,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             let age_d = 20.0 + self.rng.next_f64() * 50.0;
             self.spawn(DECO, x, z, Some(g), 0, age_d);
         }
+        self.assign_initial_regions();
     }
 
     // ----- RNG helpers ------------------------------------------------------
@@ -3029,7 +3113,8 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
     /// streams (`rng`/`prng`/`fish_rng`) exactly like every birth.
     pub fn mutate(&mut self, g: &Genome, kind: SpeciesKind, mut_scale: f64) -> Genome {
         let mut out = g.clone();
-        let ms = if mut_scale.is_finite() && mut_scale > 0.0 { mut_scale } else { 1.0 };
+        let mut ms = if mut_scale.is_finite() && mut_scale > 0.0 { mut_scale } else { 1.0 };
+        if self.root_kind(kind) == DECO { ms *= self.deco_mut_scale; }
         let pop_size = self.count(kind);
         let (sp_lo, sp_hi) = self.kind_def(kind).speed_clamp;
         let mut_fin = self.kind_def(kind).mutates_fin_color;
@@ -3118,6 +3203,17 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         self.agents.iter().filter(|a| a.alive && a.kind == kind).count()
     }
 
+    /// Phase 47: total living members of a root kind family (root + every
+    /// derived fork). The family shares one carrying capacity, so a split
+    /// changes the tree's shape but not the guild's biomass budget — without
+    /// this, each derived kind would mint its own 80-slot cap and the
+    /// population would grow with the clade count.
+    pub fn count_family(&self, root: SpeciesKind) -> usize {
+        self.agents.iter()
+            .filter(|a| a.alive && self.root_kind(a.kind) == root)
+            .count()
+    }
+
     /// Mendelian mix + mutation. `mut_scale` comes from the reproducing
     /// partner's somatic damage (Phase 39.1: dirty work raises the offspring
     /// mutation amplitude; 1.0 keeps the pre-39.1 trajectory bit-exact).
@@ -3190,7 +3286,13 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         let def_repro_cd = self.kind_def(kind).repro_cooldown;
         let (se0, se1) = self.kind_def(kind).start_energy;
         let cap = self.biome_max_for(kind, x, z);
-        if self.count(kind) >= cap { return None; }
+        let root = self.root_kind(kind);
+        let family_total = if root == kind {
+            self.count(kind)
+        } else {
+            self.count_family(root)
+        };
+        if family_total >= cap { return None; }
         let g = match genome {
             Some(g) => g,
             None => {
@@ -3253,6 +3355,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             range: range_base * (0.85 + curious_val * 0.5),
             lineage: None,
             clade_id: 0,
+            region: Self::region_of(x, z),
             offspring: 0,
             // Phase 36: seed the micro-brain from the kind's grandfather
             // reference network plus per-agent deterministic noise (zero main
@@ -3724,6 +3827,289 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         (1.0 - (d / (2.0 * tol_avg)).clamp(0.0, 1.0)).max(0.0)
     }
 
+    /// Phase 47: home-quadrant region id (0..3, cheap sign bits — no atan2
+    /// in the mate-filter path). The four land arcs of the annulus are the
+    /// model's geographic islands; region membership is a pure function of
+    /// the home centre, so it needs no saved per-agent field.
+    #[inline]
+    fn region_of(x: f64, z: f64) -> u8 {
+        let two_pi = std::f64::consts::PI * 2.0;
+        let a = aether_libm::atan2(z, x) + std::f64::consts::PI;
+        let sector = (a / two_pi * REGION_COUNT as f64).floor() as i32;
+        sector.clamp(0, REGION_COUNT as i32 - 1) as u8
+    }
+
+    /// Phase 47: same-kind population inside one home region.
+    fn region_count(&self, kind: SpeciesKind, region: u8) -> usize {
+        self.agents.iter().filter(|a| a.alive && a.kind == kind && a.region == region).count()
+    }
+
+    /// Phase 47: split each kind's initial population into equal-sized
+    /// angular sectors (balanced demes, so a sector never starts empty while
+    /// another hogs the founders). Deterministic: angle, then agent id.
+    fn assign_initial_regions(&mut self) {
+        for k in 0..self.kinds.len() as u16 {
+            let mut idxs: Vec<usize> = self.agents.iter().enumerate()
+                .filter(|(_, a)| a.alive && a.kind == k)
+                .map(|(i, _)| i)
+                .collect();
+            let n = idxs.len();
+            if n == 0 { continue; }
+            idxs.sort_by(|&i, &j| {
+                let ai = aether_libm::atan2(self.agents[i].home_z, self.agents[i].home_x);
+                let aj = aether_libm::atan2(self.agents[j].home_z, self.agents[j].home_x);
+                ai.partial_cmp(&aj).unwrap_or(std::cmp::Ordering::Equal)
+                    .then(self.agents[i].id.cmp(&self.agents[j].id))
+            });
+            for (rank, &i) in idxs.iter().enumerate() {
+                self.agents[i].region = ((rank * REGION_COUNT as usize) / n) as u8;
+            }
+            if k == DECO {
+                // Phase 47: the focal splitter starts as four small founder
+                // clusters, one per region. The founder pool is sorted by
+                // deco_efficiency and split into four quantiles, so the four
+                // refugia receive different slices of the standing variation
+                // (allopatric founder pools). A globally scattered founder
+                // set leaves each region's 3-4 individuals hundreds of units
+                // apart; they never meet and three of four demes die before
+                // breeding. Clustering is the island model's initial
+                // condition (each island receives propagules), not a
+                // per-generation script.
+                for r in 0..REGION_COUNT {
+                    let members: Vec<usize> = idxs.iter().copied()
+                        .filter(|&i| self.agents[i].region == r)
+                        .collect();
+                    if members.is_empty() { continue; }
+                    let Some((cx, cz)) = self.region_land_center(r) else { continue; };
+                    let m = members.len();
+                    for (j, &i) in members.iter().enumerate() {
+                        let ang = (j as f64) * std::f64::consts::PI * 2.0 / m as f64;
+                        let px = cx + aether_libm::cos(ang) * 18.0;
+                        let pz = cz + aether_libm::sin(ang) * 18.0;
+                        let ag = &mut self.agents[i];
+                        ag.x = px; ag.z = pz; ag.prev_x = px; ag.prev_z = pz;
+                        ag.home_x = px; ag.home_z = pz;
+                        ag.target_x = px; ag.target_z = pz;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Phase 47: a land centre for one angular region (region bits:
+    /// 0=x<0,z<0; 1=x>=0,z<0; 2=x<0,z>=0; 3=x>=0,z>=0).
+    fn region_land_center(&self, region: u8) -> Option<(f64, f64)> {
+        let ang = -std::f64::consts::PI
+            + (region as f64 + 0.5) * std::f64::consts::PI * 2.0 / REGION_COUNT as f64;
+        for r in [320.0, 280.0, 370.0, 240.0, 420.0, 200.0, 460.0] {
+            let x = aether_libm::cos(ang) * r;
+            let z = aether_libm::sin(ang) * r;
+            if Self::region_of(x, z) != region { continue; }
+            let h = terrain_height(x, z);
+            if h >= WATER_LEVEL + 2.0 && h <= 82.0 && slope_at(x, z) <= 0.75 {
+                return Some((x, z));
+            }
+        }
+        None
+    }
+
+    /// Phase 47: a legal founding site inside an empty region (family
+    /// colonisation). Draws angle + radius + two jitter values on the
+    /// dedicated stream; habitat and diet-resource checks match the
+    /// within-region join path.
+    fn founding_site_in_region(&mut self, kind: SpeciesKind, region: u8) -> Option<(f64, f64)> {
+        // Resource-tracking habitat selection: colonists follow a food cue
+        // (carcass / grass cell / prey individual) inside the target region.
+        // Uniform random points in a 200k-unit sector almost never contain
+        // food, which is why the first colonisation attempts starved.
+        let def = self.kind_def(kind);
+        let mut cues: Vec<(f64, f64)> = Vec::new();
+        if def.diet.eats_carcass {
+            for c in self.carcasses.iter() {
+                if Self::region_of(c.x, c.z) == region { cues.push((c.x, c.z)); }
+            }
+        }
+        if def.diet.eats_plant {
+            for i in (0..self.grass.len()).step_by(3) {
+                if self.grass[i] <= 0.10 { continue; }
+                let col = (i % GRID_N as usize) as f64;
+                let row = (i / GRID_N as usize) as f64;
+                let x = -GRID_SPAN / 2.0 + (col + 0.5) * CELL;
+                let z = -GRID_SPAN / 2.0 + (row + 0.5) * CELL;
+                if Self::region_of(x, z) == region { cues.push((x, z)); }
+            }
+        }
+        for &pk in &def.diet.prey_kinds {
+            for a in self.agents.iter() {
+                if a.alive && a.kind == pk && a.region == region {
+                    cues.push((a.x, a.z));
+                }
+            }
+        }
+        if !cues.is_empty() {
+            let k = (self.dispersal_rng.next_f64() * cues.len() as f64) as usize;
+            let (x, z) = cues[k.min(cues.len() - 1)];
+            let jx = (self.dispersal_rng.next_f64() - 0.5) * 16.0;
+            let jz = (self.dispersal_rng.next_f64() - 0.5) * 16.0;
+            let px = x + jx;
+            let pz = z + jz;
+            if Self::region_of(px, pz) == region {
+                return Some((px, pz));
+            }
+            return Some((x, z));
+        }
+        let centre = -std::f64::consts::PI
+            + (region as f64 + 0.5) * std::f64::consts::PI * 2.0 / REGION_COUNT as f64;
+        for _ in 0..DISPERSAL_TRIES {
+            let ang = centre + (self.dispersal_rng.next_f64() - 0.5)
+                * (std::f64::consts::PI * 2.0 / REGION_COUNT as f64);
+            let r = 200.0 + self.dispersal_rng.next_f64() * 260.0;
+            let x = aether_libm::cos(ang) * r;
+            let z = aether_libm::sin(ang) * r;
+            if Self::region_of(x, z) != region { continue; }
+            let h = terrain_height(x, z);
+            let habitat_ok = if kind == FISH {
+                h >= WATER_LEVEL + 1.0 && h < WATER_LEVEL + 1.5 && slope_at(x, z) <= 0.8
+            } else {
+                h >= WATER_LEVEL + 1.5 && h <= 85.0 && slope_at(x, z) <= 0.8
+            };
+            if habitat_ok && self.landing_has_food(kind, x, z) {
+                return Some((x, z));
+            }
+        }
+        None
+    }
+
+    /// Phase 47: resolve a juvenile's founding site. `natal` is the legacy
+    /// parents' midpoint + jitter. With probability `dispersal_p` the juvenile
+    /// instead draws a direction and a distance in
+    /// [DISPERSAL_MIN_DIST, DISPERSAL_MAX_DIST] from the natal site and is
+    /// placed on the first habitat-legal landing cell that is also at least
+    /// DISPERSAL_CLEARANCE away from every live conspecific (land kinds);
+    /// after DISPERSAL_TRIES misses it stays natal. The dedicated stream is
+    /// touched only when `dispersal_p > 0` and the trigger fires, so the p=0
+    /// arm is a bit-exact pre-Phase-47 trajectory. Returns (x, z, dispersed).
+    fn birth_site(&mut self, kind: SpeciesKind, natal_x: f64, natal_z: f64, natal_region: u8) -> (f64, f64, Option<u8>) {
+        if self.dispersal_p <= 0.0 { return (natal_x, natal_z, None); }
+        if self.dispersal_rng.next_f64() >= self.dispersal_p { return (natal_x, natal_z, None); }
+        if self.region_isolation {
+            if let Some((x, z, r)) = self.region_migrant_site(kind, natal_region) {
+                return (x, z, Some(r));
+            }
+            return (natal_x, natal_z, None);
+        }
+        let max_r = SIM_RADIUS - 30.0;
+        let clearance2 = DISPERSAL_CLEARANCE * DISPERSAL_CLEARANCE;
+        for _ in 0..DISPERSAL_TRIES {
+            let ang = self.dispersal_rng.next_f64() * std::f64::consts::PI * 2.0;
+            let dist = DISPERSAL_MIN_DIST
+                + self.dispersal_rng.next_f64() * (DISPERSAL_MAX_DIST - DISPERSAL_MIN_DIST);
+            let x = natal_x + aether_libm::cos(ang) * dist;
+            let z = natal_z + aether_libm::sin(ang) * dist;
+            if x * x + z * z > max_r * max_r { continue; }
+            let h = terrain_height(x, z);
+            let habitat_ok = if kind == FISH {
+                // Same shoreline band the initial FISH batch uses.
+                h >= WATER_LEVEL + 1.0 && h < WATER_LEVEL + 1.5 && slope_at(x, z) <= 0.8
+            } else {
+                h >= WATER_LEVEL + 1.5 && h <= 85.0 && slope_at(x, z) <= 0.8
+            };
+            if !habitat_ok { continue; }
+            if self.region_isolation && Self::region_of(x, z) == Self::region_of(natal_x, natal_z) {
+                continue;
+            }
+            // Land demes must start outside the source cloud; FISH are pinned
+            // to the narrow shoreline band and keep the plain habitat check.
+            if kind != FISH {
+                let mut clear = true;
+                for a in self.agents.iter() {
+                    if !a.alive || a.kind != kind { continue; }
+                    let dx = a.x - x;
+                    let dz = a.z - z;
+                    if dx * dx + dz * dz <= clearance2 { clear = false; break; }
+                }
+                if !clear || !self.landing_has_food(kind, x, z) { continue; }
+            }
+            return (x, z, Some(Self::region_of(x, z)));
+        }
+        (natal_x, natal_z, None)
+    }
+
+    /// Phase 47: region-isolation dispersal. The migrant juvenile joins a
+    /// random conspecific in a different home quadrant (conspecific
+    /// attraction), which keeps it inside a resident deme instead of dropping
+    /// it into an empty matrix where it would die before breeding. Draws:
+    /// one region pick + one member pick on the dedicated stream.
+    fn region_migrant_site(&mut self, kind: SpeciesKind, here: u8) -> Option<(f64, f64, u8)> {
+        // Priority-effect colonisation: migrants only enter a region that has
+        // no conspecific yet (a vacant island). Once a region is occupied it
+        // receives no further immigration, so its deme is not continuously
+        // homogenised by the source — the isolation that drift needs. This is
+        // the island model's "empty niche" rule, not a per-species script.
+        let mut empty: Vec<u8> = Vec::new();
+        for r in 0..REGION_COUNT {
+            if r != here && self.region_count(kind, r) == 0 { empty.push(r); }
+        }
+        if empty.is_empty() { return None; }
+        let pick = (self.dispersal_rng.next_f64() * empty.len() as f64) as usize;
+        let target = empty[pick.min(empty.len() - 1)];
+        self.founding_site_in_region(kind, target).map(|(x, z)| (x, z, target))
+    }
+
+    /// Phase 47: habitat-selection check for a distant landing site. A
+    /// founder family dropped into a resource desert starves before its
+    /// first local birth (observed in the first family-dispersal probe: the
+    /// remote daughter clade died within 1.6k ticks). Dispersers are therefore
+    /// assumed to settle near a resource their diet can actually use — the
+    /// standard habitat-selection assumption, not a per-kind script:
+    /// plant-eaters need grass, carcass-eaters a carcass, predators prey.
+    fn landing_has_food(&self, kind: SpeciesKind, x: f64, z: f64) -> bool {
+        let def = self.kind_def(kind);
+        let r2 = 120.0 * 120.0;
+        if def.diet.eats_carcass {
+            for c in self.carcasses.iter() {
+                let dx = c.x - x;
+                let dz = c.z - z;
+                if dx * dx + dz * dz <= r2 { return true; }
+            }
+        }
+        if def.diet.eats_plant {
+            let ci = self.cell_index(x, z);
+            if ci >= 0 {
+                let i = ci as usize;
+                if i < self.grass.len() && self.grass[i] > 0.05 { return true; }
+            }
+        }
+        for &pk in &def.diet.prey_kinds {
+            for a in self.agents.iter() {
+                if !a.alive || a.kind != pk { continue; }
+                let dx = a.x - x;
+                let dz = a.z - z;
+                if dx * dx + dz * dz <= r2 { return true; }
+            }
+        }
+        false
+    }
+
+    /// Phase 47: a successful dispersal is a family founding event, not a
+    /// lone juvenile drop. Both parents move with the child to the new home
+    /// range (breeding dispersal), so the founder deme starts with a breeding
+    /// pair and does not die in the Allee trap before its first local birth.
+    /// Pure state assignment — zero RNG draws, zero energy cost.
+    fn relocate_founders(&mut self, a: usize, b: Option<usize>, x: f64, z: f64) {
+        let mut place = |ag: &mut Agent, px: f64, pz: f64| {
+            ag.x = px; ag.z = pz; ag.prev_x = px; ag.prev_z = pz;
+            ag.home_x = px; ag.home_z = pz; ag.target_x = px; ag.target_z = pz;
+        };
+        match b {
+            Some(b) => {
+                place(&mut self.agents[a], x - 1.5, z - 1.0);
+                place(&mut self.agents[b], x + 1.5, z + 1.0);
+            }
+            None => place(&mut self.agents[a], x, z),
+        }
+    }
+
     fn reproduce(&mut self, idx: usize, dt: f64) {
         let (mature, cooldown) = {
             let def = self.kind_def(self.agents[idx].kind);
@@ -3734,6 +4120,8 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         let a_kind = self.agents[idx].kind;
         let a_x = self.agents[idx].x;
         let a_z = self.agents[idx].z;
+        let a_home_x = self.agents[idx].home_x;
+        let a_home_z = self.agents[idx].home_z;
         let bi = self.biome_reg.find_biome(a_x, a_z);
         let (bi_count, bi_cap) = match bi {
             Some(bm) => (
@@ -3782,6 +4170,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         // legacy 11.0，密集世界的动力学逐位不变；稀疏世界则不会因为
         // 「找不到 11 单位内的配偶」而落入零出生吸收态（42 诊断实测：
         // 满员时也只有 27% 的待育者在 11 单位内有配偶，稀疏后直接归零）。
+        let a_region = self.agents[idx].region;
         let mate_radius = if mate_kind == FISH {
             60.0
         } else {
@@ -3789,8 +4178,10 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         };
         let mate_min_e_const = if mate_kind == FISH { 0.55 } else { 0.68 };
         let selected_mode = self.deco_eff_choice_mode;
+        let region_isolation = self.region_isolation;
         let mate_filter = Some(move |b: &Agent| {
-            if b.id != mate_id && b.age > 30.0 && b.repro <= 0.0 {
+            if b.id != mate_id && b.age > 30.0 && b.repro <= 0.0
+                && (!region_isolation || b.region == a_region) {
                 // Phase 7: DECO in selective mode requires both parties to meet their individualized threshold.
                 let min_e = if mate_kind == DECO && selected_mode == save_state::DECO_CHOICE_SELECTIVE && b.kind == DECO {
                     DECO_REPRO_BASE * (2.0 - b.genome.deco_efficiency)
@@ -3854,8 +4245,15 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             } else {
                 ((self.rng.next_f64() - 0.5) * 2.5, (self.rng.next_f64() - 0.5) * 2.5)
             };
-            let child_x = (a_x + b_x) * 0.5 + jx;
-            let child_z = (a_z + b_z) * 0.5 + jz;
+            // Phase 47 philopatry: the natal site is the mother's HOME plus
+            // jitter, not the midpoint of the parents' current positions.
+            // Current-position midpoints random-walk the home centre every
+            // generation (both parents may be anywhere in their 150-unit
+            // range when they meet), which is why Phase 46 had no stable
+            // geographic structure for drift to act on.
+            let natal_x = a_home_x + jx;
+            let natal_z = a_home_z + jz;
+            let (child_x, child_z, dispersed) = self.birth_site(a_kind, natal_x, natal_z, a_region);
             let max_gen_child = a_gen.max(b_gen) + 1;
             let parent_clade = self.agents[idx].clade_id;
             // Phase 34 kind-fork: births INTO a forked clade carry the clade's
@@ -3879,6 +4277,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             if let Some(child) = self.spawn(child_kind, child_x, child_z, Some(g), max_gen_child, 0.0) {
                 child.lineage = a_lineage.or(b_lineage);
                 child.clade_id = parent_clade;
+                child.region = dispersed.unwrap_or(a_region);
                 child.brain = child_brain;
                 child.triune = child_triune;
                 // Phase 42: 按亲代的行为权威归类出生（适应性 A/B 的分母）。
@@ -3931,6 +4330,11 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 self.agents[idx].offspring = self.agents[idx].offspring + 1;
                 self.agents[mate_j].offspring = self.agents[mate_j].offspring + 1;
                 self.births += 1;
+                if dispersed.is_some() {
+                    self.relocate_founders(idx, Some(mate_j), child_x, child_z);
+                    self.dispersal_events += 1;
+                    self.dispersal_last_tick = self.tick_count;
+                }
                 return;
             }
         }
@@ -3948,8 +4352,10 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             let mut_scale = crate::group::mutation_scale(&self.agents[idx]);
             let g = self.mutate(&a_geno_a2, a_kind_a2, mut_scale);
             let ang = if a_kind_a2 == FISH { self.fish_rng.next_f64() } else { self.rng.next_f64() } * std::f64::consts::PI * 2.0;
-            let cx = self.agents[idx].x + aether_libm::cos(ang) * 3.0;
-            let cz = self.agents[idx].z + aether_libm::sin(ang) * 3.0;
+            let natal_x = self.agents[idx].home_x + aether_libm::cos(ang) * 3.0;
+            let natal_z = self.agents[idx].home_z + aether_libm::sin(ang) * 3.0;
+            let a_region_a2 = self.agents[idx].region;
+            let (cx, cz, dispersed) = self.birth_site(a_kind_a2, natal_x, natal_z, a_region_a2);
             let parent_clade = self.agents[idx].clade_id;
             // Phase 34 kind-fork (asexual path): same clade-derived kind rule.
             let child_kind_a2 = self.clade_kind(parent_clade, a_kind_a2);
@@ -3963,6 +4369,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             if let Some(child) = self.spawn(child_kind_a2, cx, cz, Some(g), a_gen_a2 + 1, 0.0) {
                 child.lineage = a_lineage_a2;
                 child.clade_id = parent_clade;
+                child.region = dispersed.unwrap_or(a_region_a2);
                 // Phase 36: inherit parent brain via cloning + structural mutation.
                 child.brain = child_brain_a2;
                 child.triune = child_triune_a2;
@@ -3994,6 +4401,11 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 self.agents[idx].repro = cooldown * 1.4;
                 self.agents[idx].offspring = self.agents[idx].offspring + 1;
                 self.births += 1;
+                if dispersed.is_some() {
+                    self.relocate_founders(idx, None, cx, cz);
+                    self.dispersal_events += 1;
+                    self.dispersal_last_tick = self.tick_count;
+                }
             }
         }
     }
@@ -5908,6 +6320,19 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
     }
 
     /// Minimum Euclidean distance (world units) between two agent groups.
+    fn majority_region(agents: &[Agent], pop_idx: &[usize], members: &[usize]) -> u8 {
+        let mut tally = [0usize; REGION_COUNT as usize];
+        for &p in members {
+            let a = &agents[pop_idx[p]];
+            tally[(a.region as usize).min(REGION_COUNT as usize - 1)] += 1;
+        }
+        let mut best = 0u8;
+        for r in 1..REGION_COUNT as usize {
+            if tally[r] > tally[best as usize] { best = r as u8; }
+        }
+        best
+    }
+
     fn min_cross_dist(agents: &[Agent], pop_idx: &[usize], ga: &[usize], gb: &[usize]) -> f64 {
         let mut best = f64::INFINITY;
         for &p in ga {
@@ -6163,7 +6588,16 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 &self.agents, idxs,
                 &comp_members[parent_side], &comp_members[child_side],
             );
-            if dist <= GEO_ISOLATION_DIST { continue; }
+            if dist <= GEO_ISOLATION_DIST {
+                // Phase 47 region-island model: different home quadrants are
+                // different geographic demes, so a cross-region cut is
+                // isolated even where the two demes share a land boundary.
+                if !self.region_isolation
+                    || Self::majority_region(&self.agents, idxs, &comp_members[parent_side])
+                        == Self::majority_region(&self.agents, idxs, &comp_members[child_side]) {
+                    continue;
+                }
+            }
             used_as_child[child_side] = true;
             let min_id = comp_members[child_side].iter()
                 .map(|&p| self.agents[idxs[p]].id).min().unwrap();
@@ -6654,6 +7088,7 @@ fn agent_to_save(a: &Agent, kinds: &KindRegistry) -> save_state::SaveAgent {
         home_x: a.home_x, home_z: a.home_z, range: a.range,
         lineage: a.lineage.map(|s| s.to_string()),
         clade_id: a.clade_id,
+        Region: a.region,
         offspring: a.offspring,
         ext_loci: a.genome.ext.iter().map(locus_to_save).collect(),
         // Phase 36: micro-brain roundtrip (compact flat layout).
@@ -7119,6 +7554,13 @@ impl Ecology {
             PatchEvents: self.patch_events,
             PatchLastTick: self.patch_last_tick,
             CultureValueOn: self.culture_value_on,
+            // Phase 47: natal dispersal state.
+            DispersalP: self.dispersal_p,
+            DispersalRngState: self.dispersal_rng.state(),
+            DispersalEvents: self.dispersal_events,
+            DispersalLastTick: self.dispersal_last_tick,
+            RegionIsolation: self.region_isolation,
+            DecoMutScale: self.deco_mut_scale,
             // Phase 39.1: group layer. `founder_genome` is serialized in full —
             // it is the propagation bottleneck, so it must survive the hop for
             // a restored sim to keep breeding from the same single genome.
@@ -7254,6 +7696,9 @@ impl Ecology {
         while evolution.len() < kinds_len { evolution.push(Vec::new()); }
         while generation_fitness.len() < kinds_len { generation_fitness.push(Vec::new()); }
 
+        // Phase 47: pre-v16 saves carry Region=0xFF for every agent; assign
+        // the balanced angular demes after the world is built.
+        let needs_region_assignment = state.agents.iter().any(|a| a.Region == u8::MAX);
         let mut isolated_groups: HashMap<&'static str, IsolatedGroup> = HashMap::new();
         let mut isolated_order: Vec<&'static str> = Vec::new();
         for g in state.isolated_groups {
@@ -7474,7 +7919,7 @@ impl Ecology {
             (groups, next)
         };
 
-        Ecology {
+        let mut eco = Ecology {
             rng: Mulberry32::from_state(state.rng_state.state),
             prng: Mulberry32::from_state(state.prng_state.state),
             fish_rng: Mulberry32::from_state(state.fish_rng_state.state),
@@ -7516,6 +7961,7 @@ impl Ecology {
                     home_x: a.home_x, home_z: a.home_z, range: a.range,
                     lineage: a.lineage.map(|s| save_state::intern_str(&s)),
                     clade_id: a.clade_id,
+                    region: a.Region,
                     offspring: a.offspring,
                     // Phase 36: backward-compatible brain restore.
                     // Pre-v9 saves carry empty weight/elgibility slices and
@@ -7786,6 +8232,19 @@ impl Ecology {
             regrow_noise: crate::patch::generate_regrow_noise(),
             isolation_by_kind: Vec::new(),
             culture_value_on: state.CultureValueOn,
+            // Phase 47: natal dispersal. Pre-v16 archives carry no fields →
+            // current calibration, stream re-derived from
+            // seed ^ DISPERSAL_RNG_TAG, zero counters.
+            dispersal_p: state.DispersalP,
+            dispersal_rng: if state.DispersalRngState != 0 {
+                Mulberry32::from_state(state.DispersalRngState)
+            } else {
+                Mulberry32::new(state.seed ^ DISPERSAL_RNG_TAG)
+            },
+            dispersal_events: state.DispersalEvents,
+            dispersal_last_tick: state.DispersalLastTick,
+            region_isolation: state.RegionIsolation,
+            deco_mut_scale: state.DecoMutScale,
             culture_fidelity: state.CultureFidelity,
             culture_bias_channel: state.CultureBiasChannel,
             // Phase 39.1: group layer. Pre-v11 archives carry no groups →
@@ -7806,7 +8265,13 @@ impl Ecology {
                 clade_id: t.clade_id,
                 first_tick: t.first_tick,
             }).collect(),
-        }
+        };
+        if needs_region_assignment { eco.assign_initial_regions(); }
+        // Phase 47: rebuild the clade member/centroid caches immediately, so a
+        // save→restore→save hop is JSON-identical even when the restored world
+        // has not yet reached its next detection pass.
+        eco.refresh_clade_stats();
+        eco
     }
 }
 
