@@ -364,7 +364,7 @@ fn save_v13_roundtrip_continues_bit_exactly() {
     let state = eco.to_save_state();
     assert_eq!(state.version, save_state::SAVE_STATE_VERSION);
     // Phase 51 bumped the schema to v18 (niche resource partition toggle).
-    assert_eq!(save_state::SAVE_STATE_VERSION, 19);
+    assert_eq!(save_state::SAVE_STATE_VERSION, 20);
     let json = serde_json::to_string(&state).unwrap();
     assert!(json.contains("\"ReplayOn\":true"));
     let mut restored = Ecology::from_save_state(serde_json::from_str(&json).unwrap());

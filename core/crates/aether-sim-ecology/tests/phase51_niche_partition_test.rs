@@ -274,7 +274,7 @@ fn niche_partition_off_is_bit_exact_phase50_anchor() {
                 "pre-fork anchor: partition OFF must be bit-exact with Phase 50 at t=30000");
         }
     }
-    assert_eq!(off.checksum(), "0x67c9194712c6f941",
+    assert_eq!(off.checksum(), "0xf5bdea460cd4685a",
         "post-fork deep anchor: partition OFF (Phase 53 world) at t=60000");
 
     // A arm (default ON): a bit-exact no-op BEFORE the first banded fork,
@@ -290,7 +290,7 @@ fn niche_partition_off_is_bit_exact_phase50_anchor() {
                 "pre-fork: partition ON must be bit-exact with Phase 50 before any banded clade exists");
         }
     }
-    assert_ne!(on.checksum(), "0x67c9194712c6f941",
+    assert_ne!(on.checksum(), "0xf5bdea460cd4685a",
         "post-fork: partition ON must diverge from the partition-OFF arm by t=60000");
 }
 

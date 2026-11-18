@@ -41,6 +41,11 @@
 //! colonisation, DECO mutation ×5).
 //!   seed 20261102 @300  v2 0x651cf47e6d54ca64
 //!   seed 20261102 @3000 v2 0xc94fc584ddfd6eb3
+//!
+//! PHASE 54 (architecture, NOT a re-baseline): culture × speciation coupling
+//! is wired (structures raise a local regrowth multiplier) but ships
+//! DEFAULT-OFF — the 80k A/B showed the ON arm suppresses speciation
+//! entirely (trophic-ladder cascade). All four anchors are unchanged.
 //!   seed 20261105 @300  v2 0x5b9200b4b88d971a
 //!   seed 20261102 @300  v1 0xc6c4cdca821c064b
 //! PHASE 47 ANCHORS (previous):

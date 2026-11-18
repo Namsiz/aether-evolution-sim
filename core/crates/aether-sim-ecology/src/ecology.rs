@@ -1090,6 +1090,48 @@ pub const NICHE_GEN_MIN_OFFSET: f64 = 0.35;
 /// Phase 53: generational niche accumulation on by default; the A/B arm
 /// (`niche_gen_accum_off`) restores the Phase 52 (Phase 16) projection.
 pub const NICHE_GEN_ACCUM_ON: bool = true;
+
+// ----- Phase 54: culture × speciation coupling (real niche construction) ---
+//
+// Phase 37 registered structures but never let them touch the environment —
+// try_place_structure only paid the builder instant energy, the world's
+// grass/mineral fields were untouched, so culture could not shape niche
+// space. Phase 54 wires the loop: a placed structure raises the local grass
+// regrowth multiplier for STRUCTURE_ENV_RADIUS cells (additive share of
+// `token_to_env_mod`'s grass_mod), decaying slowly back toward 1.0. Because
+// cultural learning is already kind-local (the demoiser search is same-kind)
+// and kinds fork into clades, each clade's structures cluster in its own
+// home range — culture now differentiates the resource face the clade lives
+// on. The growth multiplier multiplies the existing per-cell growth path, so
+// every gram of extra grass still flows through the sunlight ledger.
+/// Cells within this radius of a structure feel its regrowth boost.
+pub const STRUCTURE_ENV_RADIUS: i32 = 3;
+/// Per-tick decay of the structure regrowth multiplier toward 1.0
+/// (half-life ≈ 350 ticks — a structure's niche must be continuously
+/// maintained by new placements to persist). Calibration note: the first
+/// draft (×8, half-life 6.9k) smothered speciation entirely — 922
+/// structures saturated the field and the DECO root stopped forking for
+/// 80k ticks. Culture shapes the resource face; it must not own it.
+pub const STRUCTURE_ENV_DECAY: f32 = 0.998;
+/// Bounds of the per-cell multiplier (a negative-grass_mod token suppresses
+/// regrowth just as a positive one promotes it).
+pub const STRUCTURE_ENV_MAX: f32 = 1.5;
+pub const STRUCTURE_ENV_MIN: f32 = 0.5;
+/// Per-structure boost scale: the raw token grass_mod is ±0.05
+/// (STRUCTURE_MOD_STRENGTH); ×2 keeps one structure's visible-but-modest
+/// mark at ±0.1.
+pub const STRUCTURE_ENV_BOOST: f32 = 2.0;
+/// Phase 54 A/B: structures touch the environment. **Default OFF** — the
+/// 80k A/B measured the causal chain honestly: ON = 0 speciations (the
+/// grass boost propagates up the trophic ladder: more primary production →
+/// steadier carcass supply for DECO → a stable 80-member root that drifts
+/// too slowly to ever fork), OFF = 2 speciations. Culture that raises
+/// carrying capacity *suppresses* diversification — the real-world
+/// agriculture/biodiversity parallel. The wiring stays (it is real niche
+/// construction, measurable in tests); the calibration that supports
+/// speciation (heterogeneity-first, or DECO-direct resources) is Phase 55's
+/// target. Flip the switch in tests to exercise the ON arm.
+pub const STRUCTURE_ENV_ON: bool = false;
 /// Two clades whose niche positions are closer than this compete for the
 /// same resources (1-D Gause overlap window).
 pub const NICHE_OVERLAP_THRESHOLD: f64 = 0.15;
@@ -1648,6 +1690,14 @@ pub struct Ecology {
     /// Phase 45: static per-cell regrowth-noise multiplier (fixed-seed field,
     /// identical across worlds/restores — a constant of the model).
     pub regrow_noise: Vec<f32>,
+    /// Phase 54: per-cell structure regrowth multiplier (starts at 1.0;
+    /// structures raise it, STRUCTURE_ENV_DECAY pulls it back).
+    pub structure_env: Vec<f32>,
+    /// Phase 54 A/B toggle.
+    pub structure_env_on: bool,
+    /// True while any cell multiplier is above 1.0 (skips the decay pass
+    /// once the field has fully relaxed).
+    pub structure_env_decay_active: bool,
     /// Phase 45: per-kind clade-isolation telemetry (kind id → rolling
     /// window). Pure observability — not persisted (same contract as
     /// GroupStats); rebuilt from live clades after a restore.
@@ -1861,6 +1911,9 @@ impl Ecology {
             patch_last_x: 0.0,
             patch_last_z: 0.0,
             regrow_noise: crate::patch::generate_regrow_noise(),
+            structure_env: vec![1.0f32; n],
+            structure_env_on: STRUCTURE_ENV_ON,
+            structure_env_decay_active: false,
             isolation_by_kind: Vec::new(),
             culture_value_on: true,
             dispersal_p: DISPERSAL_P,
@@ -2070,6 +2123,9 @@ impl Ecology {
             patch_last_x: 0.0,
             patch_last_z: 0.0,
             regrow_noise: crate::patch::generate_regrow_noise(),
+            structure_env: vec![1.0f32; n],
+            structure_env_on: STRUCTURE_ENV_ON,
+            structure_env_decay_active: false,
             isolation_by_kind: Vec::new(),
             culture_value_on: true,
             dispersal_p: DISPERSAL_P,
@@ -3411,6 +3467,14 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
     /// (eff-gap only, no guaranteed generational minimum distance).
     pub fn niche_gen_accum_off(&mut self) {
         self.niche_gen_accum = false;
+    }
+
+    /// Phase 54 A/B arm switch: structures stop touching the environment
+    /// (the multiplier field is reset to all-1.0 and frozen).
+    pub fn structure_env_off(&mut self) {
+        self.structure_env_on = false;
+        for v in self.structure_env.iter_mut() { *v = 1.0; }
+        self.structure_env_decay_active = false;
     }
 
     /// Phase 49: the density-dependent crowding denominator for `kind` — its
@@ -5790,6 +5854,19 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             // draw when patch_on is false, so the A/B arm keeps the exact
             // pre-Phase-45 trajectory).
             self.tick_patch();
+            // Phase 54: structure regrowth multipliers decay toward 1.0
+            // (cheap linear pass, skipped entirely while fully decayed).
+            if self.structure_env_on && self.structure_env_decay_active {
+                let mut any_off = false;
+                for v in self.structure_env.iter_mut() {
+                    if (*v - 1.0).abs() > 1e-6 {
+                        *v = 1.0 + (*v - 1.0) * STRUCTURE_ENV_DECAY;
+                        if (*v - 1.0).abs() <= 1e-4 { *v = 1.0; }
+                        else { any_off = true; }
+                    }
+                }
+                self.structure_env_decay_active = any_off;
+            }
 
             self.season = ((self.time / 1800.0) as i32) % 4;
             let season_grass = [1.3f64, 0.6, 0.8, 0.25][self.season as usize];
@@ -5821,7 +5898,10 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 if total >= 1.0 { continue; }
                 let shade_f = 1.0 - self.shade[i] as f64 * 0.55;
                 let cell_grow = grow * (1.0 + self.mineral_field[i] as f64 * GROWTH_BONUS_PER_MINERAL)
-                    * fert_mult * self.regrow_noise[i] as f64;
+                    * fert_mult * self.regrow_noise[i] as f64
+                    // Phase 54: culture-built structures raise local regrowth
+                    // (structure_env stays exactly 1.0 when the A/B is off).
+                    * self.structure_env[i] as f64;
                 for sp in 0..pn {
                     let b = self.grass_p[sp][i] as f64;
                     let nb = b + self.suit_eff_by[sp][i] as f64 * cell_grow * rmax_eff(&self.plants[sp]) * (1.0 - total) * (0.42 + b) * shade_f * h;
@@ -5997,6 +6077,35 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                             if self.culture_rng.next_f64() < 0.001 {
                                 if culture::try_place_structure(&mut self.agents[idx], &mut self.structure_registry, first_token, x, z) {
                                     self.culture_stats.structure_place_count += 1;
+                                    // Phase 54: real niche construction — the
+                                    // structure raises the local regrowth
+                                    // multiplier for STRUCTURE_ENV_RADIUS cells
+                                    // (a share of grass_mod per cell, capped).
+                                    if self.structure_env_on {
+                                        self.structure_env_decay_active = true;
+                                        let boost = (grass_mod as f32) * STRUCTURE_ENV_BOOST;
+                                        let ci0 = self.cell_index(x, z);
+                                        if ci0 >= 0 {
+                                            let c0 = ci0 as usize;
+                                            let col0 = c0 % GRID_N as usize;
+                                            let row0 = c0 / GRID_N as usize;
+                                            let r = STRUCTURE_ENV_RADIUS;
+                                            let gn = GRID_N as i32;
+                                            let col = col0 as i32;
+                                            let row = row0 as i32;
+                                            for dc in -r..=r {
+                                                let cc = col + dc;
+                                                if cc < 0 || cc >= gn { continue; }
+                                                for dr in -r..=r {
+                                                    let rr = row + dr;
+                                                    if rr < 0 || rr >= gn { continue; }
+                                                    let j = (rr as usize) * GRID_N as usize + cc as usize;
+                                                    let m = self.structure_env[j] + boost;
+                                                    self.structure_env[j] = m.clamp(STRUCTURE_ENV_MIN, STRUCTURE_ENV_MAX);
+                                                }
+                                            }
+                                        }
+                                    }
                                     // Apply immediate environmental effect
                                     let gain = grass_mod * 10.0;
                                     self.agents[idx].energy += gain; // benefit feedback
@@ -7865,6 +7974,9 @@ impl Ecology {
             SpeciationMinSide: self.speciation_min_side,
             NichePartitionOn: self.niche_partition,
             NicheGenAccum: self.niche_gen_accum,
+            StructureEnv: self.structure_env.clone(),
+            StructureEnvOn: self.structure_env_on,
+            StructureEnvDecayActive: self.structure_env_decay_active,
             // Phase 39.1: group layer. `founder_genome` is serialized in full —
             // it is the propagation bottleneck, so it must survive the hop for
             // a restored sim to keep breeding from the same single genome.
@@ -8541,6 +8653,13 @@ impl Ecology {
             patch_last_x: 0.0,
             patch_last_z: 0.0,
             regrow_noise: crate::patch::generate_regrow_noise(),
+            structure_env: if state.StructureEnv.len() == n {
+                state.StructureEnv.clone()
+            } else {
+                vec![1.0f32; n]
+            },
+            structure_env_on: state.StructureEnvOn,
+            structure_env_decay_active: state.StructureEnvDecayActive,
             isolation_by_kind: Vec::new(),
             culture_value_on: state.CultureValueOn,
             // Phase 47: natal dispersal. Pre-v16 archives carry no fields →

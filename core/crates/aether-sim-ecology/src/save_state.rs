@@ -116,7 +116,7 @@
 use serde::{Deserialize, Serialize};
 
 
-pub const SAVE_STATE_VERSION: u32 = 19;
+pub const SAVE_STATE_VERSION: u32 = 20;
 pub const SAVE_STATE_SCHEMA_NAME: &str = "aether-sim-save-state";
 
 /// DECO selection-pressure mode selector (persisted in SaveState v2).
@@ -1015,6 +1015,17 @@ pub struct SaveState {
     /// ON (the default world).
     #[serde(default = "default_true")]
     pub NicheGenAccum: bool,
+    /// Phase 54: structure regrowth multiplier field (v20). Empty on pre-v20
+    /// archives → rebuilt as all-1.0 (the pre-54 world had no structure
+    /// effects; structures restored from the archive re-arm on their next
+    /// placement, not retroactively).
+    #[serde(default)]
+    pub StructureEnv: Vec<f32>,
+    /// Phase 54: A/B toggle + decay-pass bookkeeping.
+    #[serde(default = "default_true")]
+    pub StructureEnvOn: bool,
+    #[serde(default)]
+    pub StructureEnvDecayActive: bool,
 }
 
 fn default_min_side_legacy() -> usize {

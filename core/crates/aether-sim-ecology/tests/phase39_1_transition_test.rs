@@ -416,7 +416,7 @@ fn save_v11_roundtrip_is_bit_exact() {
     let state = eco.to_save_state();
     assert_eq!(state.version, save_state::SAVE_STATE_VERSION);
     // Phase 51 bumped the schema to v18 (niche resource partition toggle).
-    assert_eq!(save_state::SAVE_STATE_VERSION, 19);
+    assert_eq!(save_state::SAVE_STATE_VERSION, 20);
     assert!(!state.Groups.is_empty());
 
     let json = serde_json::to_string(&state).expect("save serializes");
@@ -461,7 +461,7 @@ fn legacy_v10_archive_loads_as_solitary_world() {
     let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
     // Phase 51 bumped the schema to v18 (niche resource partition);
     // older layers ride alongside (all serde-defaulted).
-    assert_eq!(v["Version"], 19);
+    assert_eq!(v["Version"], 20);
     // Strip every v10/v11/v13/v14 addition — this is exactly what a v10 archive looks like.
     v["Version"] = serde_json::json!(10);
     let obj = v.as_object_mut().unwrap();
