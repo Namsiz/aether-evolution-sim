@@ -10,8 +10,12 @@
 use aether_sim_ecology::civilization_metrics::{format_line, measure};
 use aether_sim_ecology::ecology::Ecology;
 
-const SEED: u32 = 20261102;
-const TICKS: u32 = 1_000_000;
+/// Seed/ticks are env-parameterised so several observatory instances can run
+/// in parallel on the 8-core box (one process per seed): `PHASE_SEED=42`
+/// runs the same observation on another world without touching this file.
+fn env_u32(name: &str, default: u32) -> u32 {
+    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
 const SAMPLE_EVERY: u32 = 5_000;
 
 fn daylight(t: u32) -> f64 {
@@ -21,15 +25,17 @@ fn daylight(t: u32) -> f64 {
 #[test]
 #[ignore = "million-tick clade-fate run — ~70 minutes"]
 fn clade_fate_observation() {
-    let csv_path = "/tmp/clade_fate_20261102.csv";
-    let tree_path = "/tmp/clade_tree_20261102.csv";
+    let seed = env_u32("PHASE_SEED", 20261102);
+    let ticks = env_u32("PHASE_TICKS", 1_000_000);
+    let csv_path = format!("/tmp/clade_fate_{seed}.csv");
+    let tree_path = format!("/tmp/clade_tree_{seed}.csv");
     let mut csv = String::from(
         "t,pop,herb,pred,scav,omn,fish,deco,clades_live,clades_total,events,tokens,bearers,groups,levels,authorities\n",
     );
-    let mut eco = Ecology::new(SEED);
+    let mut eco = Ecology::new(seed);
     let mut last_events = 0usize;
-    eprintln!("=== clade-fate seed {SEED} ({TICKS} ticks) ===");
-    for t in 1..=TICKS {
+    eprintln!("=== clade-fate seed {seed} ({ticks} ticks) ===");
+    for t in 1..=ticks {
         eco.update(0.1, daylight(t));
         let n = eco.clade_events().len();
         if n > last_events {
@@ -72,8 +78,8 @@ fn clade_fate_observation() {
             c.name, c.members.len(), c.axes,
         ));
     }
-    std::fs::write(csv_path, csv).unwrap();
-    std::fs::write(tree_path, tree).unwrap();
+    std::fs::write(&csv_path, csv).unwrap();
+    std::fs::write(&tree_path, tree).unwrap();
     eprintln!(
         "=== clade-fate done: clades={} events={} csv={csv_path} tree={tree_path} ===",
         eco.species_clades().len(), last_events
