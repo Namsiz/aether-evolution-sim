@@ -72,10 +72,10 @@ R1 标定 ON 与 OFF 各 200k（seed 20261102，`PHASE_TICKS=200000 PHASE_ARM_TA
 ## 6. 改动文件
 
 - `core/crates/aether-sim-ecology/src/ecology.rs`
-  - `STRUCTURE_ENV_RING=5` 新常量 + 常量区 Phase 55 文档（:1113-1158）
-  - `Ecology::structure_env_dipole()`（:3514）：净零偶极（吸收量补偿）
-  - 放置点改为调用偶极（:6162 附近）
-  - `grass_field()`/`suit_field()` 只读访问器（:7195/:7197）
+  - `STRUCTURE_ENV_RING=5` 新常量 + 常量区 Phase 55 文档（:1108-1162）
+  - `Ecology::structure_env_dipole()`（:3518）：净零偶极（吸收量补偿）
+  - 放置点改为调用偶极（:6175）
+  - `grass_field()`/`suit_field()` 只读访问器（:7199/:7201）
 - `core/crates/aether-sim-ecology/tests/phase55_structure_heterogeneity_test.rs`（新，202 行）
   - 纯机制：守恒/同点反向复原/边界裁剪/饱和自限（:31-112）
   - 60k 异质性 A/B 慢测（ignored）、ON 臂双跑+存档往返慢测（ignored）、v19 旧档兼容
