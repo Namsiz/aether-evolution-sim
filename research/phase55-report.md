@@ -87,7 +87,7 @@ R1 标定 ON 与 OFF 各 200k（seed 20261102，`PHASE_TICKS=200000 PHASE_ARM_TA
 
 ## 8. 锚点记录
 
-- **非 re-baseline**：@300 `0x7d2c8613d01cb79d` / @3000 `0xdb3aa647fa2e3a96` / group_off / partition-off@60000 `0xf5bdea460cd4685a` / accum-off@60000 `0xbf91125e40589e1e` / phase54 OFF@60000 `0x3fff60ac98f9b8c5` **全部不变**（默认 OFF → 轨迹零副作用，与 Phase 53/54 bit-exact）
+- **非 re-baseline**：@300 `0x651cf47e6d54ca64` / @3000 `0xc94fc584ddfd6eb3` / group_off `0xdb3aa647fa2e3a96` / partition-off@60000 `0xf5bdea460cd4685a` / accum-off@60000 `0xbf91125e40589e1e` / phase54 OFF@60000 `0x3fff60ac98f9b8c5` **全部不变**（默认 OFF → 轨迹零副作用，与 Phase 53/54 bit-exact）
 - wasm：813,054 B（HEAD 旧档 812,566 B）；连续五次 13.07/14.24/12.76/12.96/13.00 ms/frame
 
 ## 7. 遗留与 Phase 56
