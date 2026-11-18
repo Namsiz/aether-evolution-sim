@@ -1104,8 +1104,23 @@ pub const NICHE_GEN_ACCUM_ON: bool = true;
 // home range — culture now differentiates the resource face the clade lives
 // on. The growth multiplier multiplies the existing per-cell growth path, so
 // every gram of extra grass still flows through the sunlight ledger.
+//
+// Phase 55: the boost is a **net-zero dipole**. The 80k A/B of the Phase 54
+// calibration showed the trophic-cascade failure mode: value-selected
+// positive tokens raise the world's total primary production, the DECO
+// root stabilises, drift slows, speciation goes to zero. A placement now
+// transfers regrowth potential instead of creating it — the disk absorbs
+// `grass_mod × STRUCTURE_ENV_BOOST` per cell under the clamp, and the exact
+// amount actually absorbed is subtracted from the surrounding ring. Culture
+// can choose WHERE grass grows; it can no longer raise the ceiling. Clamp
+// saturation self-limits both sides: a disk pinned at MAX absorbs nothing
+// and is compensated by nothing.
 /// Cells within this radius of a structure feel its regrowth boost.
 pub const STRUCTURE_ENV_RADIUS: i32 = 3;
+/// Phase 55: the dipole's compensation ring — cells at Chebyshev radius in
+/// (STRUCTURE_ENV_RADIUS, STRUCTURE_ENV_RING] pay back what the disk
+/// absorbed (7×7 disk vs 11×11 ring ≈ 49/72 spread).
+pub const STRUCTURE_ENV_RING: i32 = 5;
 /// Per-tick decay of the structure regrowth multiplier toward 1.0
 /// (half-life ≈ 350 ticks — a structure's niche must be continuously
 /// maintained by new placements to persist). Calibration note: the first
@@ -1119,18 +1134,31 @@ pub const STRUCTURE_ENV_MAX: f32 = 1.5;
 pub const STRUCTURE_ENV_MIN: f32 = 0.5;
 /// Per-structure boost scale: the raw token grass_mod is ±0.05
 /// (STRUCTURE_MOD_STRENGTH); ×2 keeps one structure's visible-but-modest
-/// mark at ±0.1.
+/// mark at ±0.1 per disk cell (the ring pays back 49/72 ≈ 0.68 of that).
+/// Calibration sweep (Phase 55, 80k, seed 20261102): 0.2 / 2 / 20 with the
+/// natural sign and 20 with the famine (inverted) sign — every arm had zero
+/// speciation events against the OFF arm's two. The one held here is the
+/// round-1 value: net-zero verified to five decimals (env_mean ≡ 1.00000 at
+/// every 5k sample) with a measurable multiplier mosaic.
 pub const STRUCTURE_ENV_BOOST: f32 = 2.0;
-/// Phase 54 A/B: structures touch the environment. **Default OFF** — the
-/// 80k A/B measured the causal chain honestly: ON = 0 speciations (the
-/// grass boost propagates up the trophic ladder: more primary production →
-/// steadier carcass supply for DECO → a stable 80-member root that drifts
-/// too slowly to ever fork), OFF = 2 speciations. Culture that raises
-/// carrying capacity *suppresses* diversification — the real-world
-/// agriculture/biodiversity parallel. The wiring stays (it is real niche
-/// construction, measurable in tests); the calibration that supports
-/// speciation (heterogeneity-first, or DECO-direct resources) is Phase 55's
-/// target. Flip the switch in tests to exercise the ON arm.
+/// Phase 54 A/B: structures touch the environment. Phase 55 reworked the
+/// boost into a net-zero dipole (transfer, not creation — see
+/// `structure_env_dipole`) and swept the calibration: **even a near-inert
+/// mosaic (BOOST=0.2, ±1 % local multiplier) ran 80k with zero speciation
+/// events** against the OFF arm's two. A 200k probe of the held calibration
+/// settled the question: OFF forks four times (t=34.7k/41.8k/125.9k/128.0k),
+/// ON never forks — a systematic suppression, not a missed window. The
+/// mechanism is *accessibility, not total*: structures are placed where
+/// agents live, so the dipole concentrates regrowth into their home ranges;
+/// even at conserved total production the accessible crop rises (+2 % mean
+/// grass, +4 % mean population over 200k) — the same trophic cascade as
+/// Phase 54, in spatial form. **Default stays OFF.** The wiring stays
+/// because the net-zero contract is real (measurable, test-pinned) and
+/// heterogeneity is measurable (60k grass variance ON 0.07486 > OFF
+/// 0.06479) — what the dipole cannot do is *cause* speciation by nudging
+/// the grass field; a supportive culture×speciation coupling needs a
+/// different causal route (Phase 56: DECO-direct resources or
+/// clade-exclusion foraging).
 pub const STRUCTURE_ENV_ON: bool = false;
 /// Two clades whose niche positions are closer than this compete for the
 /// same resources (1-D Gause overlap window).
@@ -3475,6 +3503,64 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         self.structure_env_on = false;
         for v in self.structure_env.iter_mut() { *v = 1.0; }
         self.structure_env_decay_active = false;
+    }
+
+    /// Phase 55: apply one structure placement to the regrowth field as a
+    /// net-zero dipole. Pass 1 boosts the disk (Chebyshev radius
+    /// `STRUCTURE_ENV_RADIUS`) under the clamp and measures what the field
+    /// actually absorbed; pass 2 subtracts exactly that from the surrounding
+    /// ring (`STRUCTURE_ENV_RADIUS`..=`STRUCTURE_ENV_RING`). The transfer is
+    /// exact while the clamps don't bind; where a ring cell sits at its
+    /// bound the payout is only ever truncated, and the disk's own
+    /// saturation (a disk pinned at MAX absorbs nothing) stops any runaway
+    /// gain, so culture can choose WHERE regrowth happens but can never own
+    /// the world's total the way the Phase 54 one-sided boost did.
+    pub fn structure_env_dipole(&mut self, x: f64, z: f64, grass_mod: f64) {
+        let ci0 = self.cell_index(x, z);
+        if ci0 < 0 { return; }
+        self.structure_env_decay_active = true;
+        let boost = (grass_mod as f32) * STRUCTURE_ENV_BOOST;
+        let c0 = ci0 as usize;
+        let col = (c0 % GRID_N as usize) as i32;
+        let row = (c0 / GRID_N as usize) as i32;
+        let r = STRUCTURE_ENV_RADIUS;
+        let ring = STRUCTURE_ENV_RING;
+        let gn = GRID_N as i32;
+        let mut absorbed = 0.0f32;
+        let mut n_ring = 0usize;
+        for dc in -ring..=ring {
+            let cc = col + dc;
+            if cc < 0 || cc >= gn { continue; }
+            for dr in -ring..=ring {
+                let rr = row + dr;
+                if rr < 0 || rr >= gn { continue; }
+                let cheb = dc.abs().max(dr.abs());
+                let j = (rr as usize) * GRID_N as usize + cc as usize;
+                if cheb <= r {
+                    let m = (self.structure_env[j] + boost)
+                        .clamp(STRUCTURE_ENV_MIN, STRUCTURE_ENV_MAX);
+                    absorbed += m - self.structure_env[j];
+                    self.structure_env[j] = m;
+                } else {
+                    n_ring += 1;
+                }
+            }
+        }
+        if absorbed != 0.0 && n_ring > 0 {
+            let comp = -absorbed / n_ring as f32;
+            for dc in -ring..=ring {
+                let cc = col + dc;
+                if cc < 0 || cc >= gn { continue; }
+                for dr in -ring..=ring {
+                    let rr = row + dr;
+                    if rr < 0 || rr >= gn { continue; }
+                    if dc.abs().max(dr.abs()) <= r { continue; }
+                    let j = (rr as usize) * GRID_N as usize + cc as usize;
+                    self.structure_env[j] = (self.structure_env[j] + comp)
+                        .clamp(STRUCTURE_ENV_MIN, STRUCTURE_ENV_MAX);
+                }
+            }
+        }
     }
 
     /// Phase 49: the density-dependent crowding denominator for `kind` — its
@@ -6077,34 +6163,16 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                             if self.culture_rng.next_f64() < 0.001 {
                                 if culture::try_place_structure(&mut self.agents[idx], &mut self.structure_registry, first_token, x, z) {
                                     self.culture_stats.structure_place_count += 1;
-                                    // Phase 54: real niche construction — the
-                                    // structure raises the local regrowth
-                                    // multiplier for STRUCTURE_ENV_RADIUS cells
-                                    // (a share of grass_mod per cell, capped).
+                                    // Phase 55: net-zero dipole — a
+                                    // placement TRANSFERS regrowth
+                                    // potential instead of creating it
+                                    // (see `structure_env_dipole`; the
+                                    // Phase 54 trophic cascade — value-
+                                    // selected positive tokens raising the
+                                    // world's total production — cannot recur
+                                    // by construction).
                                     if self.structure_env_on {
-                                        self.structure_env_decay_active = true;
-                                        let boost = (grass_mod as f32) * STRUCTURE_ENV_BOOST;
-                                        let ci0 = self.cell_index(x, z);
-                                        if ci0 >= 0 {
-                                            let c0 = ci0 as usize;
-                                            let col0 = c0 % GRID_N as usize;
-                                            let row0 = c0 / GRID_N as usize;
-                                            let r = STRUCTURE_ENV_RADIUS;
-                                            let gn = GRID_N as i32;
-                                            let col = col0 as i32;
-                                            let row = row0 as i32;
-                                            for dc in -r..=r {
-                                                let cc = col + dc;
-                                                if cc < 0 || cc >= gn { continue; }
-                                                for dr in -r..=r {
-                                                    let rr = row + dr;
-                                                    if rr < 0 || rr >= gn { continue; }
-                                                    let j = (rr as usize) * GRID_N as usize + cc as usize;
-                                                    let m = self.structure_env[j] + boost;
-                                                    self.structure_env[j] = m.clamp(STRUCTURE_ENV_MIN, STRUCTURE_ENV_MAX);
-                                                }
-                                            }
-                                        }
+                                        self.structure_env_dipole(x, z, grass_mod);
                                     }
                                     // Apply immediate environmental effect
                                     let gain = grass_mod * 10.0;
@@ -7124,6 +7192,13 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
 
     /// Phylogeny readouts for the C-ABI layer.
     pub fn species_clades(&self) -> &[SpeciesClade] { &self.species_clades }
+    /// Phase 55: read access for observatories/tests — the spatial-
+    /// heterogeneity metrics of the structure-env A/B need the standing crop
+    /// and the suitability mask (dead cells never grow and would add a
+    /// constant floor to the variance).
+    pub fn grass_field(&self) -> &[f32] { &self.grass }
+    /// Phase 55: suitability mask accessor, see `grass_field`.
+    pub fn suit_field(&self) -> &[f32] { &self.suit }
     pub fn clade_events(&self) -> &[CladeSpeciationEvent] { &self.speciation_events }
 
     pub fn stats(&self) -> Stats {
