@@ -113,6 +113,31 @@ impl Ecology {
         1.0 + NICHE_PREF_GAIN * strength * aligned
     }
 
+    /// Phase 53: daughter niche with a guaranteed generational minimum
+    /// distance (`NICHE_GEN_MIN_OFFSET`). Pure deterministic function shared
+    /// by the fork mint and the per-pass re-derivation below — both call
+    /// sites MUST agree, or the fork value is overwritten by a different
+    /// formula on the next detection pass.
+    pub fn generational_niche(parent_niche: f64, eff_delta: f64, speed_delta: f64, on: bool) -> f64 {
+        if !on { return (parent_niche + eff_delta).clamp(-1.0, 1.0); }
+        let dir = if eff_delta > 0.0 { 1.0 } else if eff_delta < 0.0 { -1.0 }
+                  else if speed_delta > 0.0 { 1.0 } else if speed_delta < 0.0 { -1.0 } else { 1.0 };
+        let mut delta = eff_delta;
+        if delta.abs() < crate::ecology::NICHE_GEN_MIN_OFFSET {
+            delta = dir * crate::ecology::NICHE_GEN_MIN_OFFSET;
+        }
+        // Clamp keeps the eff-driven direction (a strong gap saturates at
+        // the axis end — Phase 16 semantics); bounce only when the clamp
+        // would compress the distance below the generational minimum
+        // (parent already near the boundary in the same direction).
+        let n = (parent_niche + delta).clamp(-1.0, 1.0);
+        if (n - parent_niche).abs() < crate::ecology::NICHE_GEN_MIN_OFFSET {
+            let alt = parent_niche - dir * crate::ecology::NICHE_GEN_MIN_OFFSET;
+            if (-1.0..=1.0).contains(&alt) { return alt; }
+        }
+        n
+    }
+
     /// Phase 51: `niche_pref_mult` at a world position (off-grid → 1.0).
     #[inline]
     pub fn niche_pref_at(&self, clade_id: u32, x: f64, z: f64) -> f64 {
@@ -153,16 +178,21 @@ impl Ecology {
         // Snapshot (id, niche, eff) first: parent lookups must read the
         // pre-update table, and clade-table order keeps everything
         // deterministic.
-        let snapshot: Vec<(u32, f64, f64)> = self.species_clades.iter()
-            .map(|c| (c.id, c.niche_offset, c.centroid_genome.deco_efficiency))
+        let snapshot: Vec<(u32, f64, f64, f64)> = self.species_clades.iter()
+            .map(|c| (c.id, c.niche_offset, c.centroid_genome.deco_efficiency,
+                      c.centroid_genome.speed))
             .collect();
         let mut updates: Vec<(u32, f64)> = Vec::new();
         for c in self.species_clades.iter() {
             if c.death_tick.is_some() { continue; } // fossils freeze
             let Some(pid) = c.parent_id else { continue }; // root pinned at 0
-            let Some(&(_, pn, pe)) = snapshot.iter().find(|(id, _, _)| *id == pid) else { continue };
-            let niche = (pn + (c.centroid_genome.deco_efficiency - pe) * NICHE_EFF_SCALE)
-                .clamp(-1.0, 1.0);
+            let Some(&(_, pn, pe, ps)) = snapshot.iter().find(|(id, _, _, _)| *id == pid) else { continue };
+            let niche = Self::generational_niche(
+                pn,
+                (c.centroid_genome.deco_efficiency - pe) * NICHE_EFF_SCALE,
+                c.centroid_genome.speed - ps,
+                self.niche_gen_accum,
+            );
             updates.push((c.id, niche));
         }
         for (id, niche) in updates {

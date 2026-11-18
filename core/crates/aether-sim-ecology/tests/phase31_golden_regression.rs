@@ -25,8 +25,9 @@
 //! 20261102, far past the pinned windows, and the multiplier is exactly 1.0
 //! before any banded clade exists. Post-fork deep anchors (not pinned here;
 //! see phase51_niche_partition_test): partition-OFF @30000 = 0x516d99450971ff76,
-//! @60000 = 0x0ab6c03f2c29eec5 (bit-exact Phase 50); partition-ON @60000 =
-//! 0x105ab3f835ff4248 (the mechanism fires between t=40000 and t=60000).
+//! @60000 and the partition-ON deep anchor were re-baselined by Phase 53
+//! (fork-budget floor 5→8 + generational niche accumulation): see the
+//! phase51/phase53 test files for the current arm values.
 //!   seed 20261102 @300  v2 0x651cf47e6d54ca64  (= Phase 49)
 //!   seed 20261102 @3000 v2 0xc94fc584ddfd6eb3  (= Phase 49)
 //!   seed 20261105 @300  v2 0x5b9200b4b88d971a  (= Phase 49)

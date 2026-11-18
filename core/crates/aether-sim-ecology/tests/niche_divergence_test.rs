@@ -180,6 +180,11 @@ fn setup_split() -> (Ecology, u32, [(f64, f64); 2]) {
     // amplifier orthogonal to the burden mechanism under test here.
     eco.brain_switch_enabled = false;
     eco.deco_eff_choice_mode = save_state::DECO_CHOICE_SELECTIVE;
+    // Phase 53 instrumentation: the generational minimum niche distance
+    // (0.35) keeps mother and daughter beyond the competitive-overlap
+    // window by design — this A/B tests the Phase 16 burden itself, so the
+    // niche projection is pinned to the pre-Phase-53 formula (eff gap only).
+    eco.niche_gen_accum_off();
     let (a, b) = seed_two_clusters(&mut eco);
     let anchors = [a, b];
     for t in 1..=500u32 {

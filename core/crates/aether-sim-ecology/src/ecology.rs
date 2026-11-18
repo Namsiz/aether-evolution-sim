@@ -1056,8 +1056,13 @@ pub const SPECIATION_MIN_SIDE_LEGACY: usize = 2;
 pub const FORK_BUDGET_GRANT: usize = 20;
 /// Floor of a grant AND of the parent's post-grant remainder: a kind with
 /// less than `2 × FORK_BUDGET_MIN` cannot fork again (80 → 60+20 → 45+15 →
-/// 15+5 is the deepest legal chain from 80).
-pub const FORK_BUDGET_MIN: usize = 5;
+/// 37+8 is the deepest legal chain from 80). Phase 53 raised the floor
+/// 5 → 8: SPECIATION_MIN_SIDE=8 declares a fork only when both sides hold 8
+/// members, but a grant of 5 capped the newborn kind's spawn rate below its
+/// mint-time population — the clade shrank from day one and died young
+/// (200k observation: both grandchildren went extinct despite the niche
+/// minimum distance). The floor and the split gate must agree.
+pub const FORK_BUDGET_MIN: usize = 8;
 /// Phase 49: is the fork-budget mechanism active? Default ON; the A/B arm
 /// (`budget_fork_off`) restores the Phase 47 family-shared-cap trajectory.
 pub const BUDGET_FORK_ON: bool = true;
@@ -1074,6 +1079,17 @@ pub const BUDGET_FORK_ON: bool = true;
 /// eff gap -> niche displacement: (eff_child - eff_parent) * 2 spans [-1, 1]
 /// for the legal eff band [0.5, 1.5].
 pub const NICHE_EFF_SCALE: f64 = 2.0;
+/// Phase 53: minimum generational niche distance. Phase 52's 1M tree showed
+/// every depth-2 descendant dies (median lifespan short): a granddaughter's
+/// eff gap to its mother projects to a niche distance below
+/// NICHE_PARTITION_BAND, so mother and daughter forage the same resource
+/// face and the established mother wins. A fork now guarantees at least this
+/// much axis separation (direction = eff gap, tie-break = speed gap; a
+/// daughter at the axis boundary walks back instead of saturating).
+pub const NICHE_GEN_MIN_OFFSET: f64 = 0.35;
+/// Phase 53: generational niche accumulation on by default; the A/B arm
+/// (`niche_gen_accum_off`) restores the Phase 52 (Phase 16) projection.
+pub const NICHE_GEN_ACCUM_ON: bool = true;
 /// Two clades whose niche positions are closer than this compete for the
 /// same resources (1-D Gause overlap window).
 pub const NICHE_OVERLAP_THRESHOLD: f64 = 0.15;
@@ -1671,6 +1687,9 @@ pub struct Ecology {
     /// `niche_partition_off()` restores the Phase 50 foraging trajectory
     /// bit-exactly (the preference multiplier short-circuits to 1.0).
     pub niche_partition: bool,
+    /// Phase 53: generational niche accumulation (A/B: `niche_gen_accum_off`
+    /// restores the Phase 52 projection).
+    pub niche_gen_accum: bool,
     /// Phase 51: per-band member census (telemetry; rebuilt on every detection
     /// pass). Not persisted — observability only, same contract as GroupStats.
     pub niche_partition_share: crate::niche::NichePartitionShare,
@@ -1860,6 +1879,7 @@ impl Ecology {
             // multiplier is 1.0 for every clade inside the neutral band, so a
             // pre-split world is bit-exact with Phase 50).
             niche_partition: NICHE_PARTITION_ON,
+            niche_gen_accum: NICHE_GEN_ACCUM_ON,
             niche_partition_share: crate::niche::NichePartitionShare::default(),
             niche_by_clade: Vec::new(),
         };
@@ -2066,6 +2086,7 @@ impl Ecology {
             speciation_min_side: SPECIATION_MIN_SIDE_DEFAULT,
             // Phase 51: niche resource partition ON by default (see `Ecology::new`).
             niche_partition: NICHE_PARTITION_ON,
+            niche_gen_accum: NICHE_GEN_ACCUM_ON,
             niche_partition_share: crate::niche::NichePartitionShare::default(),
             niche_by_clade: Vec::new(),
         };
@@ -3384,6 +3405,12 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
     /// `phase51_niche_partition_test::niche_partition_off_is_bit_exact_phase50_anchor`).
     pub fn niche_partition_off(&mut self) {
         self.niche_partition = false;
+    }
+
+    /// Phase 53 A/B arm switch: restore the Phase 52 niche projection
+    /// (eff-gap only, no guaranteed generational minimum distance).
+    pub fn niche_gen_accum_off(&mut self) {
+        self.niche_gen_accum = false;
     }
 
     /// Phase 49: the density-dependent crowding denominator for `kind` — its
@@ -6914,13 +6941,16 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             // (update_niches_and_competition re-derives it on the same pass;
             // this initial value keeps the record self-consistent). Non-DECO
             // families keep a 0-centered niche (competition stays DECO-only).
-            let (parent_niche, parent_eff) = self.species_clades.iter()
+            let (parent_niche, parent_eff, parent_speed) = self.species_clades.iter()
                 .find(|c| c.id == parent)
-                .map(|p| (p.niche_offset, p.centroid_genome.deco_efficiency))
-                .unwrap_or((0.0, centroid.deco_efficiency));
-            let niche0 = (parent_niche
-                + (centroid.deco_efficiency - parent_eff) * NICHE_EFF_SCALE)
-                .clamp(-1.0, 1.0);
+                .map(|p| (p.niche_offset, p.centroid_genome.deco_efficiency, p.centroid_genome.speed))
+                .unwrap_or((0.0, centroid.deco_efficiency, centroid.speed));
+            let niche0 = Self::generational_niche(
+                parent_niche,
+                (centroid.deco_efficiency - parent_eff) * NICHE_EFF_SCALE,
+                centroid.speed - parent_speed,
+                self.niche_gen_accum,
+            );
             for &p in members.iter() {
                 self.agents[idxs[p]].clade_id = cid;
             }
@@ -7834,6 +7864,7 @@ impl Ecology {
             KindBudgets: self.kind_budgets.clone(),
             SpeciationMinSide: self.speciation_min_side,
             NichePartitionOn: self.niche_partition,
+            NicheGenAccum: self.niche_gen_accum,
             // Phase 39.1: group layer. `founder_genome` is serialized in full —
             // it is the propagation bottleneck, so it must survive the hop for
             // a restored sim to keep breeding from the same single genome.
@@ -8540,6 +8571,7 @@ impl Ecology {
             // flag → the current default world config (partition ON); the
             // O(1) niche cache is rebuilt from the restored clade table below.
             niche_partition: state.NichePartitionOn,
+            niche_gen_accum: state.NicheGenAccum,
             niche_partition_share: crate::niche::NichePartitionShare::default(),
             niche_by_clade: Vec::new(),
             culture_fidelity: state.CultureFidelity,

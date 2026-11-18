@@ -116,7 +116,7 @@
 use serde::{Deserialize, Serialize};
 
 
-pub const SAVE_STATE_VERSION: u32 = 18;
+pub const SAVE_STATE_VERSION: u32 = 19;
 pub const SAVE_STATE_SCHEMA_NAME: &str = "aether-sim-save-state";
 
 /// DECO selection-pressure mode selector (persisted in SaveState v2).
@@ -1011,6 +1011,10 @@ pub struct SaveState {
     /// world config).
     #[serde(default = "default_true")]
     pub NichePartitionOn: bool,
+    /// Phase 53: generational niche accumulation (v19). Pre-v19 archives land
+    /// ON (the default world).
+    #[serde(default = "default_true")]
+    pub NicheGenAccum: bool,
 }
 
 fn default_min_side_legacy() -> usize {

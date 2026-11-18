@@ -261,8 +261,10 @@ fn partition_semantics_double_run_roundtrip_and_bite_gain() {
 
 #[test]
 fn niche_partition_off_is_bit_exact_phase50_anchor() {
-    // B arm (Phase 50 behaviour): pre-fork and post-fork anchors were captured
-    // on the pre-Phase-51 binary (research/phase51-report.md, baseline run).
+    // B arm: partition OFF. Phase 53 re-baselined this deep anchor (the fork
+    // budget floor rose 5→8 and the generational niche accumulation is on by
+    // default, so "bit-exact Phase 50" no longer holds — the arm now pins the
+    // partition-OFF trajectory OF THE CURRENT world).
     let mut off = Ecology::new(SEED);
     off.niche_partition_off();
     for t in 1..=60_000u32 {
@@ -272,8 +274,8 @@ fn niche_partition_off_is_bit_exact_phase50_anchor() {
                 "pre-fork anchor: partition OFF must be bit-exact with Phase 50 at t=30000");
         }
     }
-    assert_eq!(off.checksum(), "0x0ab6c03f2c29eec5",
-        "post-fork deep anchor: partition OFF must be bit-exact with Phase 50 at t=60000");
+    assert_eq!(off.checksum(), "0x67c9194712c6f941",
+        "post-fork deep anchor: partition OFF (Phase 53 world) at t=60000");
 
     // A arm (default ON): a bit-exact no-op BEFORE the first banded fork,
     // a diverging trajectory after it (deco-A forks at t=34680 banded; the
@@ -288,8 +290,8 @@ fn niche_partition_off_is_bit_exact_phase50_anchor() {
                 "pre-fork: partition ON must be bit-exact with Phase 50 before any banded clade exists");
         }
     }
-    assert_ne!(on.checksum(), "0x0ab6c03f2c29eec5",
-        "post-fork: partition ON must diverge from the Phase 50 trajectory by t=60000");
+    assert_ne!(on.checksum(), "0x67c9194712c6f941",
+        "post-fork: partition ON must diverge from the partition-OFF arm by t=60000");
 }
 
 /// Phase 51: a pre-v18 archive (no `NichePartitionOn` key, Version=17) loads
