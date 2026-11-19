@@ -130,6 +130,10 @@ fn heterogeneity_on_exceeds_off_at_60k() {
     };
     let mut on = Ecology::new(20261102);
     on.structure_env_on = true;
+    // Phase 56: isolate the regrowth field — the decomposition field is a
+    // separate switch (on by default from Phase 56) and would confound the
+    // grass-variance comparison.
+    on.deco_resource_env_off();
     run_ticks(&mut on, 60_000);
     let var_on = variance(&on);
     let env_var_on = {
@@ -141,6 +145,7 @@ fn heterogeneity_on_exceeds_off_at_60k() {
         on.structure_registry.len());
     let mut off = Ecology::new(20261102);
     off.structure_env_off();
+    off.deco_resource_env_off();
     run_ticks(&mut off, 60_000);
     let var_off = variance(&off);
     eprintln!("[phase55] OFF t=60000 grass_var={var_off:.5} env_var=0 structs={}",

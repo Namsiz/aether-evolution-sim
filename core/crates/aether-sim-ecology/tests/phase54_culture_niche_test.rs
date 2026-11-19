@@ -71,6 +71,9 @@ fn structure_env_off_is_the_phase53_trajectory() {
     // by the Phase 53 budget-floor change; the pre-floor value is gone).
     let mut eco = Ecology::new(20261102);
     eco.structure_env_off();
+    // Phase 56 (re-baseline 15): the decomposition field is a separate switch
+    // and it is on by default; this anchor is the pre-56 world.
+    eco.deco_resource_env_off();
     run_ticks(&mut eco, 60_000);
     assert_eq!(eco.checksum(), "0x3fff60ac98f9b8c5",
         "structure_env OFF: no-op trajectory (Phase 53 world) at t=60000");

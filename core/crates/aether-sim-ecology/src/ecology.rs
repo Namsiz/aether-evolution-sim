@@ -1160,6 +1160,86 @@ pub const STRUCTURE_ENV_BOOST: f32 = 2.0;
 /// different causal route (Phase 56: DECO-direct resources or
 /// clade-exclusion foraging).
 pub const STRUCTURE_ENV_ON: bool = false;
+
+// ----- Phase 56: culture × the DECO resource face (carcass decomposition) ----
+//
+// Phases 54/55 spent three calibrations proving that the grass field is the
+// wrong causal route: any structure effect on primary production — one-sided
+// boost, net-zero dipole, even a ±1 % mosaic — stabilises the DECO root and
+// zeroes speciation, because the DECO (the lineage that actually forks) eats
+// carcasses, not grass. Phase 56 moves the target onto DECO's own resource
+// face: carcass mass.
+//
+// `deco_env` is a per-cell multiplier on the carcass decay rate (`1.4/tick`
+// spread over the world, previously a global constant). A cell at 0.5 keeps a
+// carcass available twice as long (a larder); a cell at 1.5 rots it away in
+// two thirds of the time (a desert). Structures imprint the field from the
+// sign of their token's `grass_mod`: an enrichment token (grass_mod > 0)
+// SLOWS decomposition around it — the enriched soil retains the carcass mass
+// for its decomposers — and a depletion token accelerates it. Because each
+// clade's repertoire is its own (Phase 37/45), clades that carry opposite
+// token signs lay down opposite food regimes over their home ranges; the same
+// carcass supply means a different life depending on whose culture shapes the
+// ground.
+//
+// Why this should support speciation where the grass dipole could not: the
+// two regimes select on different traits. In a fast-rot patch a decomposer
+// must be fast and far-sensing to reach a carcass before it is gone; in a
+// slow-rot one a slow, cheap decomposer survives just as well. The stimulus
+// lands on exactly the axes the speciation instrument measures (speed /
+// sense / size / metabolic efficiency), and it is spatial — the geographic-
+// isolation gate is met by demes living in different regimes, not by a
+// world-wide production lift that makes everyone comfortable.
+//
+// What the calibration actually showed (80k, gain 3/10 fail, gain 20 passes)
+// is a sharper story: the sign split is not the driver, the CONTRAST is. A
+// gentle mosaic (gain 3/10) feeds the DECO guild to its 80-slot cap — the
+// Phase 54/55 stabilisation, reproduced on the food-lifetime axis — while a
+// saturated one (gain 20: every placement pins the disk at 0.5× or 1.5×)
+// costs the guild a quarter of its population and fragments it into regions.
+// Cutting the food supply in half over 49 cells and doubling it on the 72
+// cells around them is the first structure effect in four phases that buys
+// forks instead of comfort.
+//
+// The dipole keeps Phase 55's shape but not its approximation: the ring's
+// capacity is measured BEFORE the disk is stamped and the imprint is scaled
+// to what the ring can pay back, so the field mean holds at 1.0 to f32
+// rounding (Phase 55's own payout, truncated at the clamp, drifted the mean
+// by 0.7 % at gain 10 — on a food-supply field that drift is a global change
+// of the decomposition rate, exactly what the net-zero contract forbids).
+/// Cells within this radius of a structure feel its decomposition imprint.
+pub const STRUCTURE_DECO_RADIUS: i32 = 3;
+/// Compensation ring of the decomposition dipole (same geometry as Phase 55:
+/// 7×7 disk against the 11×11 ring).
+pub const STRUCTURE_DECO_RING: i32 = 5;
+/// Per-tick relaxation of the decomposition multiplier toward 1.0
+/// (half-life ≈ 350 ticks, the Phase 55 value — a cultural larder must be
+/// maintained by fresh placements to persist).
+pub const STRUCTURE_DECO_DECAY: f32 = 0.998;
+/// Bounds of the per-cell decay-rate multiplier.
+pub const STRUCTURE_DECO_MIN: f32 = 0.5;
+pub const STRUCTURE_DECO_MAX: f32 = 1.5;
+/// Per-structure imprint scale: the raw token grass_mod is ±0.05
+/// (STRUCTURE_MOD_STRENGTH), so ×20 pins the disk immediately at its bound
+/// (0.5× or 1.5× decay rate) — a placed structure halves or doubles a
+/// carcass's lifetime outright.
+///
+/// CALIBRATION (Phase 56, 80k, seed 20261102; OFF arm = 2 speciation events):
+/// gain 3 → 0 events, gain 10 → 0 events, gain 20 → **3 events**. The failure
+/// at low gain is the Phase 54/55 failure mode with a new face: a gentle
+/// decomposition mosaic simply feeds the DECO guild up to its 80-slot cap
+/// (g3/g10 end at deco = 80, one clade), so the population is *more* stable
+/// than the OFF arm's 60. Only saturated contrast fragments the food supply
+/// hard enough to cost population (g20: deco 34–45) and to isolate demes
+/// (DECO absent from region 0 by t=80k, three forks).
+pub const STRUCTURE_DECO_GAIN: f32 = 20.0;
+/// Phase 56 A/B: structures reshape the decomposition field. **Default ON**
+/// (re-baseline 15) — the first structure→speciation coupling that passes the
+/// A/B bar in four phases: 80k ON 3 speciation events vs OFF 2; 200k ON 4
+/// (t=23.7k/39.5k/76.4k/157.1k) vs OFF 4, plus an extinction event at 82.0k
+/// the OFF arm never produces. The pre-56 anchors are preserved by the
+/// `deco_resource_env_off` arm (see `phase56_deco_resource_test`).
+pub const DECO_RESOURCE_ENV_ON: bool = true;
 /// Two clades whose niche positions are closer than this compete for the
 /// same resources (1-D Gause overlap window).
 pub const NICHE_OVERLAP_THRESHOLD: f64 = 0.15;
@@ -1726,6 +1806,13 @@ pub struct Ecology {
     /// True while any cell multiplier is above 1.0 (skips the decay pass
     /// once the field has fully relaxed).
     pub structure_env_decay_active: bool,
+    /// Phase 56: per-cell carcass decay multiplier (starts at 1.0; structures
+    /// push it up/down under the clamp, STRUCTURE_DECO_DECAY relaxes it back).
+    pub deco_env: Vec<f32>,
+    /// Phase 56 A/B toggle.
+    pub deco_env_on: bool,
+    /// True while any cell multiplier differs from 1.0 (skips the decay pass).
+    pub deco_env_decay_active: bool,
     /// Phase 45: per-kind clade-isolation telemetry (kind id → rolling
     /// window). Pure observability — not persisted (same contract as
     /// GroupStats); rebuilt from live clades after a restore.
@@ -1942,6 +2029,9 @@ impl Ecology {
             structure_env: vec![1.0f32; n],
             structure_env_on: STRUCTURE_ENV_ON,
             structure_env_decay_active: false,
+            deco_env: vec![1.0f32; n],
+            deco_env_on: DECO_RESOURCE_ENV_ON,
+            deco_env_decay_active: false,
             isolation_by_kind: Vec::new(),
             culture_value_on: true,
             dispersal_p: DISPERSAL_P,
@@ -2154,6 +2244,9 @@ impl Ecology {
             structure_env: vec![1.0f32; n],
             structure_env_on: STRUCTURE_ENV_ON,
             structure_env_decay_active: false,
+            deco_env: vec![1.0f32; n],
+            deco_env_on: DECO_RESOURCE_ENV_ON,
+            deco_env_decay_active: false,
             isolation_by_kind: Vec::new(),
             culture_value_on: true,
             dispersal_p: DISPERSAL_P,
@@ -3505,6 +3598,15 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         self.structure_env_decay_active = false;
     }
 
+    /// Phase 56 A/B arm switch: structures stop touching the decomposition
+    /// field (the carcass decay multiplier is reset to all-1.0 and frozen, so
+    /// the carcass pass consumes exactly the pre-56 constant rate).
+    pub fn deco_resource_env_off(&mut self) {
+        self.deco_env_on = false;
+        for v in self.deco_env.iter_mut() { *v = 1.0; }
+        self.deco_env_decay_active = false;
+    }
+
     /// Phase 55: apply one structure placement to the regrowth field as a
     /// net-zero dipole. Pass 1 boosts the disk (Chebyshev radius
     /// `STRUCTURE_ENV_RADIUS`) under the clamp and measures what the field
@@ -3560,6 +3662,108 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                         .clamp(STRUCTURE_ENV_MIN, STRUCTURE_ENV_MAX);
                 }
             }
+        }
+    }
+
+    /// Phase 56: carcass decomposition multiplier at a world position — 1.0
+    /// whenever the A/B is off or the position is off-grid, which is when the
+    /// carcass pass is bit-identical to the pre-56 constant rate.
+    pub fn deco_decay_mult_at(&self, x: f64, z: f64) -> f64 {
+        if !self.deco_env_on { return 1.0; }
+        let ci = self.cell_index(x, z);
+        if ci < 0 { return 1.0; }
+        self.deco_env[ci as usize] as f64
+    }
+
+    /// Phase 56: apply one structure placement to the decomposition field as a
+    /// net-zero dipole. The direction comes from the token's `grass_mod` sign
+    /// (its magnitude scales the imprint): an enrichment token slows
+    /// decomposition on its disk (the soil around the structure holds carcass
+    /// mass for its decomposers) and the ring pays back the absorbed larder by
+    /// rotting faster; a depletion token does the mirror image. Culture
+    /// therefore chooses WHERE carcass mass stays available, never how much of
+    /// it the world keeps.
+    ///
+    /// Conservation is exact, not approximate. Phase 55's ring payout could
+    /// only truncate at the clamp, which biases the field mean (measured
+    /// −0.7 % at gain 10) — on a food-supply field that bias is a global
+    /// change of the decomposition rate, the very thing the net-zero contract
+    /// exists to forbid. So the ring's capacity in the payout direction is
+    /// measured FIRST and the disk's whole imprint is scaled down to what the
+    /// ring can actually absorb; the payout then spills over ring cells that
+    /// clamp until the absorbed amount is fully returned.
+    pub fn deco_env_dipole(&mut self, x: f64, z: f64, grass_mod: f64) {
+        let ci0 = self.cell_index(x, z);
+        if ci0 < 0 { return; }
+        if grass_mod == 0.0 { return; }
+        let boost = -(grass_mod as f32) * STRUCTURE_DECO_GAIN;
+        let dir = if boost > 0.0 { 1.0f32 } else { -1.0f32 };
+        let c0 = ci0 as usize;
+        let col = (c0 % GRID_N as usize) as i32;
+        let row = (c0 / GRID_N as usize) as i32;
+        let r = STRUCTURE_DECO_RADIUS;
+        let ring = STRUCTURE_DECO_RING;
+        let gn = GRID_N as i32;
+        let mut disk: Vec<usize> = Vec::with_capacity(49);
+        let mut ring_cells: Vec<usize> = Vec::with_capacity(72);
+        for dc in -ring..=ring {
+            let cc = col + dc;
+            if cc < 0 || cc >= gn { continue; }
+            for dr in -ring..=ring {
+                let rr = row + dr;
+                if rr < 0 || rr >= gn { continue; }
+                let j = (rr as usize) * GRID_N as usize + cc as usize;
+                if dc.abs().max(dr.abs()) <= r { disk.push(j); } else { ring_cells.push(j); }
+            }
+        }
+        if disk.is_empty() || ring_cells.is_empty() { return; }
+        // Room a cell still has in direction `d` (+1 = upward).
+        let room = |v: f32, d: f32| if d > 0.0 {
+            STRUCTURE_DECO_MAX - v
+        } else {
+            v - STRUCTURE_DECO_MIN
+        };
+        let ring_room: f32 = ring_cells.iter().map(|&j| room(self.deco_env[j], -dir)).sum();
+        let planned = boost.abs() * disk.len() as f32;
+        let scale = if ring_room < planned { ring_room / planned } else { 1.0 };
+        if scale <= 0.0 { return; }
+        self.deco_env_decay_active = true;
+        let delta = boost * scale;
+        let mut absorbed = 0.0f32;
+        for &j in &disk {
+            let v = self.deco_env[j];
+            let m = (v + delta).clamp(STRUCTURE_DECO_MIN, STRUCTURE_DECO_MAX);
+            absorbed += (m - v).abs();
+            self.deco_env[j] = m;
+        }
+        if absorbed == 0.0 { return; }
+        // Payout: uniform share first, then the shortfall over ring cells that
+        // still had room (the pre-measured capacity guarantees full payment).
+        let mut unpaid = 0.0f32;
+        let mut share = absorbed / ring_cells.len() as f32;
+        for &j in &ring_cells {
+            let room_j = room(self.deco_env[j], -dir);
+            let pay = if room_j < share { room_j } else { share };
+            self.deco_env[j] -= dir * pay;
+            unpaid += share - pay;
+        }
+        for _ in 0..4 {
+            if unpaid <= 1e-6 { break; }
+            let mut open = 0usize;
+            for &j in &ring_cells {
+                if room(self.deco_env[j], -dir) > 1e-6 { open += 1; }
+            }
+            if open == 0 { break; }
+            share = unpaid / open as f32;
+            let mut still = 0.0f32;
+            for &j in &ring_cells {
+                let room_j = room(self.deco_env[j], -dir);
+                if room_j <= 1e-6 { continue; }
+                let pay = if room_j < share { room_j } else { share };
+                self.deco_env[j] -= dir * pay;
+                still += share - pay;
+            }
+            unpaid = still;
         }
     }
 
@@ -5953,6 +6157,19 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 }
                 self.structure_env_decay_active = any_off;
             }
+            // Phase 56: decomposition multipliers relax toward 1.0 (same
+            // linear pass, skipped while the field is fully relaxed).
+            if self.deco_env_on && self.deco_env_decay_active {
+                let mut any_off = false;
+                for v in self.deco_env.iter_mut() {
+                    if (*v - 1.0).abs() > 1e-6 {
+                        *v = 1.0 + (*v - 1.0) * STRUCTURE_DECO_DECAY;
+                        if (*v - 1.0).abs() <= 1e-4 { *v = 1.0; }
+                        else { any_off = true; }
+                    }
+                }
+                self.deco_env_decay_active = any_off;
+            }
 
             self.season = ((self.time / 1800.0) as i32) % 4;
             let season_grass = [1.3f64, 0.6, 0.8, 0.25][self.season as usize];
@@ -6174,6 +6391,12 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                                     if self.structure_env_on {
                                         self.structure_env_dipole(x, z, grass_mod);
                                     }
+                                    // Phase 56: the same placement imprints
+                                    // the decomposition field — culture's
+                                    // hand on the DECO's own food supply.
+                                    if self.deco_env_on {
+                                        self.deco_env_dipole(x, z, grass_mod);
+                                    }
                                     // Apply immediate environmental effect
                                     let gain = grass_mod * 10.0;
                                     self.agents[idx].energy += gain; // benefit feedback
@@ -6218,7 +6441,11 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 }
             }
             for i in (0..self.carcasses.len()).rev() {
-                self.carcasses[i].energy -= 1.4 * h;
+                // Phase 56: the local decomposition multiplier. Exactly 1.0
+                // when the A/B is off, so `1.4 * h * 1.0` is bit-identical to
+                // the pre-56 constant rate.
+                let decay_mult = self.deco_decay_mult_at(self.carcasses[i].x, self.carcasses[i].z);
+                self.carcasses[i].energy -= 1.4 * h * decay_mult;
                 if self.carcasses[i].energy <= 0.2 { self.carcasses.remove(i); }
             }
 
@@ -7199,6 +7426,9 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
     pub fn grass_field(&self) -> &[f32] { &self.grass }
     /// Phase 55: suitability mask accessor, see `grass_field`.
     pub fn suit_field(&self) -> &[f32] { &self.suit }
+    /// Phase 56: per-cell carcass decay multiplier accessor (all-1.0 whenever
+    /// no structure has imprinted it, so an A/B-fresh world reads flat).
+    pub fn deco_env_field(&self) -> &[f32] { &self.deco_env }
     pub fn clade_events(&self) -> &[CladeSpeciationEvent] { &self.speciation_events }
 
     pub fn stats(&self) -> Stats {
@@ -8052,6 +8282,10 @@ impl Ecology {
             StructureEnv: self.structure_env.clone(),
             StructureEnvOn: self.structure_env_on,
             StructureEnvDecayActive: self.structure_env_decay_active,
+            // Phase 56: decomposition field.
+            DecoEnv: self.deco_env.clone(),
+            DecoEnvOn: self.deco_env_on,
+            DecoEnvDecayActive: self.deco_env_decay_active,
             // Phase 39.1: group layer. `founder_genome` is serialized in full —
             // it is the propagation bottleneck, so it must survive the hop for
             // a restored sim to keep breeding from the same single genome.
@@ -8735,6 +8969,13 @@ impl Ecology {
             },
             structure_env_on: state.StructureEnvOn,
             structure_env_decay_active: state.StructureEnvDecayActive,
+            deco_env: if state.DecoEnv.len() == n {
+                state.DecoEnv.clone()
+            } else {
+                vec![1.0f32; n]
+            },
+            deco_env_on: state.DecoEnvOn,
+            deco_env_decay_active: state.DecoEnvDecayActive,
             isolation_by_kind: Vec::new(),
             culture_value_on: state.CultureValueOn,
             // Phase 47: natal dispersal. Pre-v16 archives carry no fields →

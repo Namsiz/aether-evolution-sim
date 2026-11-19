@@ -129,8 +129,12 @@ fn group_off_is_bit_exact_phase36_anchor() {
     //   seed2 @300 0xc56ee1f0c8d2528f · v1 @300 0x75c621a32eb86951
     // Phase 47: region islands + philopatry + DECO mutation ×5.
     // Phase 49: fork budget + SPECIATION_MIN_SIDE=8 (twelfth re-baseline).
+    // Phase 56: decomposition field (fifteenth re-baseline) — structures
+    // imprint carcass decay from their token sign, so the group-off arm's
+    // @3000 anchor moves (@300 is untouched: nothing is built that early).
+    // Phase 49 values (previous): @3000 0xdb3aa647fa2e3a96.
     assert_eq!(checksum_at(20261102, 300, false), "0x7d2c8613d01cb79d");
-    assert_eq!(checksum_at(20261102, 3000, false), "0xdb3aa647fa2e3a96");
+    assert_eq!(checksum_at(20261102, 3000, false), "0x08d4191f98770182");
     assert_eq!(checksum_at(20261105, 300, false), "0xbd6a86a9fe8264e7");
 
     // Same v1 anchor (the historical stream must not see the group hash).
@@ -415,8 +419,8 @@ fn save_v11_roundtrip_is_bit_exact() {
     let mut eco = grouped_world(600);
     let state = eco.to_save_state();
     assert_eq!(state.version, save_state::SAVE_STATE_VERSION);
-    // Phase 51 bumped the schema to v18 (niche resource partition toggle).
-    assert_eq!(save_state::SAVE_STATE_VERSION, 20);
+    // Phase 56 bumped the schema to v21 (decomposition field).
+    assert_eq!(save_state::SAVE_STATE_VERSION, 21);
     assert!(!state.Groups.is_empty());
 
     let json = serde_json::to_string(&state).expect("save serializes");
@@ -461,7 +465,7 @@ fn legacy_v10_archive_loads_as_solitary_world() {
     let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
     // Phase 51 bumped the schema to v18 (niche resource partition);
     // older layers ride alongside (all serde-defaulted).
-    assert_eq!(v["Version"], 20);
+    assert_eq!(v["Version"], 21);
     // Strip every v10/v11/v13/v14 addition — this is exactly what a v10 archive looks like.
     v["Version"] = serde_json::json!(10);
     let obj = v.as_object_mut().unwrap();

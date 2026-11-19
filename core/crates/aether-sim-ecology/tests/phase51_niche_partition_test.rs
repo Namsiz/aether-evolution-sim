@@ -267,6 +267,10 @@ fn niche_partition_off_is_bit_exact_phase50_anchor() {
     // partition-OFF trajectory OF THE CURRENT world).
     let mut off = Ecology::new(SEED);
     off.niche_partition_off();
+    // Phase 56 (re-baseline 15): the decomposition field is on by default,
+    // so the pre-56 arm switches it off — this anchor is the pure Phase-50/53
+    // niche-partition A/B on the world that existed before the field.
+    off.deco_resource_env_off();
     for t in 1..=60_000u32 {
         off.update(0.1, daylight(t));
         if t == 30_000 {
@@ -283,6 +287,7 @@ fn niche_partition_off_is_bit_exact_phase50_anchor() {
     // full DECO bites saturate against the 100-energy cap, so only the
     // partial/low-efficiency bites carry the preference).
     let mut on = Ecology::new(SEED);
+    on.deco_resource_env_off();
     for t in 1..=60_000u32 {
         on.update(0.1, daylight(t));
         if t == 30_000 {

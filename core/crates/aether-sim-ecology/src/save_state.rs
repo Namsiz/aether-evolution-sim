@@ -112,11 +112,18 @@
 /// live resource fields), so nothing else rides the schema; the O(1)
 /// `niche_by_clade` cache and the `NichePartitionShare` telemetry are rebuilt
 /// on load and never persisted.
+/// v20 → v21 (Phase 56): the decomposition field. The sim level gains
+/// `DecoEnv` (per-cell carcass decay multiplier; `#[serde(default)]` → a v20
+/// archive restores an empty vector, rebuilt as all-1.0 — the pre-56 carcass
+/// pass was the flat 1.4/tick constant) plus the `DecoEnvOn` toggle and the
+/// `DecoEnvDecayActive` bookkeeping flag (both default false → a v20 archive
+/// loads with the mechanism OFF, which is also the Phase 56 compiled
+/// default until the A/B verdict says otherwise).
 
 use serde::{Deserialize, Serialize};
 
 
-pub const SAVE_STATE_VERSION: u32 = 20;
+pub const SAVE_STATE_VERSION: u32 = 21;
 pub const SAVE_STATE_SCHEMA_NAME: &str = "aether-sim-save-state";
 
 /// DECO selection-pressure mode selector (persisted in SaveState v2).
@@ -1026,6 +1033,17 @@ pub struct SaveState {
     pub StructureEnvOn: bool,
     #[serde(default)]
     pub StructureEnvDecayActive: bool,
+    /// Phase 56: per-cell carcass decay multiplier (v21). Empty on pre-v21
+    /// archives → rebuilt as all-1.0 (the pre-56 carcass pass used the flat
+    /// 1.4/tick constant; structures restored from the archive re-arm on
+    /// their next placement, not retroactively).
+    #[serde(default)]
+    pub DecoEnv: Vec<f32>,
+    /// Phase 56: A/B toggle + relaxation-pass bookkeeping.
+    #[serde(default)]
+    pub DecoEnvOn: bool,
+    #[serde(default)]
+    pub DecoEnvDecayActive: bool,
 }
 
 fn default_min_side_legacy() -> usize {

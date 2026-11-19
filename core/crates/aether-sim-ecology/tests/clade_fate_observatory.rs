@@ -11,8 +11,9 @@
 //! process per seed/arm): `PHASE_SEED=42`, `PHASE_TICKS=80000`, and
 //! `PHASE_STRUCTURE_ENV=on|off` (Phase 55: the structure-env A/B — "on" flips
 //! the net-zero dipole on before the first tick, "off" freezes it at all-1.0;
-//! unset runs the compiled default). Output files carry the arm suffix so
-//! parallel A/B runs never overwrite each other.
+//! unset runs the compiled default), plus `PHASE_DECO_ENV=on|off` (Phase 56:
+//! the decomposition-field A/B on the same terms). Output files carry the arm
+//! suffix so parallel A/B runs never overwrite each other.
 
 use aether_sim_ecology::civilization_metrics::{format_line, measure};
 use aether_sim_ecology::ecology::Ecology;
@@ -72,6 +73,16 @@ fn env_stats(eco: &Ecology) -> (f64, f64) {
     (mean, var)
 }
 
+/// Phase 56: mean and variance of the carcass decay multiplier (all-1.0 → 0).
+fn deco_env_stats(eco: &Ecology) -> (f64, f64) {
+    let n = eco.deco_env.len() as f64;
+    let mean = eco.deco_env.iter().map(|&v| v as f64).sum::<f64>() / n;
+    let var = eco.deco_env.iter().map(|&v| {
+        let d = v as f64 - mean; d * d
+    }).sum::<f64>() / n;
+    (mean, var)
+}
+
 #[test]
 #[ignore = "million-tick clade-fate run — ~70 minutes"]
 fn clade_fate_observation() {
@@ -82,21 +93,28 @@ fn clade_fate_observation() {
         Some("off") => "envoff",
         _ => "default",
     };
+    let deco_arm = match env_str("PHASE_DECO_ENV").as_deref() {
+        Some("on") => "decoon",
+        Some("off") => "decooff",
+        _ => "decodflt",
+    };
     // Calibration-sweep tag (Phase 55): parallel arms of the same switch must
     // never overwrite each other's output files.
     let tag = env_str("PHASE_ARM_TAG").unwrap_or_default();
     let suffix = if tag.is_empty() { String::new() } else { format!("_{tag}") };
-    let csv_path = format!("/tmp/clade_fate_{seed}_{arm}{suffix}.csv");
-    let tree_path = format!("/tmp/clade_tree_{seed}_{arm}{suffix}.csv");
-    let culture_path = format!("/tmp/clade_culture_{seed}_{arm}{suffix}.csv");
+    let csv_path = format!("/tmp/clade_fate_{seed}_{arm}_{deco_arm}{suffix}.csv");
+    let tree_path = format!("/tmp/clade_tree_{seed}_{arm}_{deco_arm}{suffix}.csv");
+    let culture_path = format!("/tmp/clade_culture_{seed}_{arm}_{deco_arm}{suffix}.csv");
     let mut csv = String::from(
-        "t,pop,herb,pred,scav,omn,fish,deco,clades_live,clades_total,events,tokens,bearers,groups,levels,authorities,grass_mean,grass_var,env_mean,env_var,structs,deco_r0,deco_r1,deco_r2,deco_r3,structs_r0,structs_r1,structs_r2,structs_r3\n",
+        "t,pop,herb,pred,scav,omn,fish,deco,clades_live,clades_total,events,tokens,bearers,groups,levels,authorities,grass_mean,grass_var,env_mean,env_var,structs,deco_r0,deco_r1,deco_r2,deco_r3,structs_r0,structs_r1,structs_r2,structs_r3,denv_mean,denv_var\n",
     );
     let mut eco = Ecology::new(seed);
     if arm == "envon" { eco.structure_env_on = true; }
     if arm == "envoff" { eco.structure_env_off(); }
+    if deco_arm == "decoon" { eco.deco_env_on = true; }
+    if deco_arm == "decooff" { eco.deco_resource_env_off(); }
     let mut last_events = 0usize;
-    eprintln!("=== clade-fate seed {seed} ({ticks} ticks, structure_env={arm}) ===");
+    eprintln!("=== clade-fate seed {seed} ({ticks} ticks, structure_env={arm}, deco_env={deco_arm}) ===");
     for t in 1..=ticks {
         eco.update(0.1, daylight(t));
         let n = eco.clade_events().len();
@@ -118,6 +136,7 @@ fn clade_fate_observation() {
                 .count();
             let (grass_mean, grass_var) = grass_stats(&eco);
             let (env_mean, env_var) = env_stats(&eco);
+            let (denv_mean, denv_var) = deco_env_stats(&eco);
             // Phase 55: spatial bookkeeping — do the DECO stay spread over
             // the four regions, and where do the structures pile up? A
             // culture that builds everywhere is not a differentiated culture.
@@ -133,7 +152,7 @@ fn clade_fate_observation() {
                 if r < 4 { structs_by_region[r] += 1; }
             }
             csv.push_str(&format!(
-                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.5},{:.5},{:.5},{:.5},{},{},{},{},{},{},{},{}\n",
+                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.5},{:.5},{:.5},{:.5},{},{},{},{},{},{},{},{},{:.5},{:.5}\n",
                 t, m.information.population, kind("herb"), kind("pred"), kind("scav"),
                 kind("omn"), kind("fish"), kind("deco"),
                 live_clades, eco.species_clades().len(), last_events,
@@ -142,11 +161,12 @@ fn clade_fate_observation() {
                 grass_mean, grass_var, env_mean, env_var, eco.structure_registry.len(),
                 deco_by_region[0], deco_by_region[1], deco_by_region[2], deco_by_region[3],
                 structs_by_region[0], structs_by_region[1], structs_by_region[2], structs_by_region[3],
+                denv_mean, denv_var,
             ));
             if t % 50_000 == 0 {
-                eprintln!("[fate] t={} {} live_clades={} total={} events={} grass_var={:.5} env_var={:.5} structs={}",
+                eprintln!("[fate] t={} {} live_clades={} total={} events={} grass_var={:.5} env_var={:.5} denv_var={:.5} structs={}",
                     t, format_line(&m), live_clades, eco.species_clades().len(), last_events,
-                    grass_var, env_var, eco.structure_registry.len());
+                    grass_var, env_var, denv_var, eco.structure_registry.len());
             }
         }
     }

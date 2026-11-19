@@ -97,6 +97,9 @@ fn niche_gen_accum_off_is_bit_exact_phase52_anchor() {
     // reference of this phase, not a byte-for-byte Phase 52 replay).
     let mut eco = Ecology::new(20261102);
     eco.niche_gen_accum_off();
+    // Phase 56 (re-baseline 15): pin the pre-56 world — the decomposition
+    // field is on by default from Phase 56 on.
+    eco.deco_resource_env_off();
     for t in 1..=30_000u32 {
         eco.update(0.1, daylight(t));
     }
