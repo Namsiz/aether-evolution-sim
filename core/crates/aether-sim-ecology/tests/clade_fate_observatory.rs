@@ -106,13 +106,22 @@ fn clade_fate_observation() {
         Some("neutral") => "neutral",
         _ => "signdflt",
     };
+    // Phase 58: decomposition-clamp sweep arm (`PHASE_DECO_CLAMP=0.6,1.4`)
+    // and the design-b placement arm (`PHASE_PLACE_VALUE=on`).
+    let clamp_env = env_str("PHASE_DECO_CLAMP");
+    let clamp_arm = clamp_env.clone().unwrap_or_else(|| "clampdflt".to_string());
+    let place_arm = match env_str("PHASE_PLACE_VALUE").as_deref() {
+        Some("on") => "bvalon",
+        Some("off") => "bvaloff",
+        _ => "bvaldflt",
+    };
     // Calibration-sweep tag (Phase 55): parallel arms of the same switch must
     // never overwrite each other's output files.
     let tag = env_str("PHASE_ARM_TAG").unwrap_or_default();
     let suffix = if tag.is_empty() { String::new() } else { format!("_{tag}") };
-    let csv_path = format!("/tmp/clade_fate_{seed}_{arm}_{deco_arm}_{sign_arm}{suffix}.csv");
-    let tree_path = format!("/tmp/clade_tree_{seed}_{arm}_{deco_arm}_{sign_arm}{suffix}.csv");
-    let culture_path = format!("/tmp/clade_culture_{seed}_{arm}_{deco_arm}_{sign_arm}{suffix}.csv");
+    let csv_path = format!("/tmp/clade_fate_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}{suffix}.csv");
+    let tree_path = format!("/tmp/clade_tree_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}{suffix}.csv");
+    let culture_path = format!("/tmp/clade_culture_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}{suffix}.csv");
     let mut csv = String::from(
         "t,pop,herb,pred,scav,omn,fish,deco,clades_live,clades_total,events,tokens,bearers,groups,levels,authorities,grass_mean,grass_var,env_mean,env_var,structs,deco_r0,deco_r1,deco_r2,deco_r3,structs_r0,structs_r1,structs_r2,structs_r3,denv_mean,denv_var\n",
     );
@@ -122,8 +131,13 @@ fn clade_fate_observation() {
     if deco_arm == "decoon" { eco.deco_env_on = true; }
     if deco_arm == "decooff" { eco.deco_resource_env_off(); }
     if sign_arm == "neutral" { eco.token_value_sign_neutral_on(); }
+    if let Some(spec) = &clamp_env {
+        let parts: Vec<f32> = spec.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+        if parts.len() == 2 { eco.deco_env_clamp_on(parts[0], parts[1]); }
+    }
+    if place_arm == "bvalon" { eco.token_placement_by_value_on(); }
     let mut last_events = 0usize;
-    eprintln!("=== clade-fate seed {seed} ({ticks} ticks, structure_env={arm}, deco_env={deco_arm}, token_sign={sign_arm}) ===");
+    eprintln!("=== clade-fate seed {seed} ({ticks} ticks, structure_env={arm}, deco_env={deco_arm}, token_sign={sign_arm}, clamp={clamp_arm}, place={place_arm}) ===");
     for t in 1..=ticks {
         eco.update(0.1, daylight(t));
         let n = eco.clade_events().len();

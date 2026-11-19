@@ -1813,11 +1813,21 @@ pub struct Ecology {
     pub deco_env_on: bool,
     /// True while any cell multiplier differs from 1.0 (skips the decay pass).
     pub deco_env_decay_active: bool,
+    /// Phase 58: decomposition-multiplier bounds — the compiled constants
+    /// unless an experiment arm overrides them (`deco_env_clamp_on`). Not
+    /// persisted: a restored world always falls back to the constants, which
+    /// is the only configuration the default trajectory uses.
+    pub deco_env_min: f32,
+    pub deco_env_max: f32,
     /// Phase 57: sign-neutral token value — placement gain reads
     /// `|grass_mod| × 10`, so a token's environment direction carries no
     /// energy advantage. Experimental arm only (`TOKEN_VALUE_SIGN_NEUTRAL`
     /// is false: the default world keeps the Phase 56 signed reward).
     pub token_value_sign_neutral: bool,
+    /// Phase 58 design b arm: placements stamp the highest-value token
+    /// (`use_gain`) instead of `known_tokens[0]`. Default false — the
+    /// inheritance-order pick is the Phase 56/57 world.
+    pub token_placement_by_value: bool,
     /// Phase 45: per-kind clade-isolation telemetry (kind id → rolling
     /// window). Pure observability — not persisted (same contract as
     /// GroupStats); rebuilt from live clades after a restore.
@@ -2037,7 +2047,10 @@ impl Ecology {
             deco_env: vec![1.0f32; n],
             deco_env_on: DECO_RESOURCE_ENV_ON,
             deco_env_decay_active: false,
+            deco_env_min: STRUCTURE_DECO_MIN,
+            deco_env_max: STRUCTURE_DECO_MAX,
             token_value_sign_neutral: crate::culture::TOKEN_VALUE_SIGN_NEUTRAL,
+            token_placement_by_value: false,
             isolation_by_kind: Vec::new(),
             culture_value_on: true,
             dispersal_p: DISPERSAL_P,
@@ -2253,7 +2266,10 @@ impl Ecology {
             deco_env: vec![1.0f32; n],
             deco_env_on: DECO_RESOURCE_ENV_ON,
             deco_env_decay_active: false,
+            deco_env_min: STRUCTURE_DECO_MIN,
+            deco_env_max: STRUCTURE_DECO_MAX,
             token_value_sign_neutral: crate::culture::TOKEN_VALUE_SIGN_NEUTRAL,
+            token_placement_by_value: false,
             isolation_by_kind: Vec::new(),
             culture_value_on: true,
             dispersal_p: DISPERSAL_P,
@@ -3622,6 +3638,35 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         self.token_value_sign_neutral = true;
     }
 
+    /// Phase 58 experiment arm: override the decomposition-multiplier bounds
+    /// (`STRUCTURE_DECO_MIN/MAX` by default). Diagnostics only — the bounds
+    /// are not persisted, so this never reaches a saved world.
+    pub fn deco_env_clamp_on(&mut self, min: f32, max: f32) {
+        self.deco_env_min = min;
+        self.deco_env_max = max;
+    }
+
+    /// Phase 58 design b arm switch: placements pick the token with the
+    /// highest emergent value instead of the first known token.
+    pub fn token_placement_by_value_on(&mut self) {
+        self.token_placement_by_value = true;
+    }
+
+    /// Which of the agent's known tokens a placement stamps: the first one
+    /// (inheritance order, Phase 56/57 world) or, in the design-b arm, the
+    /// highest `use_gain` (ties → lowest id, so the pick is order-free).
+    fn placement_token(&self, idx: usize) -> u32 {
+        let toks = &self.agents[idx].known_tokens;
+        if !self.token_placement_by_value || toks.len() == 1 { return toks[0]; }
+        let mut best = toks[0];
+        let mut best_v = self.token_registry.value_of(best);
+        for &t in toks.iter().skip(1) {
+            let v = self.token_registry.value_of(t);
+            if v > best_v || (v == best_v && t < best) { best_v = v; best = t; }
+        }
+        best
+    }
+
     /// Phase 55: apply one structure placement to the regrowth field as a
     /// net-zero dipole. Pass 1 boosts the disk (Chebyshev radius
     /// `STRUCTURE_ENV_RADIUS`) under the clamp and measures what the field
@@ -3732,11 +3777,12 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             }
         }
         if disk.is_empty() || ring_cells.is_empty() { return; }
+        let (lo, hi) = (self.deco_env_min, self.deco_env_max);
         // Room a cell still has in direction `d` (+1 = upward).
         let room = |v: f32, d: f32| if d > 0.0 {
-            STRUCTURE_DECO_MAX - v
+            hi - v
         } else {
-            v - STRUCTURE_DECO_MIN
+            v - lo
         };
         let ring_room: f32 = ring_cells.iter().map(|&j| room(self.deco_env[j], -dir)).sum();
         let planned = boost.abs() * disk.len() as f32;
@@ -3747,7 +3793,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         let mut absorbed = 0.0f32;
         for &j in &disk {
             let v = self.deco_env[j];
-            let m = (v + delta).clamp(STRUCTURE_DECO_MIN, STRUCTURE_DECO_MAX);
+            let m = (v + delta).clamp(lo, hi);
             absorbed += (m - v).abs();
             self.deco_env[j] = m;
         }
@@ -6386,7 +6432,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 // Place structures based on learned tokens (simplified model)
                 for &idx in &alive_indices {
                     if !self.agents[idx].known_tokens.is_empty() {
-                        let first_token = self.agents[idx].known_tokens[0];
+                        let first_token = self.placement_token(idx);
                         let x = self.agents[idx].x;
                         let z = self.agents[idx].z;
                         if let Some(token) = self.token_registry.get(first_token) {
@@ -9000,7 +9046,11 @@ impl Ecology {
             },
             deco_env_on: state.DecoEnvOn,
             deco_env_decay_active: state.DecoEnvDecayActive,
+            // Phase 58: the clamp is an experiment-arm override, never saved.
+            deco_env_min: STRUCTURE_DECO_MIN,
+            deco_env_max: STRUCTURE_DECO_MAX,
             token_value_sign_neutral: state.TokenValueSignNeutral,
+            token_placement_by_value: false,
             isolation_by_kind: Vec::new(),
             culture_value_on: state.CultureValueOn,
             // Phase 47: natal dispersal. Pre-v16 archives carry no fields →
