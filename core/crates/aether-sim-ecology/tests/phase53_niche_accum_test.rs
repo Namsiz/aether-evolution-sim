@@ -68,6 +68,11 @@ fn living_daughters_stay_beyond_the_band_from_their_mother() {
     // daughters that share a boundary-forced bounce (the axis is only 2 wide
     // and 3+ siblings cannot all be mutually ≥0.35 apart near a boundary).
     let mut eco = Ecology::new(20261102);
+    // Phase 59: the default world no longer forks on this seed (the saturated
+    // fertility map keeps DECO at cap), so this mechanism test runs on the
+    // replayed Phase 58 mapping — the band invariant is about the niche axis,
+    // not the fertility calibration.
+    eco.repro_threshold_old_off();
     run_ticks(&mut eco, 120_000);
     let mut checked = 0;
     for c in eco.species_clades() {
@@ -103,11 +108,11 @@ fn niche_gen_accum_off_is_bit_exact_phase52_anchor() {
     for t in 1..=30_000u32 {
         eco.update(0.1, daylight(t));
     }
-    assert_eq!(eco.checksum(), "0x516d99450971ff76",
-        "pre-fork anchor: accum OFF, no fork before t=34680 (Phase 53 world)");
+    assert_eq!(eco.checksum(), "0xd601816f29373fbd",
+        "pre-fork anchor: accum OFF at t=30000 (Phase 59 re-baseline)");
     for t in 30_001..=60_000u32 {
         eco.update(0.1, daylight(t));
     }
-    assert_eq!(eco.checksum(), "0xbf91125e40589e1e",
-        "post-fork deep anchor: accum OFF (Phase 53 world) at t=60000");
+    assert_eq!(eco.checksum(), "0x29e3ebe0d592f8e3",
+        "post-fork deep anchor: accum OFF at t=60000 (Phase 59 re-baseline)");
 }

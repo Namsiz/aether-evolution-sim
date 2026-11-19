@@ -74,8 +74,10 @@ fn structure_env_off_is_the_phase53_trajectory() {
     // Phase 56 (re-baseline 15): the decomposition field is a separate switch
     // and it is on by default; this anchor is the pre-56 world.
     eco.deco_resource_env_off();
+    // Phase 59 (re-baseline 16): the saturated DECO fertility map moves every
+    // world with DECO births, this arm included.
     run_ticks(&mut eco, 60_000);
-    assert_eq!(eco.checksum(), "0x3fff60ac98f9b8c5",
+    assert_eq!(eco.checksum(), "0x29e3ebe0d592f8e3",
         "structure_env OFF: no-op trajectory (Phase 53 world) at t=60000");
 }
 

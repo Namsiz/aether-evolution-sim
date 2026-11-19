@@ -132,9 +132,12 @@ fn group_off_is_bit_exact_phase36_anchor() {
     // Phase 56: decomposition field (fifteenth re-baseline) — structures
     // imprint carcass decay from their token sign, so the group-off arm's
     // @3000 anchor moves (@300 is untouched: nothing is built that early).
+    // Phase 59: saturated DECO fertility map (sixteenth re-baseline) —
+    // genotypes below eff 0.9583 now breed, so @3000 moves again; @300, the
+    // 20261105 seed and the v1 stream are unchanged.
     // Phase 49 values (previous): @3000 0xdb3aa647fa2e3a96.
     assert_eq!(checksum_at(20261102, 300, false), "0x7d2c8613d01cb79d");
-    assert_eq!(checksum_at(20261102, 3000, false), "0x08d4191f98770182");
+    assert_eq!(checksum_at(20261102, 3000, false), "0x2cd62c186e0941d6");
     assert_eq!(checksum_at(20261105, 300, false), "0xbd6a86a9fe8264e7");
 
     // Same v1 anchor (the historical stream must not see the group hash).

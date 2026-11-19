@@ -7,6 +7,15 @@
 //! 1.0×max_energy at saturation (an absorbing zero-birth state → one-cohort
 //! ageing → extinction). `REPRO_THRESHOLD_MAX = 0.90` caps the brake.
 //!
+//! PHASE 59 ANCHORS (current; **sixteenth re-baseline** — the saturated DECO
+//! fertility map. The legacy `0.96×(2−eff)` asked for more than `max_energy`
+//! below eff 0.9583 — an absorbing sterile state that `DECO_MUT_SCALE`
+//! speciation births handed to whole daughter clades. The excess now saturates
+//! into `(0.96, 0.99)`; `repro_threshold_old_off()` replays the Phase 58 line
+//! bit-exactly. @300 is UNCHANGED (no birth fires before it); @3000 moves.
+//!   seed 20261102 @300  v2 0x651cf47e6d54ca64  (= Phase 49)
+//!   seed 20261102 @3000 v2 0xbeb50df36733a6e9
+//!
 //! PHASE 42 ANCHORS (previous; **eighth re-baseline** — the triune brain takes
 //! behaviour authority once its own FSM-agreement gate + confidence floor is
 //! met, its arbitration actions are bridged into FSM states/motion intent, and
@@ -148,9 +157,11 @@ fn golden_seed_20261102_300_ticks() {
 
 #[test]
 fn golden_seed_20261102_3000_ticks() {
-    // Phase 47 re-baseline (the first region split fires inside this window).
+    // Phase 59 re-baseline: the saturated DECO fertility map lets genotypes
+    // below eff 0.9583 breed (the legacy line made them sterile), so the
+    // first births re-route the trajectory from inside this window.
     let ck = checksum_at(20261102, 3000);
-    assert_eq!(ck, "0xc94fc584ddfd6eb3",
+    assert_eq!(ck, "0xbeb50df36733a6e9",
         "3000-tick v2 long-run checksum drifted: {} — if this change is an approved re-baseline, pin the new value here and record it in the phase report", ck);
 }
 

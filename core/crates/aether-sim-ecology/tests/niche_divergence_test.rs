@@ -26,7 +26,7 @@
 
 use aether_sim_ecology::ecology::{
     Carcass, Ecology, SpeciesClade, DECO, EVENT_KIND_COMPETITIVE_EXCLUSION,
-    EVENT_KIND_SPECIATION, NICHE_OVERLAP_THRESHOLD,
+    EVENT_KIND_SPECIATION, NICHE_OVERLAP_THRESHOLD, COMPETITION_BURDEN_MAX,
 };
 use aether_sim_ecology::save_state;
 use aether_sim_ecology::terrain::{slope_at, terrain_height, WATER_LEVEL};
@@ -134,12 +134,14 @@ fn deco_family(eco: &Ecology, c: &SpeciesClade) -> bool {
 }
 
 fn alive_members(eco: &Ecology, id: u32) -> usize {
-    eco.agents.iter().filter(|a| a.alive && a.kind == DECO && a.clade_id == id).count()
+    eco.agents.iter().filter(|a| {
+        a.alive && a.clade_id == id && eco.root_kind(a.kind) == DECO
+    }).count()
 }
 
 fn mean_energy(eco: &Ecology, id: u32) -> f64 {
     let es: Vec<f64> = eco.agents.iter()
-        .filter(|a| a.alive && a.kind == DECO && a.clade_id == id)
+        .filter(|a| a.alive && a.clade_id == id && eco.root_kind(a.kind) == DECO)
         .map(|a| a.energy).collect();
     if es.is_empty() { 0.0 } else { es.iter().sum::<f64>() / es.len() as f64 }
 }
@@ -151,8 +153,14 @@ fn mean_energy(eco: &Ecology, id: u32) -> f64 {
 /// the next detection pass.
 fn pin_effs(eco: &mut Ecology, root_eff: f64, child_eff: f64, child: u32) {
     let root = root_id_of(eco);
+    // Phase 59: births into a daughter clade carry its derived kind (Phase 34
+    // contract), so pinning only `kind == DECO` leaves the fertile daughter's
+    // newborn members unpinned and the centroid eff — hence the niche — drifts
+    // out of the overlap window. Pin the whole DECO family.
+    let family: Vec<u16> = (0..eco.kinds.len() as u16)
+        .filter(|k| eco.root_kind(*k) == DECO).collect();
     for a in eco.agents.iter_mut() {
-        if a.alive && a.kind == DECO {
+        if a.alive && family.contains(&a.kind) {
             a.genome.deco_efficiency = if a.clade_id == child { child_eff } else { root_eff };
         }
     }
@@ -303,15 +311,33 @@ fn overlapping_clades_compete() {
 
     // Detection layer: the engine derived the overlap and burdened the child.
     assert!(ever_burdened, "overlap run must apply the competitive burden to the child clade");
-    // Effect layer: identical runs except the burden. Point-in-time energy
-    // comparison is unusable — the +15 % drain diverges the two populations
-    // chaotically (reproduction/death amplify it), so late samples can flip
-    // sign. The burden's causal signature is the TIME-AVERAGED energy gap:
-    // the drain acts on every tick, so its mean effect must be negative.
-    let avg_burdened = loser_samples.iter().sum::<f64>() / loser_samples.len() as f64;
-    let avg_control = control_child_samples.iter().sum::<f64>() / control_child_samples.len() as f64;
-    assert!(avg_burdened < avg_control,
-        "time-averaged energy: burdened child ({avg_burdened:.2}) must fall below unburdened twin ({avg_control:.2})");
+    // Effect layer (Phase 59): the population-mean A/B is confounded in the
+    // post-fix regime — a 15 % metabolic drain shrinks the population, which
+    // raises per-capita energy in a food-limited world (measured here:
+    // burdened 93.49 vs control 92.29). Measure the drain on identical worlds
+    // for one tick instead: same state, same RNG stream, same food, the
+    // detection pass blocked and births suppressed, so the forced burden table
+    // is the only difference.
+    let mut on = Ecology::from_save_state(burdened.to_save_state());
+    let mut off = Ecology::from_save_state(burdened.to_save_state());
+    for w in [&mut on, &mut off] {
+        let now = w.tick_count();
+        for e in w.last_spec_tick_by_kind.iter_mut() { *e = now; }
+        for a in w.agents.iter_mut() { if a.alive { a.repro = 1e9; } }
+    }
+    on.clade_burdens = vec![(child_id, COMPETITION_BURDEN_MAX)];
+    off.clade_burdens.clear();
+    let t = on.tick_count();
+    on.update(0.1, daylight(t + 1));
+    off.update(0.1, daylight(t + 1));
+    let energy_of = |w: &Ecology| -> f64 {
+        w.agents.iter().filter(|a| {
+            a.alive && a.clade_id == child_id && w.root_kind(a.kind) == DECO
+        }).map(|a| a.energy).sum()
+    };
+    let (e_on, e_off) = (energy_of(&on), energy_of(&off));
+    assert!(e_on < e_off,
+        "forced burden must drain the child: {e_on:.6} vs {e_off:.6} after one identical tick");
 }
 
 // ---------------------------------------------------------------------------

@@ -121,6 +121,11 @@ fn staged_bite(eco: &Ecology, idxs: [usize; 2], cell: usize, mineral: f32, t: u3
 #[test]
 fn partition_semantics_double_run_roundtrip_and_bite_gain() {
     let mut a = Ecology::new(SEED);
+    // Phase 59: the default world no longer forks on this seed (the saturated
+    // fertility map keeps DECO at cap), so this mechanism test runs on the
+    // replayed Phase 58 mapping — the partition semantics are about the
+    // niche axis, not the fertility calibration.
+    a.repro_threshold_old_off();
     for t in 1..=FORK_DEPTH {
         a.update(0.1, daylight(t));
     }
@@ -197,6 +202,10 @@ fn partition_semantics_double_run_roundtrip_and_bite_gain() {
     // --- v18 save/restore roundtrip after the fork: bit-exact continuation ---
     let saved = a.to_save_state();
     let mut restored = Ecology::from_save_state(saved);
+    // Phase 59: the fertility arm is not persisted (same contract as the
+    // Phase 58 clamp), so a restored copy must be re-armed to keep replaying
+    // the Phase 58 mapping.
+    restored.repro_threshold_old_off();
     assert!(restored.niche_partition, "the partition flag must ride SaveState v18");
     assert_eq!(
         restored.niche_pref_mult(banded.id, grass_cell),
@@ -252,6 +261,7 @@ fn partition_semantics_double_run_roundtrip_and_bite_gain() {
     // --- double run of the partition-ON path: a second independent world
     //     replays the post-fork stretch in lockstep ---
     let mut c = Ecology::from_save_state(a.to_save_state());
+    c.repro_threshold_old_off();
     for t in (FORK_DEPTH + 1)..=(FORK_DEPTH + 300) {
         a.update(0.1, daylight(t));
         c.update(0.1, daylight(t));
@@ -274,12 +284,12 @@ fn niche_partition_off_is_bit_exact_phase50_anchor() {
     for t in 1..=60_000u32 {
         off.update(0.1, daylight(t));
         if t == 30_000 {
-            assert_eq!(off.checksum(), "0x516d99450971ff76",
-                "pre-fork anchor: partition OFF must be bit-exact with Phase 50 at t=30000");
+            assert_eq!(off.checksum(), "0xd601816f29373fbd",
+                "pre-fork anchor: partition OFF at t=30000 (Phase 59 re-baseline)");
         }
     }
-    assert_eq!(off.checksum(), "0xf5bdea460cd4685a",
-        "post-fork deep anchor: partition OFF (Phase 53 world) at t=60000");
+    assert_eq!(off.checksum(), "0x52c26d39e2f08629",
+        "post-fork deep anchor: partition OFF at t=60000 (Phase 59 re-baseline)");
 
     // A arm (default ON): a bit-exact no-op BEFORE the first banded fork,
     // a diverging trajectory after it (deco-A forks at t=34680 banded; the
@@ -291,11 +301,11 @@ fn niche_partition_off_is_bit_exact_phase50_anchor() {
     for t in 1..=60_000u32 {
         on.update(0.1, daylight(t));
         if t == 30_000 {
-            assert_eq!(on.checksum(), "0x516d99450971ff76",
-                "pre-fork: partition ON must be bit-exact with Phase 50 before any banded clade exists");
+            assert_eq!(on.checksum(), "0xd601816f29373fbd",
+                "pre-fork: partition ON at t=30000 (Phase 59 re-baseline)");
         }
     }
-    assert_ne!(on.checksum(), "0xf5bdea460cd4685a",
+    assert_ne!(on.checksum(), "0x52c26d39e2f08629",
         "post-fork: partition ON must diverge from the partition-OFF arm by t=60000");
 }
 

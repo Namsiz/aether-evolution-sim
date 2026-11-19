@@ -351,6 +351,17 @@ const DECO_MAX_ENERGY: f64 = 100.0;
 /// Base reproduction threshold shared by SCAV / OMN / PRED (and DECO under legacy mode).
 /// Phase 7: DECO's effective threshold is individualized as `DECO_REPRO_BASE * (2.0 - deco_efficiency)`.
 const DECO_REPRO_BASE: f64 = 0.96;
+/// Phase 59: knee and ceiling of the saturated DECO fertility threshold.
+/// The legacy line asks for more than `max_energy` once `eff < 0.9583`; since
+/// energy is clamped at `max_energy`, that is an absorbing sterile state, and
+/// `DECO_MUT_SCALE` speciation births hand it to whole daughter clades. The
+/// saturation leaves the legacy line untouched up to the knee (i.e. for
+/// `eff >= 1.0`, so `eff = 1.5 -> 0.48` is unchanged) and bends the excess
+/// into `(KNEE, CEIL)` with `x/(1+x)`: continuous, strictly monotone in eff,
+/// and strictly below 1.0 for every legal efficiency, so `eff = 0.5` needs
+/// 98.8 % of `max_energy` instead of an impossible 144 %.
+const DECO_REPRO_SAT_KNEE: f64 = 0.96;
+const DECO_REPRO_SAT_CEIL: f64 = 0.99;
 const DECO_RANGE_BASE: f64 = 150.0;
 /// Phase 4-C MineralField: decomposers convert carcass mass into soil
 /// minerals. Deposit = take × deco_efficiency × rate per bite; the field
@@ -1828,6 +1839,11 @@ pub struct Ecology {
     /// (`use_gain`) instead of `known_tokens[0]`. Default false — the
     /// inheritance-order pick is the Phase 56/57 world.
     pub token_placement_by_value: bool,
+    /// Phase 59 A/B toggle: true = the saturated fertility mapping (the fix),
+    /// false = the Phase 58 legacy line (`repro_threshold_old_off`). Not
+    /// persisted, same contract as the Phase 58 clamp: a restored world runs
+    /// the compiled default.
+    pub deco_repro_saturate: bool,
     /// Phase 45: per-kind clade-isolation telemetry (kind id → rolling
     /// window). Pure observability — not persisted (same contract as
     /// GroupStats); rebuilt from live clades after a restore.
@@ -2051,6 +2067,7 @@ impl Ecology {
             deco_env_max: STRUCTURE_DECO_MAX,
             token_value_sign_neutral: crate::culture::TOKEN_VALUE_SIGN_NEUTRAL,
             token_placement_by_value: false,
+            deco_repro_saturate: true,
             isolation_by_kind: Vec::new(),
             culture_value_on: true,
             dispersal_p: DISPERSAL_P,
@@ -2270,6 +2287,7 @@ impl Ecology {
             deco_env_max: STRUCTURE_DECO_MAX,
             token_value_sign_neutral: crate::culture::TOKEN_VALUE_SIGN_NEUTRAL,
             token_placement_by_value: false,
+            deco_repro_saturate: true,
             isolation_by_kind: Vec::new(),
             culture_value_on: true,
             dispersal_p: DISPERSAL_P,
@@ -3652,6 +3670,33 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         self.token_placement_by_value = true;
     }
 
+    /// Phase 59 A/B arm: restore the Phase 58 fertility mapping
+    /// (`0.96 × (2 − eff)`, sterile for `eff < 0.9583`). The default world is
+    /// the saturated fix; this is the only configuration that replays the
+    /// pre-Phase-59 anchors.
+    pub fn repro_threshold_old_off(&mut self) {
+        self.deco_repro_saturate = false;
+    }
+
+    /// Phase 59: the DECO reproduction threshold for a given efficiency.
+    /// Legacy `0.96 × (2 − eff)` up to `DECO_REPRO_SAT_KNEE` (so eff ≥ 1.0
+    /// and the 0.48 easy-breed end are unchanged), then the excess is bent
+    /// into `(KNEE, CEIL)` by `x/(1+x)`. Pure `+ - * /` arithmetic keeps the
+    /// map bit-identical across native and wasm builds.
+    pub fn deco_repro_threshold(&self, eff: f64) -> f64 {
+        Self::deco_repro_threshold_for(eff, self.deco_repro_saturate)
+    }
+
+    pub fn deco_repro_threshold_for(eff: f64, saturate: bool) -> f64 {
+        let legacy = DECO_REPRO_BASE * (2.0 - eff);
+        if !saturate || legacy <= DECO_REPRO_SAT_KNEE {
+            return legacy;
+        }
+        let span = DECO_REPRO_SAT_CEIL - DECO_REPRO_SAT_KNEE;
+        let x = (legacy - DECO_REPRO_SAT_KNEE) / span;
+        DECO_REPRO_SAT_KNEE + span * x / (1.0 + x)
+    }
+
     /// Which of the agent's known tokens a placement stamps: the first one
     /// (inheritance order, Phase 56/57 world) or, in the design-b arm, the
     /// highest `use_gain` (ties → lowest id, so the pick is order-free).
@@ -4789,11 +4834,13 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         // FISH does not reproduce in winter
         if a_kind == FISH && self.season == 3 { return; }
         // Phase 7: DECO individualized reproduction threshold in selective mode.
-        // eff=1.5 → 0.48 (easy breed), eff=1.0 → 0.96 (neutral, legacy), eff=0.5 → 1.44 (effectively sterile).
+        // eff=1.5 → 0.48 (easy breed), eff=1.0 → 0.96 (neutral, legacy), and
+        // Phase 59 saturates everything below neutral into (0.96, 0.99) so no
+        // legal efficiency is sterile by construction (see the fn docs).
         // The density brake above is replaced for DECO by this mapping: since eff=1.0 yields
         // exactly the legacy 0.96, the density factor is reapplied multiplicatively here.
         if a_kind == DECO && self.deco_eff_choice_mode == save_state::DECO_CHOICE_SELECTIVE {
-            threshold = DECO_REPRO_BASE * (2.0 - self.agents[idx].genome.deco_efficiency)
+            threshold = self.deco_repro_threshold(self.agents[idx].genome.deco_efficiency)
                 * (1.0 + density_factor.max(0.0)).min(1.5);
         }
         if self.agents[idx].energy < self.agents[idx].max_energy * threshold { return; }
@@ -4814,13 +4861,14 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         };
         let mate_min_e_const = if mate_kind == FISH { 0.55 } else { 0.68 };
         let selected_mode = self.deco_eff_choice_mode;
+        let saturate = self.deco_repro_saturate;
         let region_isolation = self.region_isolation;
         let mate_filter = Some(move |b: &Agent| {
             if b.id != mate_id && b.age > 30.0 && b.repro <= 0.0
                 && (!region_isolation || b.region == a_region) {
                 // Phase 7: DECO in selective mode requires both parties to meet their individualized threshold.
                 let min_e = if mate_kind == DECO && selected_mode == save_state::DECO_CHOICE_SELECTIVE && b.kind == DECO {
-                    DECO_REPRO_BASE * (2.0 - b.genome.deco_efficiency)
+                    Ecology::deco_repro_threshold_for(b.genome.deco_efficiency, saturate)
                 } else {
                     mate_min_e_const
                 };
@@ -9051,6 +9099,7 @@ impl Ecology {
             deco_env_max: STRUCTURE_DECO_MAX,
             token_value_sign_neutral: state.TokenValueSignNeutral,
             token_placement_by_value: false,
+            deco_repro_saturate: true,
             isolation_by_kind: Vec::new(),
             culture_value_on: state.CultureValueOn,
             // Phase 47: natal dispersal. Pre-v16 archives carry no fields →

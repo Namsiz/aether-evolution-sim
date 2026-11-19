@@ -129,12 +129,13 @@ fn value_ema_sign_follows_the_placement_gain_sign_in_both_arms() {
 #[test]
 #[ignore = "three 60k-tick arms in release — minutes; signed-arm anchor + neutral-arm determinism"]
 fn signed_arm_keeps_the_phase56_anchor_and_the_neutral_arm_is_deterministic() {
-    // The arm lost the A/B, so it is off by default and the default world must
-    // still be the Phase 56 one (no re-baseline was taken).
+    // The arm lost the A/B, so it is off by default and the default world is
+    // the Phase 56 one — until Phase 59's sixteenth re-baseline moved the
+    // default trajectory (saturated DECO fertility map).
     let mut signed = Ecology::new(20261102);
     run_ticks(&mut signed, 60_000);
-    assert_eq!(signed.checksum(), "0x44285bfbed94865e",
-        "default (signed) world at t=60000 must stay on the Phase 56 anchor");
+    assert_eq!(signed.checksum(), "0xde2c6292e0dfb9dc",
+        "default (signed) world at t=60000 (Phase 59 re-baseline)");
 
     let mut a = Ecology::new(20261102);
     a.token_value_sign_neutral_on();
@@ -151,4 +152,5 @@ fn signed_arm_keeps_the_phase56_anchor_and_the_neutral_arm_is_deterministic() {
     assert_eq!(a.checksum(), NEUTRAL_ARM_ANCHOR_60000, "sign-neutral arm at t=60000");
 }
 
-const NEUTRAL_ARM_ANCHOR_60000: &str = "0x47acbccd66a5fdab";
+// Phase 59 re-baseline: the fertility fix moved the neutral arm too.
+const NEUTRAL_ARM_ANCHOR_60000: &str = "0xd802b5b07aadfe4a";

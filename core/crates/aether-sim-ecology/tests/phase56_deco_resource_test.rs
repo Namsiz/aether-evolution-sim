@@ -233,12 +233,14 @@ fn on_arm_double_run_and_roundtrip_is_bit_exact() {
 #[ignore = "60k-tick arm in release — minutes; A/B arm switch restores the Phase 55 trajectory"]
 fn off_arm_restores_the_pre_phase56_anchor() {
     // Acceptance #2: with the arm switched off the world must be the Phase 54/
-    // 55 world — the Phase 54 OFF checksum at t=60000.
+    // 55 world — the Phase 54 OFF checksum at t=60000. The Phase 59
+    // re-baseline moved that world too (the fertility map is a separate
+    // default); this arm pins the post-fix pre-56 trajectory.
     let mut eco = Ecology::new(20261102);
     eco.deco_resource_env_off();
     run_ticks(&mut eco, 60_000);
-    assert_eq!(eco.checksum(), "0x3fff60ac98f9b8c5",
-        "deco resource env OFF: Phase 54/55 no-op trajectory at t=60000");
+    assert_eq!(eco.checksum(), "0x29e3ebe0d592f8e3",
+        "deco resource env OFF: pre-Phase-56 trajectory at t=60000");
 }
 
 #[test]
@@ -247,8 +249,13 @@ fn default_arm_anchor_at_60000_is_the_phase56_trajectory() {
     // deep anchor moves. The pre-structure anchors (@300/@3000) are untouched
     // because no token has been invented yet, so this is the first tick block
     // the new default actually redefines.
+    //
+    // Phase 59 (re-baseline 16): the DECO fertility map saturates below
+    // eff 0.9583, so the default world moves again. The Phase 56 value
+    // 0x44285bfbed94865e is now the `repro_threshold_old_off()` anchor
+    // (phase59_repro_saturation_test).
     let mut eco = Ecology::new(20261102);
     run_ticks(&mut eco, 60_000);
-    assert_eq!(eco.checksum(), "0x44285bfbed94865e",
-        "default arm (Phase 56 world) at t=60000");
+    assert_eq!(eco.checksum(), "0xde2c6292e0dfb9dc",
+        "default arm (Phase 59 world) at t=60000");
 }

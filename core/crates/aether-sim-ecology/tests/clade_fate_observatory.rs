@@ -14,6 +14,11 @@
 //! unset runs the compiled default), plus `PHASE_DECO_ENV=on|off` (Phase 56:
 //! the decomposition-field A/B on the same terms). Output files carry the arm
 //! suffix so parallel A/B runs never overwrite each other.
+//!
+//! Phase 59 adds `PHASE_REPRO_OLD=on|off`: "on" restores the Phase 58 DECO
+//! fertility line (`0.96 × (2 − eff)`, sterile below eff 0.9583); unset runs
+//! the saturated fix. The per-clade dump also carries `mean_eff` /
+//! `deco_ready` / `min_pair` (Phase 58's death diagnostics).
 
 use aether_sim_ecology::civilization_metrics::{format_line, measure};
 use aether_sim_ecology::ecology::Ecology;
@@ -115,13 +120,20 @@ fn clade_fate_observation() {
         Some("off") => "bvaloff",
         _ => "bvaldflt",
     };
+    // Phase 59: fertility-mapping arm — `PHASE_REPRO_OLD=on` restores the
+    // Phase 58 line (sterile below eff 0.9583); unset runs the saturated fix.
+    let repro_arm = match env_str("PHASE_REPRO_OLD").as_deref() {
+        Some("on") => "reproold",
+        Some("off") => "reprodfix",
+        _ => "reprodflt",
+    };
     // Calibration-sweep tag (Phase 55): parallel arms of the same switch must
     // never overwrite each other's output files.
     let tag = env_str("PHASE_ARM_TAG").unwrap_or_default();
     let suffix = if tag.is_empty() { String::new() } else { format!("_{tag}") };
-    let csv_path = format!("/tmp/clade_fate_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}{suffix}.csv");
-    let tree_path = format!("/tmp/clade_tree_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}{suffix}.csv");
-    let culture_path = format!("/tmp/clade_culture_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}{suffix}.csv");
+    let csv_path = format!("/tmp/clade_fate_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}{suffix}.csv");
+    let tree_path = format!("/tmp/clade_tree_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}{suffix}.csv");
+    let culture_path = format!("/tmp/clade_culture_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}{suffix}.csv");
     let mut csv = String::from(
         "t,pop,herb,pred,scav,omn,fish,deco,clades_live,clades_total,events,tokens,bearers,groups,levels,authorities,grass_mean,grass_var,env_mean,env_var,structs,deco_r0,deco_r1,deco_r2,deco_r3,structs_r0,structs_r1,structs_r2,structs_r3,denv_mean,denv_var\n",
     );
@@ -136,8 +148,9 @@ fn clade_fate_observation() {
         if parts.len() == 2 { eco.deco_env_clamp_on(parts[0], parts[1]); }
     }
     if place_arm == "bvalon" { eco.token_placement_by_value_on(); }
+    if repro_arm == "reproold" { eco.repro_threshold_old_off(); }
     let mut last_events = 0usize;
-    eprintln!("=== clade-fate seed {seed} ({ticks} ticks, structure_env={arm}, deco_env={deco_arm}, token_sign={sign_arm}, clamp={clamp_arm}, place={place_arm}) ===");
+    eprintln!("=== clade-fate seed {seed} ({ticks} ticks, structure_env={arm}, deco_env={deco_arm}, token_sign={sign_arm}, clamp={clamp_arm}, place={place_arm}, repro={repro_arm}) ===");
     for t in 1..=ticks {
         eco.update(0.1, daylight(t));
         let n = eco.clade_events().len();
@@ -208,33 +221,59 @@ fn clade_fate_observation() {
     // clade id alone mixes every species that never forked (they all sit in
     // clade 0) — then attribute the standing structures to the clades whose
     // repertoire contains their token.
+    //
+    // Phase 59: rows now cover every live (kind, clade), token-less clades
+    // included, and carry the Phase 58 death-diagnostic columns: `mean_eff`,
+    // `deco_ready` (DECO family: past maturity, off cooldown, energy over the
+    // individual threshold — derived kinds included, they carry the same
+    // fertility axis) and `min_pair` (nearest same-row neighbour distance, -1
+    // below two members). Token columns stay 0 for a clade that never bore a
+    // token.
+    struct CladeRow {
+        members: usize,
+        gm_sum: f64,
+        pos: usize,
+        token_n: usize,
+        eff_sum: f64,
+        ready: usize,
+        xs: Vec<(f64, f64)>,
+    }
     let mut culture = String::from(
-        "kind,clade_id,clade_name,members_alive,mean_token_grass_mod,frac_grass_positive,structs_with_own_token,mean_x,mean_z\n",
+        "kind,clade_id,clade_name,members_alive,mean_token_grass_mod,frac_grass_positive,structs_with_own_token,mean_x,mean_z,mean_eff,deco_ready,min_pair\n",
     );
     let clade_name: std::collections::HashMap<u32, String> = eco.species_clades().iter()
         .map(|c| (c.id, c.name.clone())).collect();
-    // (kind, clade) → (members, grass_mod sum, positive count, token count)
-    let mut by_clade: std::collections::HashMap<(u16, u32), (usize, f64, usize, usize)> =
+    let mut by_clade: std::collections::HashMap<(u16, u32), CladeRow> =
         std::collections::HashMap::new();
     let mut clade_tokens: std::collections::HashMap<(u16, u32), std::collections::HashSet<u32>> =
         std::collections::HashMap::new();
     for a in eco.living() {
-        if a.known_tokens.is_empty() { continue; }
-        let e = by_clade.entry((a.kind, a.clade_id)).or_insert((0, 0.0, 0, 0));
-        e.0 += 1;
-        e.3 += a.known_tokens.len();
+        let e = by_clade.entry((a.kind, a.clade_id)).or_insert(CladeRow {
+            members: 0, gm_sum: 0.0, pos: 0, token_n: 0, eff_sum: 0.0, ready: 0, xs: Vec::new(),
+        });
+        e.members += 1;
+        e.eff_sum += a.genome.deco_efficiency;
+        e.xs.push((a.x, a.z));
+        if eco.root_kind(a.kind) == aether_sim_ecology::ecology::DECO {
+            let thr = eco.deco_repro_threshold(a.genome.deco_efficiency);
+            if a.age > eco.kind_def(a.kind).mature_age && a.repro <= 0.0
+                && a.energy >= a.max_energy * thr {
+                e.ready += 1;
+            }
+        }
+        e.token_n += a.known_tokens.len();
         for &tid in &a.known_tokens {
             clade_tokens.entry((a.kind, a.clade_id)).or_default().insert(tid);
             if let Some(tok) = eco.token_registry.get(tid) {
                 let (gm, _) = aether_sim_ecology::culture::token_to_env_mod(tok);
-                e.1 += gm;
-                if gm > 0.0 { e.2 += 1; }
+                e.gm_sum += gm;
+                if gm > 0.0 { e.pos += 1; }
             }
         }
     }
     let mut clades: Vec<_> = by_clade.into_iter().collect();
     clades.sort_by_key(|((kind, id), _)| (*kind, *id));
-    for ((kind, id), (members, gm_sum, pos, token_n)) in clades {
+    for ((kind, id), row) in clades {
         // structures whose token this clade holds
         let mut n_struct = 0usize;
         let mut sx = 0.0f64;
@@ -248,17 +287,29 @@ fn clade_fate_observation() {
                 }
             }
         }
+        let mut min_pair = -1.0f64;
+        for i in 0..row.xs.len() {
+            for j in (i + 1)..row.xs.len() {
+                let dx = row.xs[i].0 - row.xs[j].0;
+                let dz = row.xs[i].1 - row.xs[j].1;
+                let d = (dx * dx + dz * dz).sqrt();
+                if min_pair < 0.0 || d < min_pair { min_pair = d; }
+            }
+        }
         culture.push_str(&format!(
-            "{},{},{},{},{:.5},{:.3},{},{:.1},{:.1}\n",
+            "{},{},{},{},{:.5},{:.3},{},{:.1},{:.1},{:.5},{},{:.1}\n",
             kind,
             id,
             clade_name.get(&id).map(|s| s.as_str()).unwrap_or("?"),
-            members,
-            if token_n > 0 { gm_sum / token_n as f64 } else { 0.0 },
-            if token_n > 0 { pos as f64 / token_n as f64 } else { 0.0 },
+            row.members,
+            if row.token_n > 0 { row.gm_sum / row.token_n as f64 } else { 0.0 },
+            if row.token_n > 0 { row.pos as f64 / row.token_n as f64 } else { 0.0 },
             n_struct,
             if n_struct > 0 { sx / n_struct as f64 } else { 0.0 },
             if n_struct > 0 { sz / n_struct as f64 } else { 0.0 },
+            row.eff_sum / row.members as f64,
+            row.ready,
+            min_pair,
         ));
     }
     // Standing structures by grass sign: where do positive vs negative
