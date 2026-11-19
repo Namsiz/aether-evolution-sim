@@ -119,11 +119,14 @@
 /// `DecoEnvDecayActive` bookkeeping flag (both default false → a v20 archive
 /// loads with the mechanism OFF, which is also the Phase 56 compiled
 /// default until the A/B verdict says otherwise).
+/// v21 → v22 (Phase 57): sign-neutral token value. The sim level gains
+/// `TokenValueSignNeutral` (`#[serde(default)]` → false: a v21 archive lands
+/// on the signed Phase 56 reward, the arm the 200k A/B kept as default).
 
 use serde::{Deserialize, Serialize};
 
 
-pub const SAVE_STATE_VERSION: u32 = 21;
+pub const SAVE_STATE_VERSION: u32 = 22;
 pub const SAVE_STATE_SCHEMA_NAME: &str = "aether-sim-save-state";
 
 /// DECO selection-pressure mode selector (persisted in SaveState v2).
@@ -1044,6 +1047,11 @@ pub struct SaveState {
     pub DecoEnvOn: bool,
     #[serde(default)]
     pub DecoEnvDecayActive: bool,
+    /// Phase 57: sign-neutral token-value arm (v22). `#[serde(default)]` →
+    /// pre-v22 archives land on the compiled default (signed reward = the
+    /// Phase 56 world).
+    #[serde(default)]
+    pub TokenValueSignNeutral: bool,
 }
 
 fn default_min_side_legacy() -> usize {

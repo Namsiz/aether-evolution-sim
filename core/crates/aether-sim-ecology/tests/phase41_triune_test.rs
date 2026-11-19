@@ -117,8 +117,8 @@ fn save_v12_roundtrip_is_bit_exact() {
     let mut eco = Ecology::new(20261102);
     run_ticks(&mut eco, 1, 120);
     let json = serde_json::to_string(&eco.to_save_state()).unwrap();
-    // Phase 56 bumped the schema to v21 (decomposition field).
-    assert!(json.contains("\"Version\":21"), "schema version must be v21");
+    // Phase 57 bumped the schema to v22 (sign-neutral token value).
+    assert!(json.contains("\"Version\":22"), "schema version must be v22");
     assert!(json.contains("\"Triune\""), "SaveAgent must carry the triune string");
     assert!(json.contains("\"ReplayOn\""), "v13 must carry the replay toggle");
     let restored = Ecology::from_save_state(serde_json::from_str(&json).unwrap());

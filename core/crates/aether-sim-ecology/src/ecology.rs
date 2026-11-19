@@ -1813,6 +1813,11 @@ pub struct Ecology {
     pub deco_env_on: bool,
     /// True while any cell multiplier differs from 1.0 (skips the decay pass).
     pub deco_env_decay_active: bool,
+    /// Phase 57: sign-neutral token value — placement gain reads
+    /// `|grass_mod| × 10`, so a token's environment direction carries no
+    /// energy advantage. Experimental arm only (`TOKEN_VALUE_SIGN_NEUTRAL`
+    /// is false: the default world keeps the Phase 56 signed reward).
+    pub token_value_sign_neutral: bool,
     /// Phase 45: per-kind clade-isolation telemetry (kind id → rolling
     /// window). Pure observability — not persisted (same contract as
     /// GroupStats); rebuilt from live clades after a restore.
@@ -2032,6 +2037,7 @@ impl Ecology {
             deco_env: vec![1.0f32; n],
             deco_env_on: DECO_RESOURCE_ENV_ON,
             deco_env_decay_active: false,
+            token_value_sign_neutral: crate::culture::TOKEN_VALUE_SIGN_NEUTRAL,
             isolation_by_kind: Vec::new(),
             culture_value_on: true,
             dispersal_p: DISPERSAL_P,
@@ -2247,6 +2253,7 @@ impl Ecology {
             deco_env: vec![1.0f32; n],
             deco_env_on: DECO_RESOURCE_ENV_ON,
             deco_env_decay_active: false,
+            token_value_sign_neutral: crate::culture::TOKEN_VALUE_SIGN_NEUTRAL,
             isolation_by_kind: Vec::new(),
             culture_value_on: true,
             dispersal_p: DISPERSAL_P,
@@ -3605,6 +3612,14 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         self.deco_env_on = false;
         for v in self.deco_env.iter_mut() { *v = 1.0; }
         self.deco_env_decay_active = false;
+    }
+
+    /// Phase 57 A/B arm switch: enable the sign-neutral placement reward
+    /// (`gain = |grass_mod| × 10`). The compiled default is the Phase 56
+    /// signed formula — see `culture::TOKEN_VALUE_SIGN_NEUTRAL` for the
+    /// 200k A/B verdict that kept it off.
+    pub fn token_value_sign_neutral_on(&mut self) {
+        self.token_value_sign_neutral = true;
     }
 
     /// Phase 55: apply one structure placement to the regrowth field as a
@@ -6398,7 +6413,14 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                                         self.deco_env_dipole(x, z, grass_mod);
                                     }
                                     // Apply immediate environmental effect
-                                    let gain = grass_mod * 10.0;
+                                    // Phase 57: sign-neutral arm — the token's
+                                    // environment direction decides the
+                                    // effect, never the reward.
+                                    let gain = if self.token_value_sign_neutral {
+                                        grass_mod.abs() * 10.0
+                                    } else {
+                                        grass_mod * 10.0
+                                    };
                                     self.agents[idx].energy += gain; // benefit feedback
                                     // Phase 45: the same feedback credits the
                                     // token's use_gain EMA (emergent value —
@@ -8286,6 +8308,8 @@ impl Ecology {
             DecoEnv: self.deco_env.clone(),
             DecoEnvOn: self.deco_env_on,
             DecoEnvDecayActive: self.deco_env_decay_active,
+            // Phase 57: sign-neutral token value.
+            TokenValueSignNeutral: self.token_value_sign_neutral,
             // Phase 39.1: group layer. `founder_genome` is serialized in full —
             // it is the propagation bottleneck, so it must survive the hop for
             // a restored sim to keep breeding from the same single genome.
@@ -8976,6 +9000,7 @@ impl Ecology {
             },
             deco_env_on: state.DecoEnvOn,
             deco_env_decay_active: state.DecoEnvDecayActive,
+            token_value_sign_neutral: state.TokenValueSignNeutral,
             isolation_by_kind: Vec::new(),
             culture_value_on: state.CultureValueOn,
             // Phase 47: natal dispersal. Pre-v16 archives carry no fields →

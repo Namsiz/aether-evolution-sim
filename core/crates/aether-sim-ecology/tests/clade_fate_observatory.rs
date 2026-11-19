@@ -98,13 +98,21 @@ fn clade_fate_observation() {
         Some("off") => "decooff",
         _ => "decodflt",
     };
+    // Phase 57: token-value sign A/B — "neutral" enables the
+    // `gain = |grass_mod| × 10` arm; unset runs the compiled default
+    // (signed reward = the Phase 56 world).
+    let sign_arm = match env_str("PHASE_TOKEN_SIGN").as_deref() {
+        Some("signed") => "signed",
+        Some("neutral") => "neutral",
+        _ => "signdflt",
+    };
     // Calibration-sweep tag (Phase 55): parallel arms of the same switch must
     // never overwrite each other's output files.
     let tag = env_str("PHASE_ARM_TAG").unwrap_or_default();
     let suffix = if tag.is_empty() { String::new() } else { format!("_{tag}") };
-    let csv_path = format!("/tmp/clade_fate_{seed}_{arm}_{deco_arm}{suffix}.csv");
-    let tree_path = format!("/tmp/clade_tree_{seed}_{arm}_{deco_arm}{suffix}.csv");
-    let culture_path = format!("/tmp/clade_culture_{seed}_{arm}_{deco_arm}{suffix}.csv");
+    let csv_path = format!("/tmp/clade_fate_{seed}_{arm}_{deco_arm}_{sign_arm}{suffix}.csv");
+    let tree_path = format!("/tmp/clade_tree_{seed}_{arm}_{deco_arm}_{sign_arm}{suffix}.csv");
+    let culture_path = format!("/tmp/clade_culture_{seed}_{arm}_{deco_arm}_{sign_arm}{suffix}.csv");
     let mut csv = String::from(
         "t,pop,herb,pred,scav,omn,fish,deco,clades_live,clades_total,events,tokens,bearers,groups,levels,authorities,grass_mean,grass_var,env_mean,env_var,structs,deco_r0,deco_r1,deco_r2,deco_r3,structs_r0,structs_r1,structs_r2,structs_r3,denv_mean,denv_var\n",
     );
@@ -113,8 +121,9 @@ fn clade_fate_observation() {
     if arm == "envoff" { eco.structure_env_off(); }
     if deco_arm == "decoon" { eco.deco_env_on = true; }
     if deco_arm == "decooff" { eco.deco_resource_env_off(); }
+    if sign_arm == "neutral" { eco.token_value_sign_neutral_on(); }
     let mut last_events = 0usize;
-    eprintln!("=== clade-fate seed {seed} ({ticks} ticks, structure_env={arm}, deco_env={deco_arm}) ===");
+    eprintln!("=== clade-fate seed {seed} ({ticks} ticks, structure_env={arm}, deco_env={deco_arm}, token_sign={sign_arm}) ===");
     for t in 1..=ticks {
         eco.update(0.1, daylight(t));
         let n = eco.clade_events().len();

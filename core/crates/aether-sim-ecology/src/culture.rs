@@ -17,6 +17,15 @@ use crate::ecology::{Agent, Ecology};
 pub const TOKEN_RNG_TAG: u32 = 0x43_55_4C_54; // "CULT"
 /// 文化层总开关。默认 true（本期是正式动力学阶段，预期 re-baseline）。
 pub const CULTURE_ON: bool = true;
+/// Phase 57: token 价值符号解耦（实验臂，默认关）。开启后结构放置的即时
+/// 能量反馈取 `|grass_mod| × 10`——符号只决定环境效果，不再决定收益。
+/// Phase 56 的公式 `grass_mod × 10` 给正号 token 每次放置 +1 能量的净优势，
+/// 价值选择因此把负号文化逐出（实测站立结构 pos/neg = 2187/115）。
+/// A/B 判决（2 seeds × 200k + 60k 锚点）：解耦既没有带来符号平衡（发明先验
+/// `vec[0] = 2·grass − 1` 把文化锁死在负号，pos=0/neg=4416），也让分化
+/// 彻底消失（2/2 seeds 零物种形成 vs 签名臂 5/3 次事件）——文化符号的
+/// 「垄断」本身是 Phase 56 分化机制的一部分，不是它的偏差。故默认关闭。
+pub const TOKEN_VALUE_SIGN_NEUTRAL: bool = false;
 /// 知识向量的维度（固定 ~8，无预设语义）。
 pub const TOKEN_DIM: usize = 8;
 /// 习得成本（每次学习支付能量，进 ledger）。
