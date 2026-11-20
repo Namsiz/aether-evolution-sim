@@ -7,7 +7,12 @@
 //! 1.0×max_energy at saturation (an absorbing zero-birth state → one-cohort
 //! ageing → extinction). `REPRO_THRESHOLD_MAX = 0.90` caps the brake.
 //!
-//! PHASE 60 ANCHORS (current; **seventeenth re-baseline** — the regional DECO
+//! PHASE 61 (current): the regional-share renormalisation / daughter-floor
+//! experiments stayed OFF (A/B in research/phase61-report.md), so every anchor
+//! below is unchanged; the engine-level per-clade telemetry is observation
+//! only and does not move the trajectory.
+//!
+//! PHASE 60 ANCHORS (**seventeenth re-baseline** — the regional DECO
 //! carrying capacity gates DECO births by each kind's share of its home
 //! quadrant, so the default world moves once a region fills (the first visible
 //! effect lands after t=3000; @300/@3000 and the v1 stream stay unchanged).

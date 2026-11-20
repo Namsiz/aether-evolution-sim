@@ -23,6 +23,14 @@
 //! Phase 60 adds `PHASE_DECO_REGION_CAP=on|off`: "on" spreads each DECO kind's
 //! budget over the four home regions by local carcass-food retention
 //! (`deco_env` mean); unset runs the compiled default.
+//!
+//! Phase 61 adds `PHASE_RENORM=on|off` (candidate a: renormalise the regional
+//! share over the occupied regions), `PHASE_CAP_FLOOR=on|off` (candidate b: an
+//! occupied region keeps at least `min(budget, speciation_min_side)` slots)
+//! and a second per-clade dump: `/tmp/clade_life_*.csv` carries the
+//! engine-level Phase 61 counters (births, deaths by cause, birth refusals by
+//! gate, mate misses, peak population, extinction tick, mean age/energy at
+//! death) for every clade the world ever booked.
 
 use aether_sim_ecology::civilization_metrics::{format_line, measure};
 use aether_sim_ecology::ecology::Ecology;
@@ -137,13 +145,27 @@ fn clade_fate_observation() {
         Some("off") => "regcapoff",
         _ => "regcapdflt",
     };
+    // Phase 61: occupied-region renormalisation arm.
+    let renorm_arm = match env_str("PHASE_RENORM").as_deref() {
+        Some("on") => "renormon",
+        Some("off") => "renormoff",
+        Some("daughters") => "renormdau",
+        _ => "renormdflt",
+    };
+    // Phase 61 candidate (b): occupied-region minimum retention share.
+    let floor_arm = match env_str("PHASE_CAP_FLOOR").as_deref() {
+        Some("on") => "flooron",
+        Some("off") => "flooroff",
+        _ => "floordflt",
+    };
     // Calibration-sweep tag (Phase 55): parallel arms of the same switch must
     // never overwrite each other's output files.
     let tag = env_str("PHASE_ARM_TAG").unwrap_or_default();
     let suffix = if tag.is_empty() { String::new() } else { format!("_{tag}") };
-    let csv_path = format!("/tmp/clade_fate_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}{suffix}.csv");
-    let tree_path = format!("/tmp/clade_tree_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}{suffix}.csv");
-    let culture_path = format!("/tmp/clade_culture_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}{suffix}.csv");
+    let csv_path = format!("/tmp/clade_fate_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}{suffix}.csv");
+    let tree_path = format!("/tmp/clade_tree_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}{suffix}.csv");
+    let culture_path = format!("/tmp/clade_culture_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}{suffix}.csv");
+    let life_path = format!("/tmp/clade_life_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}{suffix}.csv");
     let mut csv = String::from(
         "t,pop,herb,pred,scav,omn,fish,deco,clades_live,clades_total,events,tokens,bearers,groups,levels,authorities,grass_mean,grass_var,env_mean,env_var,structs,deco_r0,deco_r1,deco_r2,deco_r3,structs_r0,structs_r1,structs_r2,structs_r3,denv_mean,denv_var\n",
     );
@@ -161,6 +183,11 @@ fn clade_fate_observation() {
     if repro_arm == "reproold" { eco.repro_threshold_old_off(); }
     if regcap_arm == "regcapon" { eco.deco_region_cap_on(); }
     if regcap_arm == "regcapoff" { eco.deco_region_cap_off(); }
+    if renorm_arm == "renormon" { eco.deco_region_cap_renorm_on(); }
+    if renorm_arm == "renormoff" { eco.deco_region_cap_renorm_off(); }
+    if renorm_arm == "renormdau" { eco.deco_region_cap_renorm_daughters_on(); }
+    if floor_arm == "flooron" { eco.deco_region_cap_floor_on(); }
+    if floor_arm == "flooroff" { eco.deco_region_cap_floor_off(); }
     let mut last_events = 0usize;
     eprintln!("=== clade-fate seed {seed} ({ticks} ticks, structure_env={arm}, deco_env={deco_arm}, token_sign={sign_arm}, clamp={clamp_arm}, place={place_arm}, repro={repro_arm}) ===");
     for t in 1..=ticks {
@@ -255,6 +282,11 @@ fn clade_fate_observation() {
     );
     let clade_name: std::collections::HashMap<u32, String> = eco.species_clades().iter()
         .map(|c| (c.id, c.name.clone())).collect();
+    // Phase 61 life dump: a clade id alone is ambiguous while the unassigned
+    // sentinel 0 is shared by every family, so the id→name map is only used
+    // when the record's family matches the row's.
+    let clade_family: std::collections::HashMap<u32, u32> = eco.species_clades().iter()
+        .map(|c| (c.id, c.kind_id)).collect();
     let mut by_clade: std::collections::HashMap<(u16, u32), CladeRow> =
         std::collections::HashMap::new();
     let mut clade_tokens: std::collections::HashMap<(u16, u32), std::collections::HashSet<u32>> =
@@ -342,11 +374,58 @@ fn clade_fate_observation() {
         neg_n, if neg_n > 0 { neg_x / neg_n as f64 } else { 0.0 },
         if neg_n > 0 { neg_z / neg_n as f64 } else { 0.0 },
     ));
+    // Phase 61: engine-level per-clade life counters (births / deaths by
+    // cause / refusals by gate / mate misses / peak / extinction tick).
+    let mut life = String::from(
+        "clade_id,clade_name,root_kind,births,deaths,deaths_starved,deaths_aged,deaths_predation,deaths_other,region_cap_blocks,kind_budget_blocks,mate_misses,first_tick,first_birth_tick,last_birth_tick,peak_pop,peak_tick,region_peak_r0,region_peak_r1,region_peak_r2,region_peak_r3,extinction_tick,mean_death_age,mean_death_energy,last_death_energy\n",
+    );
+    let mut life_rows: Vec<_> = eco.clade_life_stats().to_vec();
+    life_rows.sort_by_key(|s| (s.root_kind, s.clade_id));
+    for s in &life_rows {
+        let fam_name = eco.kind_name(s.root_kind);
+        let clade_label = match clade_family.get(&s.clade_id) {
+            Some(&kid) if kid != u32::MAX && eco.root_kind(kid as aether_sim_ecology::ecology::SpeciesKind) == s.root_kind =>
+                clade_name.get(&s.clade_id).cloned().unwrap_or_else(|| fam_name.to_string()),
+            _ => fam_name.to_string(),
+        };
+        life.push_str(&format!(
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.2},{:.3},{:.3}\n",
+            s.clade_id,
+            clade_label,
+            fam_name,
+            s.births, s.deaths, s.deaths_starved, s.deaths_aged, s.deaths_predation,
+            s.deaths_other, s.region_cap_blocks, s.kind_budget_blocks, s.mate_misses,
+            s.first_tick,
+            s.first_birth_tick.map(|v| v.to_string()).unwrap_or_default(),
+            s.last_birth_tick.map(|v| v.to_string()).unwrap_or_default(),
+            s.peak_pop, s.peak_tick,
+            s.region_peak[0], s.region_peak[1], s.region_peak[2], s.region_peak[3],
+            s.extinction_tick.map(|v| v.to_string()).unwrap_or_default(),
+            if s.deaths > 0 { s.death_age_sum / s.deaths as f64 } else { 0.0 },
+            if s.deaths > 0 { s.death_energy_sum / s.deaths as f64 } else { 0.0 },
+            s.last_death_energy,
+        ));
+    }
     std::fs::write(&csv_path, csv).unwrap();
     std::fs::write(&tree_path, tree).unwrap();
     std::fs::write(&culture_path, culture).unwrap();
+    std::fs::write(&life_path, life).unwrap();
+    for s in &life_rows {
+        if s.extinction_tick.is_some() {
+            eprintln!(
+                "  [extinct] clade={} kind={} births={} deaths={} (starved={} aged={} pred={} other={}) region_blocks={} budget_blocks={} mate_misses={} peak={} first_birth={:?} last_birth={:?} death_tick={:?} mean_age={:.1} mean_e={:.2} last_e={:.2}",
+                s.clade_id, s.root_kind, s.births, s.deaths, s.deaths_starved, s.deaths_aged,
+                s.deaths_predation, s.deaths_other, s.region_cap_blocks, s.kind_budget_blocks,
+                s.mate_misses, s.peak_pop, s.first_birth_tick, s.last_birth_tick,
+                s.extinction_tick,
+                if s.deaths > 0 { s.death_age_sum / s.deaths as f64 } else { 0.0 },
+                if s.deaths > 0 { s.death_energy_sum / s.deaths as f64 } else { 0.0 },
+                s.last_death_energy,
+            );
+        }
+    }
     eprintln!(
-        "=== clade-fate done: clades={} events={} csv={csv_path} tree={tree_path} culture={culture_path} ===",
+        "=== clade-fate done: clades={} events={} csv={csv_path} tree={tree_path} culture={culture_path} life={life_path} ===",
         eco.species_clades().len(), last_events
     );
 }

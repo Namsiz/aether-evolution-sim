@@ -1299,6 +1299,46 @@ pub const DECO_REGION_CAP_GAIN: f64 = 10.0;
 /// starving the whole guild when a culture monopolises the field.
 pub const DECO_REGION_CAP_W_MIN: f64 = 0.25;
 pub const DECO_REGION_CAP_W_MAX: f64 = 4.0;
+/// Phase 61 A/B: renormalise the regional split over the regions a kind
+/// actually occupies instead of all four. The Phase 60 form
+/// `cap_r = budget · w_r / Σ_all w` gives a clade that lives in a single
+/// home quadrant at most `budget / 4` slots there — a daughter that forks off
+/// with 8 members into one region is born at its cap and can never breed, so
+/// it dies by attrition. Renormalising over the occupied set makes a
+/// one-region clade's cap its whole budget while keeping the conservation
+/// identity: summed over the *occupied* regions the caps still equal the kind
+/// budget exactly (empty regions hold no members by definition).
+///
+/// The target region always participates in the normaliser even when it is
+/// still empty, so colonising a vacant quadrant draws on that quadrant's own
+/// share rather than the whole budget.
+///
+/// Compiled default OFF: the 3-seed 200k A/B (`research/phase61-report.md`)
+/// halves extinctions (13 → 6) but collapses speciation on seed 20261102
+/// (9 → 0, the guild refills to 80): the root's four-quadrant partition is
+/// the speciation engine and renormalising the *root* removes it.
+pub const DECO_REGION_CAP_RENORM_ON: bool = false;
+/// Phase 61 A/B candidate (b): a minimum retention share for a kind in the
+/// regions it already occupies. The fork gate declares a species only when
+/// both sides hold at least `speciation_min_side` members (Phase 53), but the
+/// Phase 60 regional split can hand a freshly forked daughter as little as
+/// `budget / 4` slots per quadrant — 2 slots for an 8-budget granddaughter.
+/// The split gate and the capacity gate then disagree: a species is declared
+/// at 8 and permanently held below 8. This arm raises the per-region cap to
+/// `max(natural share, min(budget, speciation_min_side))` for regions the
+/// kind already inhabits, so an occupied region can always hold the split
+/// gate's minimum (never more than the kind's own budget).
+///
+/// Vacant quadrants keep the plain Phase 60 share, so colonisation and the
+/// root's four-deme structure are unchanged; the family-level biomass bound
+/// is untouched because the Phase 49 per-kind budget gate still caps every
+/// kind's total.
+///
+/// Compiled default OFF: the A/B (`research/phase61-report.md`) gives the best
+/// trade-off of the three candidates (extinctions 13 → 4, speciation 22 → 20)
+/// but still misses the "speciation must not fall" bar by 2 events, so the arm
+/// stays off until a 5-seed test can judge that difference.
+pub const DECO_REGION_CAP_FLOOR_ON: bool = false;
 
 /// Phase 60: grid cell → home quadrant. Pure geometry (cell centres through
 /// `Ecology::region_of`), built once per world and rebuilt on restore; never
@@ -1504,6 +1544,59 @@ pub struct CladeSpeciationEvent {
     /// 0/0. Additive JSON/ABI tail; defaults to 0 on pre-Phase-49 records.
     pub parent_budget: u32,
     pub child_budget: u32,
+}
+
+/// Phase 61 engine-level per-clade life bookkeeping (Phase 59 §10.5): births,
+/// deaths by cause, birth-refusal reasons, mate-search misses, peak standing
+/// population and the extinction tick. Keyed by `(clade_id, root_kind)`
+/// because clade id 0 doubles as the "unassigned" sentinel — an agent that
+/// has not been attached to a materialized clade yet books into the
+/// `(0, family)` slot, which then merges with the root clade when it
+/// materializes (the root always takes id 0).
+///
+/// Pure telemetry: no RNG draws, no state the simulation reads back, and never
+/// persisted. Deaths and blocks counted here are exactly the events the engine
+/// already decided, so a run with a fresh counter vector is bit-identical.
+#[derive(Clone, Debug, Default)]
+pub struct CladeLifeStats {
+    pub clade_id: u32,
+    pub root_kind: SpeciesKind,
+    pub births: u64,
+    pub deaths: u64,
+    pub deaths_starved: u64,
+    pub deaths_aged: u64,
+    pub deaths_predation: u64,
+    pub deaths_other: u64,
+    /// Births refused by the Phase 60 regional slot gate (mother's clade).
+    pub region_cap_blocks: u64,
+    /// Births refused by the Phase 49 kind budget / biome cap gate.
+    pub kind_budget_blocks: u64,
+    /// Ready-adult ticks whose mate search came back empty (one count per
+    /// failed search, not per tick: the search only runs when the mother is
+    /// past cooldown and over her energy threshold).
+    pub mate_misses: u64,
+    pub first_tick: u32,
+    pub first_birth_tick: Option<u32>,
+    pub last_birth_tick: Option<u32>,
+    pub peak_pop: u32,
+    pub peak_tick: u32,
+    /// Per-home-quadrant peak standing population of this clade (spatial
+    /// evidence for a capacity death: the most slots it ever held per
+    /// quadrant).
+    pub region_peak: [u32; REGION_COUNT as usize],
+    pub extinction_tick: Option<u32>,
+    /// Sums over this clade's deaths (lifespan and end-of-life energy
+    /// evidence: `death_age_sum / deaths`, `death_energy_sum / deaths`).
+    pub death_age_sum: f64,
+    pub death_energy_sum: f64,
+    pub last_death_energy: f64,
+}
+
+/// Phase 61: which spawn gate refused a birth (telemetry only).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CladeBirthBlock {
+    RegionCap,
+    KindBudget,
 }
 
 /// Tiny union-find over MST vertex slots (n ≤ MAX_DECO = 80; no rank or
@@ -1928,6 +2021,27 @@ pub struct Ecology {
     /// Phase 60: grid cell → home quadrant, a pure function of the grid
     /// geometry; rebuilt on construction / restore, never saved.
     pub deco_cell_region: Vec<u8>,
+    /// Phase 61 A/B toggle: renormalise the regional split over the regions
+    /// the kind actually occupies, so a clade that lives in one quadrant can
+    /// use its whole budget there instead of `budget / 4`. Not persisted (same
+    /// contract as the other arm switches): a restored world runs the compiled
+    /// default.
+    pub deco_region_cap_renorm: bool,
+    /// Phase 61 candidate (b): raise a kind's cap in the regions it already
+    /// occupies to at least `min(budget, speciation_min_side)`, so an occupied
+    /// quadrant can always hold the split gate's minimum. Not persisted.
+    pub deco_region_cap_floor: bool,
+    /// Phase 61 candidate (c): renormalise only the derived kinds (a forked
+    /// kind's regional split covers the regions it occupies), while the six
+    /// ancestor kinds keep the plain Phase 60 four-quadrant split. The root
+    /// DECO deme partition is what fragments the guild into the daughter
+    /// clusters the detector needs — candidate (a) renormalises it away and
+    /// speciation collapses — so this arm leaves the root untouched and only
+    /// unpinches the daughters. Not persisted.
+    pub deco_region_cap_renorm_daughters: bool,
+    /// Phase 61 runtime telemetry: per-clade birth/death counters. Pure
+    /// observation — not persisted, never read by the simulation.
+    pub clade_life: Vec<CladeLifeStats>,
     /// Phase 45: per-kind clade-isolation telemetry (kind id → rolling
     /// window). Pure observability — not persisted (same contract as
     /// GroupStats); rebuilt from live clades after a restore.
@@ -2157,6 +2271,10 @@ impl Ecology {
             deco_region_weight_sum: REGION_COUNT as f64,
             deco_region_weight_tick: u32::MAX,
             deco_cell_region: build_deco_cell_region_map(),
+            deco_region_cap_renorm: DECO_REGION_CAP_RENORM_ON,
+            deco_region_cap_floor: DECO_REGION_CAP_FLOOR_ON,
+            deco_region_cap_renorm_daughters: false,
+            clade_life: Vec::new(),
             isolation_by_kind: Vec::new(),
             culture_value_on: true,
             dispersal_p: DISPERSAL_P,
@@ -2382,6 +2500,10 @@ impl Ecology {
             deco_region_weight_sum: REGION_COUNT as f64,
             deco_region_weight_tick: u32::MAX,
             deco_cell_region: build_deco_cell_region_map(),
+            deco_region_cap_renorm: DECO_REGION_CAP_RENORM_ON,
+            deco_region_cap_floor: DECO_REGION_CAP_FLOOR_ON,
+            deco_region_cap_renorm_daughters: false,
+            clade_life: Vec::new(),
             isolation_by_kind: Vec::new(),
             culture_value_on: true,
             dispersal_p: DISPERSAL_P,
@@ -3787,6 +3909,42 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         self.deco_region_cap = false;
     }
 
+    /// Phase 61 A/B arm: renormalise the regional split over the occupied
+    /// regions (a one-region clade may use its whole budget). Only meaningful
+    /// while `deco_region_cap` is on; not persisted.
+    pub fn deco_region_cap_renorm_on(&mut self) {
+        self.deco_region_cap_renorm = true;
+        self.deco_region_weight_tick = u32::MAX;
+    }
+
+    /// Phase 61 A/B arm: the Phase 60 split (normalise over all four regions).
+    pub fn deco_region_cap_renorm_off(&mut self) {
+        self.deco_region_cap_renorm = false;
+    }
+
+    /// Phase 61 candidate (b) arm: occupied regions keep at least
+    /// `min(budget, speciation_min_side)` slots for the kind that holds them.
+    pub fn deco_region_cap_floor_on(&mut self) {
+        self.deco_region_cap_floor = true;
+        self.deco_region_weight_tick = u32::MAX;
+    }
+
+    /// Phase 61 candidate (b) arm off (the Phase 60 split).
+    pub fn deco_region_cap_floor_off(&mut self) {
+        self.deco_region_cap_floor = false;
+    }
+
+    /// Phase 61 candidate (c) arm: renormalise the derived kinds only.
+    pub fn deco_region_cap_renorm_daughters_on(&mut self) {
+        self.deco_region_cap_renorm_daughters = true;
+        self.deco_region_weight_tick = u32::MAX;
+    }
+
+    /// Phase 61 candidate (c) arm off.
+    pub fn deco_region_cap_renorm_daughters_off(&mut self) {
+        self.deco_region_cap_renorm_daughters = false;
+    }
+
     /// Phase 60: refresh the per-home-region capacity weights from the current
     /// decomposition field. Mean `deco_env` over habitable cells only; a region
     /// that rots carcasses faster retains less food, so its weight falls.
@@ -3819,14 +3977,37 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
     /// budget is partitioned by the region weights, so `Σ_regions cap_r` is
     /// exactly `kind_budget(kind)` — the guild's total carrying capacity is
     /// conserved and each species gets its own regional share.
+    ///
+    /// Phase 61: with `deco_region_cap_renorm` the normaliser covers only the
+    /// regions the kind occupies (plus the target region), so a clade that
+    /// holds one quadrant may fill its whole budget there. The conservation
+    /// identity moves with it: the occupied regions' caps still sum to the
+    /// kind budget.
     fn deco_region_cap_limit(&self, kind: SpeciesKind, region: u8) -> f64 {
         let budget = self.kind_budget(kind) as f64;
         let r = (region as usize).min(REGION_COUNT as usize - 1);
-        if self.deco_region_weight_sum > 0.0 {
+        if self.deco_region_cap_renorm
+            || (self.deco_region_cap_renorm_daughters && self.kind_def(kind).parent_kind.is_some()) {
+            let mut wsum = 0.0f64;
+            for rr in 0..REGION_COUNT as usize {
+                if rr == r || self.deco_region_count(kind, rr as u8) > 0 {
+                    wsum += self.deco_region_weight[rr];
+                }
+            }
+            if wsum > 0.0 {
+                return budget * self.deco_region_weight[r] / wsum;
+            }
+        }
+        let natural = if self.deco_region_weight_sum > 0.0 {
             budget * self.deco_region_weight[r] / self.deco_region_weight_sum
         } else {
             budget / REGION_COUNT as f64
+        };
+        if self.deco_region_cap_floor && self.deco_region_count(kind, r as u8) > 0 {
+            let floor = budget.min(self.speciation_min_side as f64);
+            return natural.max(floor);
         }
+        natural
     }
 
     /// Phase 60: living members of `kind` whose home quadrant is `region`.
@@ -3846,6 +4027,106 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
     /// `kind_budget × w_r / Σw` (sums to the kind's budget over all regions).
     pub fn deco_region_cap_for(&self, kind: SpeciesKind, region: u8) -> f64 {
         self.deco_region_cap_limit(kind, region)
+    }
+
+    // ----- Phase 61: per-clade life telemetry ---------------------------------
+
+    /// Phase 61: every clade's birth/death bookkeeping, in first-touch order.
+    pub fn clade_life_stats(&self) -> &[CladeLifeStats] {
+        &self.clade_life
+    }
+
+    /// Find (or create) the `(clade_id, root_kind)` telemetry slot.
+    fn clade_life_slot(&mut self, clade_id: u32, root_kind: SpeciesKind) -> usize {
+        if let Some(i) = self.clade_life.iter()
+            .position(|s| s.clade_id == clade_id && s.root_kind == root_kind) {
+            return i;
+        }
+        self.clade_life.push(CladeLifeStats {
+            clade_id,
+            root_kind,
+            first_tick: self.tick_count,
+            ..CladeLifeStats::default()
+        });
+        self.clade_life.len() - 1
+    }
+
+    /// A parented birth into `clade_id` (agent `kind` resolves the family).
+    fn clade_life_birth(&mut self, clade_id: u32, kind: SpeciesKind) {
+        let root = self.root_kind(kind);
+        let now = self.tick_count;
+        let i = self.clade_life_slot(clade_id, root);
+        let s = &mut self.clade_life[i];
+        s.births += 1;
+        if s.first_birth_tick.is_none() { s.first_birth_tick = Some(now); }
+        s.last_birth_tick = Some(now);
+    }
+
+    /// A death of agent `idx` (still readable: callers run this before the
+    /// agent stops being counted, alive or not).
+    fn clade_life_death(&mut self, idx: usize, cause: &'static str) {
+        let (clade_id, kind, age, energy) = {
+            let a = &self.agents[idx];
+            (a.clade_id, a.kind, a.age, a.energy)
+        };
+        let root = self.root_kind(kind);
+        let i = self.clade_life_slot(clade_id, root);
+        let s = &mut self.clade_life[i];
+        s.deaths += 1;
+        match cause {
+            "starved" => s.deaths_starved += 1,
+            "aged" => s.deaths_aged += 1,
+            "predation" => s.deaths_predation += 1,
+            _ => s.deaths_other += 1,
+        }
+        s.death_age_sum += age;
+        s.death_energy_sum += energy;
+        s.last_death_energy = energy;
+    }
+
+    /// A refused birth, attributed to the mother's clade.
+    fn clade_life_block(&mut self, tag: (u32, SpeciesKind), why: CladeBirthBlock) {
+        let root = self.root_kind(tag.1);
+        let i = self.clade_life_slot(tag.0, root);
+        match why {
+            CladeBirthBlock::RegionCap => self.clade_life[i].region_cap_blocks += 1,
+            CladeBirthBlock::KindBudget => self.clade_life[i].kind_budget_blocks += 1,
+        }
+    }
+
+    /// A ready adult whose mate search came back empty.
+    fn clade_life_mate_miss(&mut self, clade_id: u32, kind: SpeciesKind) {
+        let root = self.root_kind(kind);
+        let i = self.clade_life_slot(clade_id, root);
+        self.clade_life[i].mate_misses += 1;
+    }
+
+    /// Standing population sampled at the speciation-check cadence (the pass
+    /// that rebuilds `SpeciesClade::members`; 60-tick granularity), with the
+    /// per-quadrant split for the capacity evidence.
+    fn clade_life_peak(&mut self, clade_id: u32, kind_id: u32, pop: usize, by_region: &[u32; REGION_COUNT as usize]) {
+        if kind_id == u32::MAX { return; }
+        let root = self.root_kind(kind_id as SpeciesKind);
+        let now = self.tick_count;
+        let i = self.clade_life_slot(clade_id, root);
+        if pop as u32 > self.clade_life[i].peak_pop {
+            self.clade_life[i].peak_pop = pop as u32;
+            self.clade_life[i].peak_tick = now;
+        }
+        for r in 0..REGION_COUNT as usize {
+            if by_region[r] > self.clade_life[i].region_peak[r] {
+                self.clade_life[i].region_peak[r] = by_region[r];
+            }
+        }
+    }
+
+    /// The tick the engine logged this clade's extinction event.
+    fn clade_life_extinct(&mut self, clade_id: u32, kind_id: u32) {
+        if kind_id == u32::MAX { return; }
+        let root = self.root_kind(kind_id as SpeciesKind);
+        let now = self.tick_count;
+        let i = self.clade_life_slot(clade_id, root);
+        self.clade_life[i].extinction_tick = Some(now);
     }
 
     /// Phase 59: the DECO reproduction threshold for a given efficiency.
@@ -4122,6 +4403,13 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
     // ----- entity management ------------------------------------------------
 
     pub(crate) fn spawn(&mut self, kind: SpeciesKind, x: f64, z: f64, genome: Option<Genome>, generation: u32, age: f64) -> Option<&mut Agent> {
+        self.spawn_tagged(kind, x, z, genome, generation, age, None)
+    }
+
+    /// Phase 61: `spawn` with a per-clade telemetry tag `(mother clade id,
+    /// mother kind)`. The tag only feeds the Phase 61 counters — refusals and
+    /// births — and changes nothing in the decision itself.
+    pub(crate) fn spawn_tagged(&mut self, kind: SpeciesKind, x: f64, z: f64, genome: Option<Genome>, generation: u32, age: f64, tag: Option<(u32, SpeciesKind)>) -> Option<&mut Agent> {
         // Use biome-specific cap when available; otherwise fall back to global.
         let def_max_e = self.kind_def(kind).max_energy;
         let def_repro_cd = self.kind_def(kind).repro_cooldown;
@@ -4134,7 +4422,10 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         if self.budget_fork {
             let budget = self.kind_budget(kind);
             let eff_cap = if budget < cap { budget } else { cap };
-            if self.count(kind) >= eff_cap { return None; }
+            if self.count(kind) >= eff_cap {
+                if let Some(t) = tag { self.clade_life_block(t, CladeBirthBlock::KindBudget); }
+                return None;
+            }
         } else {
             let root = self.root_kind(kind);
             let family_total = if root == kind {
@@ -4142,7 +4433,10 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             } else {
                 self.count_family(root)
             };
-            if family_total >= cap { return None; }
+            if family_total >= cap {
+                if let Some(t) = tag { self.clade_life_block(t, CladeBirthBlock::KindBudget); }
+                return None;
+            }
         }
         // Phase 60: regional carrying capacity for the DECO guild. The kind's
         // Phase-49 budget is spread over the four home quadrants by local food
@@ -4159,7 +4453,10 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             }
             let r = Self::region_of(x, z);
             let limit = self.deco_region_cap_limit(kind, r);
-            if self.deco_region_count(kind, r) as f64 >= limit { return None; }
+            if self.deco_region_count(kind, r) as f64 >= limit {
+                if let Some(t) = tag { self.clade_life_block(t, CladeBirthBlock::RegionCap); }
+                return None;
+            }
         }
         let g = match genome {
             Some(g) => g,
@@ -4253,6 +4550,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         };
         let idx = self.agents.len();
         self.agents.push(a);
+        if let Some(t) = tag { self.clade_life_birth(t.0, t.1); }
         Some(&mut self.agents[idx])
     }
 
@@ -5065,6 +5363,12 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             }
         });
             let mate_opt = self.nearest(idx, mate_kind, mate_radius, mate_filter);
+        if mate_opt.is_none() {
+            // Phase 61 telemetry: a ready adult (past cooldown, over her energy
+            // threshold) found no mate inside the search radius.
+            let (cid, k) = (self.agents[idx].clade_id, self.agents[idx].kind);
+            self.clade_life_mate_miss(cid, k);
+        }
         if let Some((mate_j, _)) = mate_opt {
             let b_energy = self.agents[mate_j].energy;
             let b_max_e = self.agents[mate_j].max_energy;
@@ -5145,7 +5449,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             let mut child_triune = self.agents[idx].triune.clone();
             child_triune.mutate(&mut self.brain_learning_rng, TRIUNE_MUTATE_SIGMA);
             child_triune.reset_transients();
-            if let Some(child) = self.spawn(child_kind, child_x, child_z, Some(g), max_gen_child, 0.0) {
+            if let Some(child) = self.spawn_tagged(child_kind, child_x, child_z, Some(g), max_gen_child, 0.0, Some((parent_clade, a_kind))) {
                 child.lineage = a_lineage.or(b_lineage);
                 child.clade_id = parent_clade;
                 child.region = dispersed.unwrap_or(a_region);
@@ -5237,7 +5541,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             let mut child_triune_a2 = self.agents[idx].triune.clone();
             child_triune_a2.mutate(&mut self.brain_learning_rng, TRIUNE_MUTATE_SIGMA);
             child_triune_a2.reset_transients();
-            if let Some(child) = self.spawn(child_kind_a2, cx, cz, Some(g), a_gen_a2 + 1, 0.0) {
+            if let Some(child) = self.spawn_tagged(child_kind_a2, cx, cz, Some(g), a_gen_a2 + 1, 0.0, Some((parent_clade, a_kind_a2))) {
                 child.lineage = a_lineage_a2;
                 child.clade_id = parent_clade;
                 child.region = dispersed.unwrap_or(a_region_a2);
@@ -5283,6 +5587,9 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
 
     pub(crate) fn die(&mut self, idx: usize, cause: &'static str) {
         if !self.agents[idx].alive { return; }
+        // Phase 61 telemetry runs before the agent stops being counted, so the
+        // counter still sees its clade, age and end-of-life energy.
+        self.clade_life_death(idx, cause);
         self.agents[idx].alive = false;
         self.deaths += 1;
         if cause == "starved" { self.starved += 1; }
@@ -5722,6 +6029,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                     self.agents[idx].bite = bite_interval;
                     self.kills += 1;
                     self.deaths += 1;
+                    self.clade_life_death(pj, "predation");
                     self.agents[pj].alive = false;
                     // Carcass keeps the original 0.22 portion (bit-exact).
                     self.carcasses.push(Carcass { x: prey_x, z: prey_z, energy: gain * 0.22, age: 0.0, occupied_by: None });
@@ -7312,13 +7620,27 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         // own kind family — unassigned sentinel-0 strays that transiently
         // point at another family's root never contaminate its cache.
         for clade in self.species_clades.iter_mut() { clade.members.clear(); }
+        let ncl = self.species_clades.len();
+        let mut region_counts: Vec<[u32; REGION_COUNT as usize]> =
+            vec![[0u32; REGION_COUNT as usize]; ncl];
         for a in self.agents.iter() {
             if !a.alive { continue; }
             if self.clade_belongs_to_family(a.clade_id, a.kind) {
                 let pos = self.species_clades.iter().position(|c| c.id == a.clade_id).unwrap();
                 self.species_clades[pos].members.push(a.id);
+                let r = (a.region as usize).min(REGION_COUNT as usize - 1);
+                region_counts[pos][r] += 1;
             }
         }
+        // Phase 61 telemetry: standing population per clade (with its
+        // per-quadrant split), sampled at this pass — the same 60-tick cadence
+        // that rebuilds `members`.
+        let peaks: Vec<(u32, u32, usize, [u32; REGION_COUNT as usize])> = self.species_clades.iter()
+            .enumerate()
+            .filter(|(_, c)| !c.members.is_empty())
+            .map(|(i, c)| (c.id, c.kind_id, c.members.len(), region_counts[i]))
+            .collect();
+        for (id, kid, n, by_region) in peaks { self.clade_life_peak(id, kid, n, &by_region); }
         // Phase 16: a clade whose member count hits zero freezes its record
         // AND logs an extinction event in the unified log. kind 2 = the clade
         // carried a competitive burden in the previous pass (Gause exclusion),
@@ -7338,6 +7660,8 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             }
         }
         for (id, ek, kid, derived) in extinct {
+            // Phase 61 telemetry: the extinction tick in the per-clade table.
+            self.clade_life_extinct(id, kid);
             // Phase 49: an extinct derived kind returns its budget share up
             // the fork lineage — the guild total stays conserved across
             // speciation/turnover cycles (a permanently leaking share would
@@ -9292,6 +9616,10 @@ impl Ecology {
             deco_region_weight_sum: REGION_COUNT as f64,
             deco_region_weight_tick: u32::MAX,
             deco_cell_region: build_deco_cell_region_map(),
+            deco_region_cap_renorm: DECO_REGION_CAP_RENORM_ON,
+            deco_region_cap_floor: DECO_REGION_CAP_FLOOR_ON,
+            deco_region_cap_renorm_daughters: false,
+            clade_life: Vec::new(),
             isolation_by_kind: Vec::new(),
             culture_value_on: state.CultureValueOn,
             // Phase 47: natal dispersal. Pre-v16 archives carry no fields →
