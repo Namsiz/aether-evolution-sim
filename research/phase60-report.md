@@ -36,7 +36,7 @@ cap(kind, r)= kind_budget(kind) · w(r) / Σ_r w(r)
 ### 2.2 为什么它不依赖人口副作用
 
 1. **不是能量闸**：`deco_repro_threshold` 一行未改（`phase60_region_capacity_test::the_fertility_map_is_untouched_by_the_capacity_arm` 在 1 001 点网格上逐位比较两臂）。不存在「阈值 > max_energy」的不可达态。
-2. **不是个体绝育**：被拒的母亲保留能量与 `repro` 冷却状态，仍是可育个体。观测器 `deco_ready` 在 200k 末对低 eff 女儿支逐支 > 0（§5），灭绝支系的生命周期普查也全部 > 0（最低 0.068）。
+2. **不是个体绝育**：被拒的母亲保留能量与 `repro` 冷却状态，仍是可育个体。观测器 `deco_ready` 在 200k 末对低 eff 女儿支逐支 > 0（§5），灭绝支系的生命周期普查也全部 > 0（最低 0.055，109 的 deco-A-B）。
 3. **掉档来自空间容量**：每个 kind 的 Phase-49 budget 按区域食物保留量分配到四个 home quadrant，`Σ_r cap(kind,r) = kind_budget`。一个只占一个区域的支系只能用到该区域的份额——这是「区域容量」的直接后果，不是「个体不能生」。
 4. **它确实改变了种群结构**（如实记录）：seed 20261102 的 DECO 从「69 只挤在 region 3 的超级 deme」变成四区约 20 只的岛模型，80k 总数为 28（OFF 80）。掉档是功能，不是副作用。
 
