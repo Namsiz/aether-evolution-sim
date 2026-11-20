@@ -254,8 +254,12 @@ fn default_arm_anchor_at_60000_is_the_phase56_trajectory() {
     // eff 0.9583, so the default world moves again. The Phase 56 value
     // 0x44285bfbed94865e is now the `repro_threshold_old_off()` anchor
     // (phase59_repro_saturation_test).
+    //
+    // Phase 60 (re-baseline 17): the regional DECO capacity arm is on by
+    // default, so the default world moves again (0xde2c… is the
+    // `deco_region_cap_off()` arm, pinned in phase60_region_capacity_test).
     let mut eco = Ecology::new(20261102);
     run_ticks(&mut eco, 60_000);
-    assert_eq!(eco.checksum(), "0xde2c6292e0dfb9dc",
-        "default arm (Phase 59 world) at t=60000");
+    assert_eq!(eco.checksum(), "0x3272f0e3eaba9250",
+        "default arm (Phase 60 world) at t=60000");
 }

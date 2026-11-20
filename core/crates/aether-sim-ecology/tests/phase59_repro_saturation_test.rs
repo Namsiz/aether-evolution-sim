@@ -86,6 +86,10 @@ fn daylight(t: u32) -> f64 {
 fn old_arm_reproduces_the_phase56_default_anchor() {
     let mut eco = Ecology::new(20261102);
     eco.repro_threshold_old_off();
+    // Phase 60: the regional capacity arm is default ON and also touches this
+    // world; the pre-60 replay needs both switches off (0x4428… is the exact
+    // Phase 56/58 trajectory).
+    eco.deco_region_cap_off();
     for t in 1..=60_000u32 {
         eco.update(0.1, daylight(t));
     }

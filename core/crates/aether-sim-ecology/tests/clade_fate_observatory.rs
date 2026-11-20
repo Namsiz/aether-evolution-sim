@@ -19,6 +19,10 @@
 //! fertility line (`0.96 × (2 − eff)`, sterile below eff 0.9583); unset runs
 //! the saturated fix. The per-clade dump also carries `mean_eff` /
 //! `deco_ready` / `min_pair` (Phase 58's death diagnostics).
+//!
+//! Phase 60 adds `PHASE_DECO_REGION_CAP=on|off`: "on" spreads each DECO kind's
+//! budget over the four home regions by local carcass-food retention
+//! (`deco_env` mean); unset runs the compiled default.
 
 use aether_sim_ecology::civilization_metrics::{format_line, measure};
 use aether_sim_ecology::ecology::Ecology;
@@ -127,13 +131,19 @@ fn clade_fate_observation() {
         Some("off") => "reprodfix",
         _ => "reprodflt",
     };
+    // Phase 60: regional DECO capacity arm.
+    let regcap_arm = match env_str("PHASE_DECO_REGION_CAP").as_deref() {
+        Some("on") => "regcapon",
+        Some("off") => "regcapoff",
+        _ => "regcapdflt",
+    };
     // Calibration-sweep tag (Phase 55): parallel arms of the same switch must
     // never overwrite each other's output files.
     let tag = env_str("PHASE_ARM_TAG").unwrap_or_default();
     let suffix = if tag.is_empty() { String::new() } else { format!("_{tag}") };
-    let csv_path = format!("/tmp/clade_fate_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}{suffix}.csv");
-    let tree_path = format!("/tmp/clade_tree_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}{suffix}.csv");
-    let culture_path = format!("/tmp/clade_culture_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}{suffix}.csv");
+    let csv_path = format!("/tmp/clade_fate_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}{suffix}.csv");
+    let tree_path = format!("/tmp/clade_tree_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}{suffix}.csv");
+    let culture_path = format!("/tmp/clade_culture_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}{suffix}.csv");
     let mut csv = String::from(
         "t,pop,herb,pred,scav,omn,fish,deco,clades_live,clades_total,events,tokens,bearers,groups,levels,authorities,grass_mean,grass_var,env_mean,env_var,structs,deco_r0,deco_r1,deco_r2,deco_r3,structs_r0,structs_r1,structs_r2,structs_r3,denv_mean,denv_var\n",
     );
@@ -149,6 +159,8 @@ fn clade_fate_observation() {
     }
     if place_arm == "bvalon" { eco.token_placement_by_value_on(); }
     if repro_arm == "reproold" { eco.repro_threshold_old_off(); }
+    if regcap_arm == "regcapon" { eco.deco_region_cap_on(); }
+    if regcap_arm == "regcapoff" { eco.deco_region_cap_off(); }
     let mut last_events = 0usize;
     eprintln!("=== clade-fate seed {seed} ({ticks} ticks, structure_env={arm}, deco_env={deco_arm}, token_sign={sign_arm}, clamp={clamp_arm}, place={place_arm}, repro={repro_arm}) ===");
     for t in 1..=ticks {

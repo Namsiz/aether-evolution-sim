@@ -73,6 +73,8 @@ fn living_daughters_stay_beyond_the_band_from_their_mother() {
     // replayed Phase 58 mapping — the band invariant is about the niche axis,
     // not the fertility calibration.
     eco.repro_threshold_old_off();
+    // Phase 60: replay the pre-60 old-mapping world (no regional capacity).
+    eco.deco_region_cap_off();
     run_ticks(&mut eco, 120_000);
     let mut checked = 0;
     for c in eco.species_clades() {

@@ -1251,6 +1251,72 @@ pub const STRUCTURE_DECO_GAIN: f32 = 20.0;
 /// the OFF arm never produces. The pre-56 anchors are preserved by the
 /// `deco_resource_env_off` arm (see `phase56_deco_resource_test`).
 pub const DECO_RESOURCE_ENV_ON: bool = true;
+
+// ----- Phase 60: regional DECO carrying capacity (split trigger) -------------
+//
+// Phase 59 removed the old split engine's hidden driver: sterile low-efficiency
+// individuals used to hold slots while never breeding, which kept the DECO guild
+// below its 80-slot cap and fragmented its breeding pool. With the fertility
+// fix in place the guild sits at 80 and, on seed 20261102, collapses into one
+// home deme (69 decomposers in region 3 at t=80k) whose mating network stays
+// well mixed — the detector sees no 8+8 genomic clusters with geographic
+// isolation, so speciation goes to zero.
+//
+// This mechanism restores fragmentation on a capacity axis instead of a
+// fertility axis. `deco_env` is the carcass decay multiplier: a cell above 1.0
+// rots a carcass faster, so its larder is worth less to a decomposer. The mean
+// multiplier over a region's habitable cells therefore measures how much food
+// that region retains, and the region's capacity weight is
+//
+//   w_r = clamp(1 + GAIN · (1 − mean_env_r), W_MIN, W_MAX)
+//
+// Each DECO kind's Phase-49 budget is distributed over the four home regions in
+// proportion to `w_r`: `cap_r = budget · w_r / Σw`. Summed over regions this is
+// exactly the kind's budget, so the guild's biomass conservation is untouched
+// and a daughter fork receives its own regional share instead of competing
+// with the root for the same cells. A region whose culture accelerated decay
+// (or whose soil is otherwise poor) carries fewer decomposers — a capacity
+// hollow, not a sterile individual.
+//
+// Contract: this is a spawn-slot capacity, never an energy threshold. A blocked
+// mother keeps her energy, remains fully fertile, and breeds as soon as her
+// region has a free slot; no legal `eff` can become unreachable. The weights
+// are a pure function of the current field (recomputed at the first DECO birth
+// gate of a tick), so the arm needs no save-state field.
+/// Phase 60 A/B: **default ON** (re-baseline 17). The 3-seed 200k A/B
+/// (`research/phase60-report.md`): 22 speciation events vs the Phase 59
+/// default's 8, with every low-efficiency daughter clade fertile
+/// (`deco_ready > 0`); extinctions are long-lived capacity clades, not
+/// birth-cliff sterile daughters. The pre-60 world is preserved by
+/// `deco_region_cap_off()` (Phase 59 default anchor @60000).
+pub const DECO_REGION_CAP_ON: bool = true;
+/// Phase 60: weight gain per unit of regional mean decay multiplier. At the
+/// uniform field (`mean = 1`) every region weighs 1.0 and the budget splits
+/// evenly; the observed calibration range is `mean ∈ [0.97, 1.04]`.
+pub const DECO_REGION_CAP_GAIN: f64 = 10.0;
+/// Phase 60: weight bounds. A region can lose at most 75 % of its uniform
+/// share and gain at most 4×; the bounds keep one extreme region from
+/// starving the whole guild when a culture monopolises the field.
+pub const DECO_REGION_CAP_W_MIN: f64 = 0.25;
+pub const DECO_REGION_CAP_W_MAX: f64 = 4.0;
+
+/// Phase 60: grid cell → home quadrant. Pure geometry (cell centres through
+/// `Ecology::region_of`), built once per world and rebuilt on restore; never
+/// saved. Making it a table keeps the per-tick weight refresh to 5 776
+/// lookups instead of 5 776 `atan2` calls.
+fn build_deco_cell_region_map() -> Vec<u8> {
+    let n = (GRID_N * GRID_N) as usize;
+    let cell = GRID_SPAN / GRID_N as f64;
+    let mut out = Vec::with_capacity(n);
+    for j in 0..n {
+        let col = (j % GRID_N as usize) as f64;
+        let row = (j / GRID_N as usize) as f64;
+        let x = -GRID_SPAN / 2.0 + (col + 0.5) * cell;
+        let z = -GRID_SPAN / 2.0 + (row + 0.5) * cell;
+        out.push(Ecology::region_of(x, z));
+    }
+    out
+}
 /// Two clades whose niche positions are closer than this compete for the
 /// same resources (1-D Gause overlap window).
 pub const NICHE_OVERLAP_THRESHOLD: f64 = 0.15;
@@ -1844,6 +1910,24 @@ pub struct Ecology {
     /// persisted, same contract as the Phase 58 clamp: a restored world runs
     /// the compiled default.
     pub deco_repro_saturate: bool,
+    /// Phase 60 A/B toggle: distribute each DECO kind's carrying budget over
+    /// the four home regions by local food retention. Off = the Phase 59
+    /// world (global budget only). Not persisted (same contract as the Phase
+    /// 58 clamp / Phase 59 mapping arms): a restored world runs the compiled
+    /// default, and the weights below are re-derived from the restored field.
+    pub deco_region_cap: bool,
+    /// Phase 60: per-home-region capacity weights, recomputed at the first
+    /// DECO birth gate of a tick when the arm is on. Pure function of the
+    /// current `deco_env` field; never saved.
+    pub deco_region_weight: [f64; REGION_COUNT as usize],
+    /// Phase 60: Σ of the four region weights (the budget normaliser).
+    pub deco_region_weight_sum: f64,
+    /// Phase 60: tick of the cached weights (stale-check for the per-tick
+    /// on-demand refresh).
+    pub deco_region_weight_tick: u32,
+    /// Phase 60: grid cell → home quadrant, a pure function of the grid
+    /// geometry; rebuilt on construction / restore, never saved.
+    pub deco_cell_region: Vec<u8>,
     /// Phase 45: per-kind clade-isolation telemetry (kind id → rolling
     /// window). Pure observability — not persisted (same contract as
     /// GroupStats); rebuilt from live clades after a restore.
@@ -2068,6 +2152,11 @@ impl Ecology {
             token_value_sign_neutral: crate::culture::TOKEN_VALUE_SIGN_NEUTRAL,
             token_placement_by_value: false,
             deco_repro_saturate: true,
+            deco_region_cap: DECO_REGION_CAP_ON,
+            deco_region_weight: [1.0; REGION_COUNT as usize],
+            deco_region_weight_sum: REGION_COUNT as f64,
+            deco_region_weight_tick: u32::MAX,
+            deco_cell_region: build_deco_cell_region_map(),
             isolation_by_kind: Vec::new(),
             culture_value_on: true,
             dispersal_p: DISPERSAL_P,
@@ -2288,6 +2377,11 @@ impl Ecology {
             token_value_sign_neutral: crate::culture::TOKEN_VALUE_SIGN_NEUTRAL,
             token_placement_by_value: false,
             deco_repro_saturate: true,
+            deco_region_cap: DECO_REGION_CAP_ON,
+            deco_region_weight: [1.0; REGION_COUNT as usize],
+            deco_region_weight_sum: REGION_COUNT as f64,
+            deco_region_weight_tick: u32::MAX,
+            deco_cell_region: build_deco_cell_region_map(),
             isolation_by_kind: Vec::new(),
             culture_value_on: true,
             dispersal_p: DISPERSAL_P,
@@ -3678,6 +3772,82 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         self.deco_repro_saturate = false;
     }
 
+    /// Phase 60 A/B arm: regional DECO carrying capacity ON (the split-trigger
+    /// candidate). Force a refresh at the first birth gate so a world switched
+    /// on mid-run reads the current field, not a stale cache.
+    pub fn deco_region_cap_on(&mut self) {
+        self.deco_region_cap = true;
+        self.deco_region_weight_tick = u32::MAX;
+    }
+
+    /// Phase 60 A/B arm: off = the Phase 59 world (global kind budget only).
+    /// The gate is never reached, so no state is touched and the trajectory
+    /// stays bit-exact with the pre-60 default.
+    pub fn deco_region_cap_off(&mut self) {
+        self.deco_region_cap = false;
+    }
+
+    /// Phase 60: refresh the per-home-region capacity weights from the current
+    /// decomposition field. Mean `deco_env` over habitable cells only; a region
+    /// that rots carcasses faster retains less food, so its weight falls.
+    /// Pure arithmetic + table lookups, zero RNG.
+    fn refresh_deco_region_weights(&mut self) {
+        let nr = REGION_COUNT as usize;
+        let mut sum = [0.0f64; REGION_COUNT as usize];
+        let mut cnt = [0usize; REGION_COUNT as usize];
+        let cells = self.deco_env.len().min(self.deco_cell_region.len());
+        for j in 0..cells {
+            if self.suit[j] <= 0.02 { continue; }
+            let r = self.deco_cell_region[j] as usize;
+            if r >= nr { continue; }
+            sum[r] += self.deco_env[j] as f64;
+            cnt[r] += 1;
+        }
+        let mut wsum = 0.0f64;
+        for r in 0..nr {
+            let mean = if cnt[r] > 0 { sum[r] / cnt[r] as f64 } else { 1.0 };
+            let w = (1.0 + DECO_REGION_CAP_GAIN * (1.0 - mean))
+                .clamp(DECO_REGION_CAP_W_MIN, DECO_REGION_CAP_W_MAX);
+            self.deco_region_weight[r] = w;
+            wsum += w;
+        }
+        self.deco_region_weight_sum = wsum;
+        self.deco_region_weight_tick = self.tick_count;
+    }
+
+    /// Phase 60: one kind's capacity share for one home region. The Phase-49
+    /// budget is partitioned by the region weights, so `Σ_regions cap_r` is
+    /// exactly `kind_budget(kind)` — the guild's total carrying capacity is
+    /// conserved and each species gets its own regional share.
+    fn deco_region_cap_limit(&self, kind: SpeciesKind, region: u8) -> f64 {
+        let budget = self.kind_budget(kind) as f64;
+        let r = (region as usize).min(REGION_COUNT as usize - 1);
+        if self.deco_region_weight_sum > 0.0 {
+            budget * self.deco_region_weight[r] / self.deco_region_weight_sum
+        } else {
+            budget / REGION_COUNT as f64
+        }
+    }
+
+    /// Phase 60: living members of `kind` whose home quadrant is `region`.
+    fn deco_region_count(&self, kind: SpeciesKind, region: u8) -> usize {
+        self.agents.iter()
+            .filter(|a| a.alive && a.kind == kind && a.region == region)
+            .count()
+    }
+
+    /// Phase 60 diagnostic: the cached per-region capacity weights (the values
+    /// the most recent birth gate used).
+    pub fn deco_region_weights(&self) -> [f64; REGION_COUNT as usize] {
+        self.deco_region_weight
+    }
+
+    /// Phase 60 diagnostic: the slot limit for `kind` in one home region —
+    /// `kind_budget × w_r / Σw` (sums to the kind's budget over all regions).
+    pub fn deco_region_cap_for(&self, kind: SpeciesKind, region: u8) -> f64 {
+        self.deco_region_cap_limit(kind, region)
+    }
+
     /// Phase 59: the DECO reproduction threshold for a given efficiency.
     /// Legacy `0.96 × (2 − eff)` up to `DECO_REPRO_SAT_KNEE` (so eff ≥ 1.0
     /// and the 0.48 easy-breed end are unchanged), then the excess is bent
@@ -3973,6 +4143,23 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 self.count_family(root)
             };
             if family_total >= cap { return None; }
+        }
+        // Phase 60: regional carrying capacity for the DECO guild. The kind's
+        // Phase-49 budget is spread over the four home quadrants by local food
+        // retention (refresh at most once per tick, on demand). Refusing the
+        // birth when the child's region holds its share is a slot capacity:
+        // the mother keeps her energy, stays fertile, and the next birth
+        // succeeds as soon as the region loses a member. With the decomposition
+        // field switched off there is no structural food signal, so the
+        // capacity instrument is off too — `deco_resource_env_off()` keeps the
+        // pre-56 world bit-exact.
+        if self.deco_region_cap && self.deco_env_on && self.root_kind(kind) == DECO {
+            if self.deco_region_weight_tick != self.tick_count {
+                self.refresh_deco_region_weights();
+            }
+            let r = Self::region_of(x, z);
+            let limit = self.deco_region_cap_limit(kind, r);
+            if self.deco_region_count(kind, r) as f64 >= limit { return None; }
         }
         let g = match genome {
             Some(g) => g,
@@ -9100,6 +9287,11 @@ impl Ecology {
             token_value_sign_neutral: state.TokenValueSignNeutral,
             token_placement_by_value: false,
             deco_repro_saturate: true,
+            deco_region_cap: DECO_REGION_CAP_ON,
+            deco_region_weight: [1.0; REGION_COUNT as usize],
+            deco_region_weight_sum: REGION_COUNT as f64,
+            deco_region_weight_tick: u32::MAX,
+            deco_cell_region: build_deco_cell_region_map(),
             isolation_by_kind: Vec::new(),
             culture_value_on: state.CultureValueOn,
             // Phase 47: natal dispersal. Pre-v16 archives carry no fields →

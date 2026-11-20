@@ -126,6 +126,9 @@ fn partition_semantics_double_run_roundtrip_and_bite_gain() {
     // replayed Phase 58 mapping — the partition semantics are about the
     // niche axis, not the fertility calibration.
     a.repro_threshold_old_off();
+    // Phase 60: the regional capacity arm is default ON; this fixture replays
+    // the pre-60 old-mapping world, so both Phase 60 switches are off.
+    a.deco_region_cap_off();
     for t in 1..=FORK_DEPTH {
         a.update(0.1, daylight(t));
     }
@@ -206,6 +209,8 @@ fn partition_semantics_double_run_roundtrip_and_bite_gain() {
     // Phase 58 clamp), so a restored copy must be re-armed to keep replaying
     // the Phase 58 mapping.
     restored.repro_threshold_old_off();
+    // Phase 60: the regional capacity arm is not persisted either.
+    restored.deco_region_cap_off();
     assert!(restored.niche_partition, "the partition flag must ride SaveState v18");
     assert_eq!(
         restored.niche_pref_mult(banded.id, grass_cell),
@@ -262,6 +267,7 @@ fn partition_semantics_double_run_roundtrip_and_bite_gain() {
     //     replays the post-fork stretch in lockstep ---
     let mut c = Ecology::from_save_state(a.to_save_state());
     c.repro_threshold_old_off();
+    c.deco_region_cap_off();
     for t in (FORK_DEPTH + 1)..=(FORK_DEPTH + 300) {
         a.update(0.1, daylight(t));
         c.update(0.1, daylight(t));

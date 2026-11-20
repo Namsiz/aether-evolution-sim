@@ -7,7 +7,17 @@
 //! 1.0×max_energy at saturation (an absorbing zero-birth state → one-cohort
 //! ageing → extinction). `REPRO_THRESHOLD_MAX = 0.90` caps the brake.
 //!
-//! PHASE 59 ANCHORS (current; **sixteenth re-baseline** — the saturated DECO
+//! PHASE 60 ANCHORS (current; **seventeenth re-baseline** — the regional DECO
+//! carrying capacity gates DECO births by each kind's share of its home
+//! quadrant, so the default world moves once a region fills (the first visible
+//! effect lands after t=3000; @300/@3000 and the v1 stream stay unchanged).
+//! `deco_region_cap_off()` replays the Phase 59 default bit-exactly.
+//!   seed 20261102 @300  v2 0x651cf47e6d54ca64  (unchanged)
+//!   seed 20261102 @3000 v2 0xbeb50df36733a6e9   (unchanged)
+//!   seed 20261105 @300  v2 0x5b9200b4b88d971a  (unchanged)
+//!   seed 20261102 @300  v1 0xc6c4cdca821c064b  (unchanged)
+//!
+//! PHASE 59 ANCHORS (previous; **sixteenth re-baseline** — the saturated DECO
 //! fertility map. The legacy `0.96×(2−eff)` asked for more than `max_energy`
 //! below eff 0.9583 — an absorbing sterile state that `DECO_MUT_SCALE`
 //! speciation births handed to whole daughter clades. The excess now saturates
