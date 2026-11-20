@@ -1339,6 +1339,18 @@ pub const DECO_REGION_CAP_RENORM_ON: bool = false;
 /// but still misses the "speciation must not fall" bar by 2 events, so the arm
 /// stays off until a 5-seed test can judge that difference.
 pub const DECO_REGION_CAP_FLOOR_ON: bool = false;
+/// Phase 62 sensitivity arm (d): apply candidate (b)'s floor only to kinds
+/// whose own budget is below `2 × speciation_min_side` (16). Every DERIVED
+/// kind has a budget of at most `FORK_BUDGET_GRANT` (20), so the plain floor
+/// lifts every daughter's occupied-region cap above its natural share and the
+/// regional gate stops binding for most of them — the 5-seed re-run shows the
+/// fork rate rising with it (seed 20261107: 7 → 11 forks) and extinctions
+/// rising with that (1 → 8, `research/phase62-report.md`). This arm keeps the
+/// Phase 60 split for the 20-budget first-generation daughters and only
+/// unpinches the 15/11/8-budget grandchildren, isolating "which generation
+/// does the squeezing kill" from "does the floor exist at all". Only
+/// meaningful together with `deco_region_cap_floor`; not persisted.
+pub const DECO_REGION_CAP_FLOOR_SMALL_ON: bool = false;
 
 /// Phase 60: grid cell → home quadrant. Pure geometry (cell centres through
 /// `Ecology::region_of`), built once per world and rebuilt on restore; never
@@ -2031,6 +2043,9 @@ pub struct Ecology {
     /// occupies to at least `min(budget, speciation_min_side)`, so an occupied
     /// quadrant can always hold the split gate's minimum. Not persisted.
     pub deco_region_cap_floor: bool,
+    /// Phase 62 sensitivity arm (d): restrict that floor to kinds with a
+    /// budget below `2 × speciation_min_side`. Not persisted.
+    pub deco_region_cap_floor_small: bool,
     /// Phase 61 candidate (c): renormalise only the derived kinds (a forked
     /// kind's regional split covers the regions it occupies), while the six
     /// ancestor kinds keep the plain Phase 60 four-quadrant split. The root
@@ -2273,6 +2288,7 @@ impl Ecology {
             deco_cell_region: build_deco_cell_region_map(),
             deco_region_cap_renorm: DECO_REGION_CAP_RENORM_ON,
             deco_region_cap_floor: DECO_REGION_CAP_FLOOR_ON,
+            deco_region_cap_floor_small: DECO_REGION_CAP_FLOOR_SMALL_ON,
             deco_region_cap_renorm_daughters: false,
             clade_life: Vec::new(),
             isolation_by_kind: Vec::new(),
@@ -2502,6 +2518,7 @@ impl Ecology {
             deco_cell_region: build_deco_cell_region_map(),
             deco_region_cap_renorm: DECO_REGION_CAP_RENORM_ON,
             deco_region_cap_floor: DECO_REGION_CAP_FLOOR_ON,
+            deco_region_cap_floor_small: DECO_REGION_CAP_FLOOR_SMALL_ON,
             deco_region_cap_renorm_daughters: false,
             clade_life: Vec::new(),
             isolation_by_kind: Vec::new(),
@@ -3926,12 +3943,22 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
     /// `min(budget, speciation_min_side)` slots for the kind that holds them.
     pub fn deco_region_cap_floor_on(&mut self) {
         self.deco_region_cap_floor = true;
+        self.deco_region_cap_floor_small = false;
         self.deco_region_weight_tick = u32::MAX;
     }
 
     /// Phase 61 candidate (b) arm off (the Phase 60 split).
     pub fn deco_region_cap_floor_off(&mut self) {
         self.deco_region_cap_floor = false;
+        self.deco_region_cap_floor_small = false;
+    }
+
+    /// Phase 62 sensitivity arm (d): candidate (b)'s floor, but only for kinds
+    /// whose budget is below `2 × speciation_min_side`. Implies the floor arm.
+    pub fn deco_region_cap_floor_small_on(&mut self) {
+        self.deco_region_cap_floor = true;
+        self.deco_region_cap_floor_small = true;
+        self.deco_region_weight_tick = u32::MAX;
     }
 
     /// Phase 61 candidate (c) arm: renormalise the derived kinds only.
@@ -4003,7 +4030,11 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         } else {
             budget / REGION_COUNT as f64
         };
-        if self.deco_region_cap_floor && self.deco_region_count(kind, r as u8) > 0 {
+        let floor_applies = !self.deco_region_cap_floor_small
+            || (budget as usize) < 2 * self.speciation_min_side;
+        if self.deco_region_cap_floor && floor_applies
+            && self.deco_region_count(kind, r as u8) > 0
+        {
             let floor = budget.min(self.speciation_min_side as f64);
             return natural.max(floor);
         }
@@ -9618,6 +9649,7 @@ impl Ecology {
             deco_cell_region: build_deco_cell_region_map(),
             deco_region_cap_renorm: DECO_REGION_CAP_RENORM_ON,
             deco_region_cap_floor: DECO_REGION_CAP_FLOOR_ON,
+            deco_region_cap_floor_small: DECO_REGION_CAP_FLOOR_SMALL_ON,
             deco_region_cap_renorm_daughters: false,
             clade_life: Vec::new(),
             isolation_by_kind: Vec::new(),

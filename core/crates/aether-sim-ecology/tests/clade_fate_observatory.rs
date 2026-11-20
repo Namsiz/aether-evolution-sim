@@ -152,10 +152,12 @@ fn clade_fate_observation() {
         Some("daughters") => "renormdau",
         _ => "renormdflt",
     };
-    // Phase 61 candidate (b): occupied-region minimum retention share.
+    // Phase 61 candidate (b): occupied-region minimum retention share; Phase 62
+    // adds "small" (floor only for kinds with budget < 2 × speciation_min_side).
     let floor_arm = match env_str("PHASE_CAP_FLOOR").as_deref() {
         Some("on") => "flooron",
         Some("off") => "flooroff",
+        Some("small") => "floorsmall",
         _ => "floordflt",
     };
     // Calibration-sweep tag (Phase 55): parallel arms of the same switch must
@@ -187,6 +189,7 @@ fn clade_fate_observation() {
     if renorm_arm == "renormoff" { eco.deco_region_cap_renorm_off(); }
     if renorm_arm == "renormdau" { eco.deco_region_cap_renorm_daughters_on(); }
     if floor_arm == "flooron" { eco.deco_region_cap_floor_on(); }
+    if floor_arm == "floorsmall" { eco.deco_region_cap_floor_small_on(); }
     if floor_arm == "flooroff" { eco.deco_region_cap_floor_off(); }
     let mut last_events = 0usize;
     eprintln!("=== clade-fate seed {seed} ({ticks} ticks, structure_env={arm}, deco_env={deco_arm}, token_sign={sign_arm}, clamp={clamp_arm}, place={place_arm}, repro={repro_arm}) ===");
