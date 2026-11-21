@@ -122,11 +122,17 @@
 /// v21 → v22 (Phase 57): sign-neutral token value. The sim level gains
 /// `TokenValueSignNeutral` (`#[serde(default)]` → false: a v21 archive lands
 /// on the signed Phase 56 reward, the arm the 200k A/B kept as default).
+/// v22 → v23 (Phase 63): fork-budget growth ledger. The sim level gains
+/// `BudgetGrowthOn` and `KindGrowthGrants` (both `#[serde(default)]` → a v22
+/// archive lands with the arm OFF and no earned slots). The arm is archived
+/// unlike the Phase 61/62 region arms because its output lives in the
+/// persisted `KindBudgets` table: restoring the shares without the switch
+/// would freeze a daughter mid-growth.
 
 use serde::{Deserialize, Serialize};
 
 
-pub const SAVE_STATE_VERSION: u32 = 22;
+pub const SAVE_STATE_VERSION: u32 = 23;
 pub const SAVE_STATE_SCHEMA_NAME: &str = "aether-sim-save-state";
 
 /// DECO selection-pressure mode selector (persisted in SaveState v2).
@@ -1052,6 +1058,17 @@ pub struct SaveState {
     /// Phase 56 world).
     #[serde(default)]
     pub TokenValueSignNeutral: bool,
+    /// Phase 63: fork-budget growth arm (v23). Unlike the Phase 61/62 region
+    /// arms this one mints state (`KindGrowthGrants` moves slots out of the
+    /// parent's share), so the switch rides the archive: a restored world
+    /// must keep growing the same daughters. Pre-v23 archives land on the
+    /// compiled default (off during the 5-seed A/B).
+    #[serde(default)]
+    pub BudgetGrowthOn: bool,
+    /// Phase 63: per-kind slots earned through growth (index = kind id).
+    /// Empty on pre-v23 archives.
+    #[serde(default)]
+    pub KindGrowthGrants: Vec<usize>,
 }
 
 fn default_min_side_legacy() -> usize {

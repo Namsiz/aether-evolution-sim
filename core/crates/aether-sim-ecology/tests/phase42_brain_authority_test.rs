@@ -363,8 +363,8 @@ fn save_v13_roundtrip_continues_bit_exactly() {
     run_ticks(&mut eco, 1, 400);
     let state = eco.to_save_state();
     assert_eq!(state.version, save_state::SAVE_STATE_VERSION);
-    // Phase 57 bumped the schema to v22 (sign-neutral token value).
-    assert_eq!(save_state::SAVE_STATE_VERSION, 22);
+    // Phase 63 bumped the schema to v23 (fork-budget growth ledger).
+    assert_eq!(save_state::SAVE_STATE_VERSION, 23);
     let json = serde_json::to_string(&state).unwrap();
     assert!(json.contains("\"ReplayOn\":true"));
     let mut restored = Ecology::from_save_state(serde_json::from_str(&json).unwrap());

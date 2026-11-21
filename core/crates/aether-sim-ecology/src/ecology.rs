@@ -1067,16 +1067,48 @@ pub const SPECIATION_MIN_SIDE_LEGACY: usize = 2;
 pub const FORK_BUDGET_GRANT: usize = 20;
 /// Floor of a grant AND of the parent's post-grant remainder: a kind with
 /// less than `2 × FORK_BUDGET_MIN` cannot fork again (80 → 60+20 → 45+15 →
-/// 37+8 is the deepest legal chain from 80). Phase 53 raised the floor
-/// 5 → 8: SPECIATION_MIN_SIDE=8 declares a fork only when both sides hold 8
-/// members, but a grant of 5 capped the newborn kind's spawn rate below its
-/// mint-time population — the clade shrank from day one and died young
-/// (200k observation: both grandchildren went extinct despite the niche
-/// minimum distance). The floor and the split gate must agree.
-pub const FORK_BUDGET_MIN: usize = 8;
+/// 34+10 → 24+10 is the deepest legal chain from 80). Phase 53 raised the
+/// floor 5 → 8: SPECIATION_MIN_SIDE=8 declares a fork only when both sides
+/// hold 8 members, but a grant of 5 capped the newborn kind's spawn rate
+/// below its mint-time population — the clade shrank from day one and died
+/// young (200k observation: both grandchildren went extinct despite the
+/// niche minimum distance).
+///
+/// Phase 63 raised it 8 → 10 (`research/phase63-report.md`): an 8-slot floor
+/// declares a fork at 8 members, i.e. exactly at its own budget with no
+/// headroom — Phase 62 showed 13 of 15 daughter extinctions were ≥ 99.6 %
+/// birth-blocked on that share. A 10-slot floor gives the newborn two slots
+/// of headroom; over 5 seeds × 200k it cut extinctions 17 → 10 at a cost of
+/// 31 → 29 forks (both inside the pre-registered bars). 12 and 16 lost too
+/// many forks on the 80k screen (8/15 forks vs 16/15 for 10) and were not
+/// advanced.
+pub const FORK_BUDGET_MIN: usize = 10;
 /// Phase 49: is the fork-budget mechanism active? Default ON; the A/B arm
 /// (`budget_fork_off`) restores the Phase 47 family-shared-cap trajectory.
 pub const BUDGET_FORK_ON: bool = true;
+
+// ----- Phase 63: fork-budget growth (candidate G) ---------------------------
+//
+// Phase 62 §3.3/§4: the daughters die on their OWN kind budget, not on the
+// regional share. A daughter is declared a species at `SPECIATION_MIN_SIDE`
+// members while its grant is usually 8–11 slots, so it is born at (or within
+// 3 of) its own ceiling and spends its whole life at ≥ 99.6 % birth-blocked —
+// a subcritical random walk. Candidate G gives a surviving daughter room to
+// grow by transferring slots out of its parent's share: every
+// `FORK_BUDGET_GROWTH_STEP_TICKS` of survival earns one slot, and the transfer
+// is paid only while the daughter is actually filling what it already holds.
+// The family total stays 80 (parent→child move), so no new biomass is minted.
+/// Phase 63 candidate G default. Arm-only until the 5-seed A/B
+/// (`research/phase63-report.md`) decides; `FORK_BUDGET_GROWTH_ON = true` is
+/// the promotion value after a passing run (its state then rides the save).
+pub const FORK_BUDGET_GROWTH_ON: bool = false;
+/// Survival ticks per earned slot (5 000: a daughter that lives through
+/// Phase 62's 21k–68k extinction window earns +4 … +8 slots).
+pub const FORK_BUDGET_GROWTH_STEP_TICKS: u32 = 5_000;
+/// Ceiling of the earned extra: grant + 8 keeps a grown daughter at most two
+/// minimum viable cohorts (`2 × SPECIATION_MIN_SIDE`), enough to fork once
+/// without returning to the born-at-ceiling state.
+pub const FORK_BUDGET_GROWTH_MAX_EXTRA: usize = 8;
 
 // ----- Phase 16: niche axis + competitive exclusion ---------------------------
 //
@@ -2089,6 +2121,20 @@ pub struct Ecology {
     /// grant). The guild total is conserved: grants move budget parent→child,
     /// extinctions move it back up the fork lineage.
     pub kind_budgets: Vec<usize>,
+    /// Phase 63 candidate G: earn extra share from the parent by surviving
+    /// (`FORK_BUDGET_GROWTH_ON`). Unlike the Phase 61/62 region arms this is
+    /// persisted: the earned shares live in `kind_budgets`, so the switch must
+    /// travel with the world or a restore would freeze the growth midway.
+    pub budget_growth: bool,
+    /// Phase 63: slots this kind has already earned through growth (index =
+    /// kind id; zero for roots and for kinds that never grew). Persisted.
+    pub kind_growth_grants: Vec<usize>,
+    /// Phase 63 candidates M/A: floor of the parent's post-grant remainder and
+    /// floor of the daughter's grant. Both default to `FORK_BUDGET_MIN` (the
+    /// Phase 49 contract); the arms override them per instance and the values
+    /// are not persisted (same contract as the Phase 61 region arms).
+    pub fork_budget_min: usize,
+    pub fork_daughter_min: usize,
     /// Phase 49: minimum members on BOTH sides of a cut for a split to count
     /// as a species (default `SPECIATION_MIN_SIDE_DEFAULT`).
     pub speciation_min_side: usize,
@@ -2304,6 +2350,10 @@ impl Ecology {
             // at fork time).
             budget_fork: BUDGET_FORK_ON,
             kind_budgets,
+            budget_growth: FORK_BUDGET_GROWTH_ON,
+            kind_growth_grants: Vec::new(),
+            fork_budget_min: FORK_BUDGET_MIN,
+            fork_daughter_min: FORK_BUDGET_MIN,
             speciation_min_side: SPECIATION_MIN_SIDE_DEFAULT,
             // Phase 51: niche resource partition ON by default (the preference
             // multiplier is 1.0 for every clade inside the neutral band, so a
@@ -2534,6 +2584,10 @@ impl Ecology {
             // at fork time).
             budget_fork: BUDGET_FORK_ON,
             kind_budgets,
+            budget_growth: FORK_BUDGET_GROWTH_ON,
+            kind_growth_grants: Vec::new(),
+            fork_budget_min: FORK_BUDGET_MIN,
+            fork_daughter_min: FORK_BUDGET_MIN,
             speciation_min_side: SPECIATION_MIN_SIDE_DEFAULT,
             // Phase 51: niche resource partition ON by default (see `Ecology::new`).
             niche_partition: NICHE_PARTITION_ON,
@@ -3822,10 +3876,60 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
     /// and below 2 × FORK_BUDGET_MIN no fork fires at all). Pure function —
     /// unit-tested (budget conservation + recursion floor).
     pub fn fork_budget_grant(parent_budget: usize) -> Option<usize> {
-        if parent_budget < 2 * FORK_BUDGET_MIN { return None; }
-        let g = (parent_budget / 4).clamp(FORK_BUDGET_MIN, FORK_BUDGET_GRANT);
-        if parent_budget - g < FORK_BUDGET_MIN { return None; }
+        Self::fork_budget_grant_with(parent_budget, FORK_BUDGET_MIN, FORK_BUDGET_MIN)
+    }
+
+    /// Phase 63: the Phase 49 grant rule with the two floors as parameters
+    /// (candidates M/A). `min_parent` is the parent's post-grant remainder
+    /// floor, `min_daughter` the daughter's grant floor. With both at
+    /// `FORK_BUDGET_MIN` this is the Phase 49 function above, bit for bit.
+    pub fn fork_budget_grant_with(
+        parent_budget: usize,
+        min_parent: usize,
+        min_daughter: usize,
+    ) -> Option<usize> {
+        if parent_budget < min_parent + min_daughter { return None; }
+        let g = (parent_budget / 4).clamp(min_daughter, FORK_BUDGET_GRANT);
+        if parent_budget - g < min_parent { return None; }
         Some(g)
+    }
+
+    /// Phase 63: the grant this instance's arms currently allow.
+    fn fork_grant_for(&self, parent_budget: usize) -> Option<usize> {
+        Self::fork_budget_grant_with(parent_budget, self.fork_budget_min, self.fork_daughter_min)
+    }
+
+    /// Phase 63 candidate G arm: earn extra share from the parent by
+    /// surviving. Arm-only until the 5-seed A/B decides.
+    pub fn fork_budget_growth_on(&mut self) { self.budget_growth = true; }
+
+    /// Phase 63 candidate G arm off (the Phase 49 fixed grant).
+    pub fn fork_budget_growth_off(&mut self) { self.budget_growth = false; }
+
+    /// Phase 63 candidate M arm: raise BOTH floors (grant and the parent's
+    /// remainder) to `min`. A higher floor takes its extra slots out of the
+    /// parent's remainder, so the guild total is unchanged.
+    pub fn fork_budget_min_set(&mut self, min: usize) {
+        self.fork_budget_min = min;
+        self.fork_daughter_min = min;
+    }
+
+    /// Phase 63 candidate A arm: raise only the daughter's grant floor; the
+    /// parent's remainder floor stays `FORK_BUDGET_MIN`.
+    pub fn fork_budget_daughter_min_set(&mut self, min: usize) {
+        self.fork_daughter_min = min;
+    }
+
+    /// Phase 63: restore the Phase 49 floors (arm reset).
+    pub fn fork_budget_floors_reset(&mut self) {
+        self.fork_budget_min = FORK_BUDGET_MIN;
+        self.fork_daughter_min = FORK_BUDGET_MIN;
+    }
+
+    /// Phase 63 candidate G: how many slots `kind` has earned through growth
+    /// (0 for roots and for kinds that never grew).
+    pub fn kind_growth_granted(&self, kind: SpeciesKind) -> usize {
+        self.kind_growth_grants.get(kind as usize).copied().unwrap_or(0)
     }
 
     /// Phase 49: summed budget share of every kind in `root`'s guild. The
@@ -7633,6 +7737,51 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         best
     }
 
+    /// Phase 63 candidate G: pay earned growth slots to derived kinds that
+    /// have filled the share they already hold. Every
+    /// `FORK_BUDGET_GROWTH_STEP_TICKS` of survival since the fork earns one
+    /// slot (capped at `FORK_BUDGET_GROWTH_MAX_EXTRA`); the slot is a
+    /// parent→child transfer, so `family_budget_total` is invariant — the
+    /// answer to "where does the new budget come from" is "the parent's
+    /// share, never a new pool". Zero RNG draws; runs on the 60-tick
+    /// speciation boundary in registry order.
+    ///
+    fn grow_fork_budgets(&mut self) {
+        if !self.budget_growth || !self.budget_fork { return; }
+        let now = self.tick_count;
+        // (kind, fork tick): one clade record per derived kind, kept as a
+        // fossil after extinction, so the age clock is saved with the world.
+        let mut plan: Vec<(SpeciesKind, u32)> = Vec::new();
+        for (k, def) in self.kinds.defs().iter().enumerate() {
+            if def.parent_kind.is_none() { continue; }
+            if self.kind_budget(k as SpeciesKind) == 0 { continue; }
+            if let Some(c) = self.species_clades.iter().find(|c| c.derived_kind == Some(k as u32)) {
+                plan.push((k as SpeciesKind, c.birth_tick));
+            }
+        }
+        for (kind, birth_tick) in plan {
+            let target = (now.saturating_sub(birth_tick) / FORK_BUDGET_GROWTH_STEP_TICKS) as usize;
+            let target = target.min(FORK_BUDGET_GROWTH_MAX_EXTRA);
+            let earned = self.kind_growth_granted(kind);
+            if target <= earned { continue; }
+            let budget = self.kind_budget(kind);
+            // Pay only a daughter that has filled what it already holds: the
+            // Phase 62 failing daughters sit at >= 99.6 % birth-blocked, i.e.
+            // exactly at their own share. A declining daughter gets nothing
+            // (the parent keeps the slots).
+            if self.count(kind) < budget { continue; }
+            let Some(parent) = self.kind_def(kind).parent_kind else { continue };
+            let parent_budget = self.kind_budget(parent);
+            if parent_budget <= FORK_BUDGET_MIN { continue; }
+            let pay = (target - earned).min(parent_budget - FORK_BUDGET_MIN);
+            if pay == 0 { continue; }
+            self.set_kind_budget(parent, parent_budget - pay);
+            self.set_kind_budget(kind, budget + pay);
+            while self.kind_growth_grants.len() <= kind as usize { self.kind_growth_grants.push(0); }
+            self.kind_growth_grants[kind as usize] = earned + pay;
+        }
+    }
+
     /// Phase 34 generalized speciation detector: every kind's population is
     /// screened on the weighted multi-axis metric (Phase 15-33 ran DECO only).
     /// Fires every SPECIATION_CHECK_TICKS from sample(). Consumes no RNG
@@ -7644,6 +7793,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
     #[inline(never)]
     fn check_speciation(&mut self) {
         let now = self.tick_count;
+        self.grow_fork_budgets();
 
         // (a) rebuild cached member lists + extinction bookkeeping (all
         // clades of all kinds, Phase 34). Family guard: an agent counts
@@ -7944,7 +8094,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             // 2 × FORK_BUDGET_MIN) the split does not fire at all — no
             // carrying capacity, no new species; the lineage stays one kind.
             let grant = if self.budget_fork {
-                match Self::fork_budget_grant(self.kind_budget(family_kind)) {
+                match self.fork_grant_for(self.kind_budget(family_kind)) {
                     Some(g) => {
                         self.set_kind_budget(family_kind, self.kind_budget(family_kind) - g);
                         Some(g)
@@ -8934,6 +9084,8 @@ impl Ecology {
             // Phase 49: fork-budget state (independent per-kind shares).
             BudgetForkOn: self.budget_fork,
             KindBudgets: self.kind_budgets.clone(),
+            BudgetGrowthOn: self.budget_growth,
+            KindGrowthGrants: self.kind_growth_grants.clone(),
             SpeciationMinSide: self.speciation_min_side,
             NichePartitionOn: self.niche_partition,
             NicheGenAccum: self.niche_gen_accum,
@@ -9677,6 +9829,14 @@ impl Ecology {
             } else {
                 state.KindBudgets.clone()
             },
+            // Phase 63: the growth arm's earned shares ride the budget table,
+            // so the switch and the per-kind grant ledger are both restored.
+            // Pre-v23 archives land on the compiled default (off during the
+            // 5-seed A/B) with an empty ledger.
+            budget_growth: state.BudgetGrowthOn,
+            kind_growth_grants: state.KindGrowthGrants.clone(),
+            fork_budget_min: FORK_BUDGET_MIN,
+            fork_daughter_min: FORK_BUDGET_MIN,
             speciation_min_side: state.SpeciationMinSide,
             // Phase 51: niche resource partition. Pre-v18 archives carry no
             // flag → the current default world config (partition ON); the
@@ -9719,3 +9879,173 @@ impl Ecology {
 }
 
 
+
+#[cfg(test)]
+mod phase63_fork_budget_tests {
+    use super::*;
+    use crate::save_state::{SaveState, SAVE_STATE_VERSION};
+
+    /// A DECO-family daughter with `filled` live members and a synthetic
+    /// share carved out of DECO (the fork path itself is covered by the
+    /// real-world runs; here we test the growth transfer in isolation).
+    fn growth_world(seed: u32, filled: usize, root_budget: usize) -> (Ecology, SpeciesKind) {
+        let mut eco = Ecology::new(seed);
+        eco.fork_budget_growth_on();
+        // The regional share is a different gate (Phase 60/61/62); this test
+        // isolates the kind-budget transfer, so keep all members in one place.
+        eco.deco_region_cap_off();
+        let d = {
+            let mut def = eco.kind_def(DECO).clone();
+            def.name = "deco-growth";
+            def.parent_kind = Some(DECO);
+            def.global_cap = 8;
+            eco.register_kind(def)
+        };
+        eco.kind_budgets[DECO as usize] = root_budget;
+        let cell = GRID_SPAN / GRID_N as f64;
+        let j = (0..eco.suit.len()).find(|&j| eco.suit[j] > 0.5).expect("land");
+        let x = -GRID_SPAN / 2.0 + ((j % GRID_N as usize) as f64 + 0.5) * cell;
+        let z = -GRID_SPAN / 2.0 + ((j / GRID_N as usize) as f64 + 0.5) * cell;
+        for i in 0..filled {
+            assert!(eco.spawn_agent(d, x, z).is_some(), "spawn {i} within the daughter share");
+        }
+        let centroid = eco.agents[0].genome.clone();
+        eco.species_clades.push(SpeciesClade {
+            id: 100,
+            parent_id: None,
+            kind: "deco",
+            name: "deco-growth".to_string(),
+            birth_tick: 0,
+            death_tick: None,
+            centroid_genome: centroid,
+            members: Vec::new(),
+            niche_offset: 0.0,
+            kind_id: DECO as u32,
+            derived_kind: Some(d as u32),
+            axes: Vec::new(),
+        });
+        (eco, d)
+    }
+
+    #[test]
+    fn growth_pays_a_filled_daughter_from_the_parents_share() {
+        let (mut eco, d) = growth_world(20261102, 8, 72);
+        eco.tick_count = FORK_BUDGET_GROWTH_STEP_TICKS;
+        eco.grow_fork_budgets();
+        assert_eq!(eco.kind_budget(d), 9);
+        assert_eq!(eco.kind_budget(DECO), 71);
+        assert_eq!(eco.kind_growth_granted(d), 1);
+        assert_eq!(eco.family_budget_total(DECO), 80, "parent→child transfer only");
+    }
+
+    #[test]
+    fn growth_waits_for_the_daughter_to_fill_what_it_holds() {
+        let (mut eco, d) = growth_world(20261102, 7, 72);
+        eco.tick_count = FORK_BUDGET_GROWTH_STEP_TICKS;
+        eco.grow_fork_budgets();
+        assert_eq!(eco.kind_budget(d), 8, "a declining daughter earns nothing");
+        assert_eq!(eco.kind_budget(DECO), 72);
+        // Refill, then one more tier is paid at the next boundary.
+        let (x, z) = (eco.agents[0].x, eco.agents[0].z);
+        assert!(eco.spawn_agent(d, x, z).is_some());
+        eco.grow_fork_budgets();
+        assert_eq!(eco.kind_budget(d), 9);
+        assert_eq!(eco.kind_budget(DECO), 71);
+    }
+
+    #[test]
+    fn growth_stops_at_the_parent_floor_and_at_the_extra_cap() {
+        let (mut eco, d) = growth_world(20261102, 8, FORK_BUDGET_MIN + 1);
+        eco.tick_count = 100_000;
+        eco.grow_fork_budgets();
+        assert_eq!(eco.kind_budget(DECO), FORK_BUDGET_MIN, "parent keeps the floor");
+        assert_eq!(eco.kind_budget(d), 9, "paid only the one slot the parent can spare");
+        assert_eq!(eco.family_budget_total(DECO), 19, "synthetic family total unchanged");
+
+        let (mut eco, d) = growth_world(20261102, 8, 72);
+        eco.tick_count = 1_000_000;
+        eco.grow_fork_budgets();
+        assert_eq!(eco.kind_budget(d), 8 + FORK_BUDGET_GROWTH_MAX_EXTRA);
+        assert_eq!(eco.kind_budget(DECO), 72 - FORK_BUDGET_GROWTH_MAX_EXTRA);
+        assert_eq!(eco.family_budget_total(DECO), 80);
+    }
+
+    #[test]
+    fn growth_never_credits_a_root_kind() {
+        let (mut eco, d) = growth_world(20261102, 8, 72);
+        eco.tick_count = 1_000_000;
+        eco.grow_fork_budgets();
+        assert_eq!(eco.kind_growth_granted(DECO), 0, "roots hold their family share by definition");
+        assert_eq!(eco.kind_budget(DECO), 64);
+        assert_eq!(eco.kind_budget(d), 16);
+        assert_eq!(eco.family_budget_total(DECO), 80);
+    }
+
+    #[test]
+    fn growth_ledger_rides_the_archive_and_pre_v23_lands_off() {
+        let (mut eco, d) = growth_world(20261102, 8, 72);
+        eco.tick_count = FORK_BUDGET_GROWTH_STEP_TICKS;
+        eco.grow_fork_budgets();
+        let mut json = serde_json::to_value(eco.to_save_state()).unwrap();
+        assert_eq!(json["Version"], SAVE_STATE_VERSION);
+        assert_eq!(json["BudgetGrowthOn"], true);
+        assert_eq!(json["KindGrowthGrants"][d as usize], 1);
+        let restored = Ecology::from_save_state(serde_json::from_value::<SaveState>(json.clone()).unwrap());
+        assert!(restored.budget_growth);
+        assert_eq!(restored.kind_budget(d), 9);
+        assert_eq!(restored.kind_growth_granted(d), 1);
+
+        let obj = json.as_object_mut().unwrap();
+        obj.remove("BudgetGrowthOn");
+        obj.remove("KindGrowthGrants");
+        json["Version"] = serde_json::json!(22);
+        let legacy = Ecology::from_save_state(serde_json::from_value::<SaveState>(json).unwrap());
+        assert!(!legacy.budget_growth, "pre-v23 archives land on the compiled default");
+        assert_eq!(legacy.kind_growth_granted(d), 0);
+    }
+
+    #[test]
+    fn phase49_grant_rule_is_bit_exact_and_the_floors_are_parameterised() {
+        for parent in 0..=200usize {
+            let old = if parent < 2 * FORK_BUDGET_MIN {
+                None
+            } else {
+                let g = (parent / 4).clamp(FORK_BUDGET_MIN, FORK_BUDGET_GRANT);
+                if parent - g < FORK_BUDGET_MIN { None } else { Some(g) }
+            };
+            assert_eq!(Ecology::fork_budget_grant(parent), old, "parent {parent}");
+            let m12 = Ecology::fork_budget_grant_with(parent, 12, 12);
+            if let Some(g) = m12 {
+                assert!((12..=FORK_BUDGET_GRANT).contains(&g));
+                assert!(parent - g >= 12);
+            }
+            let a12 = Ecology::fork_budget_grant_with(parent, FORK_BUDGET_MIN, 12);
+            if let Some(g) = a12 {
+                assert!((12..=FORK_BUDGET_GRANT).contains(&g));
+                assert!(parent - g >= FORK_BUDGET_MIN);
+            }
+        }
+        // The arms are distinguishable: 23 slots can fund a 12-slot daughter
+        // while keeping the parent's own floor at 10, but not a symmetric
+        // 12+12 (which needs 24).
+        assert_eq!(Ecology::fork_budget_grant_with(23, FORK_BUDGET_MIN, 12), Some(12));
+        assert_eq!(Ecology::fork_budget_grant_with(23, 12, 12), None);
+    }
+
+    #[test]
+    fn symmetric_floor_shortens_the_fork_chain_without_minting_budget() {
+        let chain = |min: usize| {
+            let mut parent = 80usize;
+            let mut forks = 0;
+            while let Some(g) = Ecology::fork_budget_grant_with(parent, min, min) {
+                parent -= g;
+                forks += 1;
+            }
+            (forks, parent)
+        };
+        assert_eq!(chain(8), (6, 10), "Phase 49/53 chain from 80");
+        assert_eq!(chain(FORK_BUDGET_MIN), (5, 14), "Phase 63 default (10)");
+        assert_eq!(chain(12), (4, 21));
+        assert_eq!(chain(16), (3, 28));
+    }
+}

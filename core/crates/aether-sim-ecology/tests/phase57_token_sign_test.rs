@@ -131,12 +131,13 @@ fn value_ema_sign_follows_the_placement_gain_sign_in_both_arms() {
 fn signed_arm_keeps_the_phase56_anchor_and_the_neutral_arm_is_deterministic() {
     // The arm lost the A/B, so it is off by default and the default world is
     // the Phase 56 one — until Phase 59's sixteenth re-baseline moved the
-    // default trajectory (saturated DECO fertility map) and Phase 60's
-    // seventeenth re-baseline added the regional DECO capacity arm.
+    // default trajectory (saturated DECO fertility map), Phase 60's
+    // seventeenth re-baseline added the regional DECO capacity arm and Phase
+    // 63's eighteenth raised FORK_BUDGET_MIN 8 → 10.
     let mut signed = Ecology::new(20261102);
     run_ticks(&mut signed, 60_000);
-    assert_eq!(signed.checksum(), "0x3272f0e3eaba9250",
-        "default (signed) world at t=60000 (Phase 60 re-baseline)");
+    assert_eq!(signed.checksum(), "0x80f65fa5f642aaf8",
+        "default (signed) world at t=60000 (Phase 63 re-baseline)");
 
     let mut a = Ecology::new(20261102);
     a.token_value_sign_neutral_on();

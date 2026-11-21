@@ -31,6 +31,13 @@
 //! engine-level Phase 61 counters (births, deaths by cause, birth refusals by
 //! gate, mate misses, peak population, extinction tick, mean age/energy at
 //! death) for every clade the world ever booked.
+//!
+//! Phase 63 adds the kind-budget arms (`research/phase63-report.md`):
+//! `PHASE_BUDGET_GROWTH=on` (candidate G: a filled daughter earns one slot per
+//! 5 000 survival ticks out of the parent's share), `PHASE_FORK_MIN=10|12|16`
+//! (candidate M: both fork floors) and `PHASE_FORK_DAUGHTER_MIN=12`
+//! (candidate A: only the daughter's grant floor). The final stderr block also
+//! prints every kind's budget, its growth ledger and the DECO family total.
 
 use aether_sim_ecology::civilization_metrics::{format_line, measure};
 use aether_sim_ecology::ecology::Ecology;
@@ -160,14 +167,25 @@ fn clade_fate_observation() {
         Some("small") => "floorsmall",
         _ => "floordflt",
     };
+    // Phase 63 kind-budget arms: G (growth), M (both fork floors),
+    // A (daughter grant floor only).
+    let growth_arm = match env_str("PHASE_BUDGET_GROWTH").as_deref() {
+        Some("on") => "growthon",
+        Some("off") => "growthoff",
+        _ => "growthdflt",
+    };
+    let fork_min_env = env_str("PHASE_FORK_MIN");
+    let fork_min_arm = fork_min_env.clone().unwrap_or_else(|| "forkmindflt".to_string());
+    let fork_dau_env = env_str("PHASE_FORK_DAUGHTER_MIN");
+    let fork_dau_arm = fork_dau_env.clone().unwrap_or_else(|| "forkdaudflt".to_string());
     // Calibration-sweep tag (Phase 55): parallel arms of the same switch must
     // never overwrite each other's output files.
     let tag = env_str("PHASE_ARM_TAG").unwrap_or_default();
     let suffix = if tag.is_empty() { String::new() } else { format!("_{tag}") };
-    let csv_path = format!("/tmp/clade_fate_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}{suffix}.csv");
-    let tree_path = format!("/tmp/clade_tree_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}{suffix}.csv");
-    let culture_path = format!("/tmp/clade_culture_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}{suffix}.csv");
-    let life_path = format!("/tmp/clade_life_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}{suffix}.csv");
+    let csv_path = format!("/tmp/clade_fate_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}_{growth_arm}_{fork_min_arm}_{fork_dau_arm}{suffix}.csv");
+    let tree_path = format!("/tmp/clade_tree_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}_{growth_arm}_{fork_min_arm}_{fork_dau_arm}{suffix}.csv");
+    let culture_path = format!("/tmp/clade_culture_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}_{growth_arm}_{fork_min_arm}_{fork_dau_arm}{suffix}.csv");
+    let life_path = format!("/tmp/clade_life_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}_{growth_arm}_{fork_min_arm}_{fork_dau_arm}{suffix}.csv");
     let mut csv = String::from(
         "t,pop,herb,pred,scav,omn,fish,deco,clades_live,clades_total,events,tokens,bearers,groups,levels,authorities,grass_mean,grass_var,env_mean,env_var,structs,deco_r0,deco_r1,deco_r2,deco_r3,structs_r0,structs_r1,structs_r2,structs_r3,denv_mean,denv_var\n",
     );
@@ -191,6 +209,14 @@ fn clade_fate_observation() {
     if floor_arm == "flooron" { eco.deco_region_cap_floor_on(); }
     if floor_arm == "floorsmall" { eco.deco_region_cap_floor_small_on(); }
     if floor_arm == "flooroff" { eco.deco_region_cap_floor_off(); }
+    if growth_arm == "growthon" { eco.fork_budget_growth_on(); }
+    if growth_arm == "growthoff" { eco.fork_budget_growth_off(); }
+    if let Some(v) = &fork_min_env {
+        if let Ok(m) = v.trim().parse::<usize>() { eco.fork_budget_min_set(m); }
+    }
+    if let Some(v) = &fork_dau_env {
+        if let Ok(m) = v.trim().parse::<usize>() { eco.fork_budget_daughter_min_set(m); }
+    }
     let mut last_events = 0usize;
     eprintln!("=== clade-fate seed {seed} ({ticks} ticks, structure_env={arm}, deco_env={deco_arm}, token_sign={sign_arm}, clamp={clamp_arm}, place={place_arm}, repro={repro_arm}) ===");
     for t in 1..=ticks {
@@ -431,4 +457,16 @@ fn clade_fate_observation() {
         "=== clade-fate done: clades={} events={} csv={csv_path} tree={tree_path} culture={culture_path} life={life_path} ===",
         eco.species_clades().len(), last_events
     );
+    // Phase 63: end-state kind shares (the growth arm moves slots
+    // parent→child, so the DECO family total must stay 80).
+    for k in 0..eco.kinds.len() {
+        let name = eco.kind_name(k as aether_sim_ecology::ecology::SpeciesKind);
+        eprintln!(
+            "  [budget] kind={k} name={name} budget={} growth={} parent={:?} family_total={}",
+            eco.kind_budget(k as aether_sim_ecology::ecology::SpeciesKind),
+            eco.kind_growth_granted(k as aether_sim_ecology::ecology::SpeciesKind),
+            eco.kind_def(k as aether_sim_ecology::ecology::SpeciesKind).parent_kind,
+            eco.family_budget_total(aether_sim_ecology::ecology::DECO),
+        );
+    }
 }

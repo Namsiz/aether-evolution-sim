@@ -25,18 +25,19 @@ fn grant_is_quarter_clamped_with_floor() {
     assert_eq!(Ecology::fork_budget_grant(80), Some(20));
     // 40 → 10, parent keeps 30.
     assert_eq!(Ecology::fork_budget_grant(40), Some(10));
-    // 16 → clamped up to the floor 8, parent keeps exactly 8 (the boundary
-    // case: Phase 53 raised the floor to agree with SPECIATION_MIN_SIDE=8).
-    assert_eq!(Ecology::fork_budget_grant(16), Some(8));
+    // 20 → clamped up to the floor (Phase 63: 10), parent keeps exactly 10.
+    // An 8-slot grant at the Phase 53 floor was exactly the newborn cohort,
+    // i.e. zero headroom; the 5-seed A/B raised it to 10.
+    assert_eq!(Ecology::fork_budget_grant(20), Some(FORK_BUDGET_MIN));
     // Below 2 × floor no fork is legal — the recursion terminates.
     assert_eq!(Ecology::fork_budget_grant(FORK_BUDGET_MIN * 2 - 1), None);
-    assert_eq!(Ecology::fork_budget_grant(10), None);
+    assert_eq!(Ecology::fork_budget_grant(FORK_BUDGET_MIN), None);
     assert_eq!(Ecology::fork_budget_grant(0), None);
 }
 
 #[test]
 fn recursive_fork_chain_conserves_the_guild_total() {
-    // 80 → 60+20 → 45+15 → 15+5: the deepest legal chain from 80.
+    // 80 → 60+20 → 45+15 → 34+10 → 24+10: the deepest legal chain from 80.
     let mut parent = 80usize;
     let mut total = 80usize;
     let mut depth = 0;
