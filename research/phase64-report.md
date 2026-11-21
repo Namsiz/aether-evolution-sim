@@ -227,7 +227,7 @@ seed 20261110 / M10 跑两次（`p64_m10_10` 与 `p64_m10_10b`，不同 tag）�
 
 ### 5.1 回退了什么
 
-- `FORK_BUDGET_MIN: usize 10 → 8`（`core/crates/aether-sim-ecology/src/ecology.rs:1085`），默认世界的分叉链回到 Phase 49/53 的 80 → 20+60 → 15+45 → 11+34 → 8+26 → 8+18 → 8+10（6 次分叉）。
+- `FORK_BUDGET_MIN: usize 10 → 8`（`core/crates/aether-sim-ecology/src/ecology.rs:1071-1089`），默认世界的分叉链回到 Phase 49/53 的 80 → 20+60 → 15+45 → 11+34 → 8+26 → 8+18 → 8+10（6 次分叉）。
 - 默认轨迹回到 Phase 62 世界；**第十九次 re-baseline，全锚点回到 Phase 62 值**（§6）。
 - M10 保留为 `PHASE_FORK_MIN=10` 环境臂，代码路径与单元测试（`chain(10) = (5, 14)`）保留。
 
@@ -265,9 +265,13 @@ floor 8 就是 Phase 49/53 的默认值，所以默认世界的轨迹应当**逐
 | 测试 | 内容 | 结果 |
 |---|---|---|
 | 本期外部双跑（200k） | seed 20261110 / M10 跑两次：stderr 全部 `[split]/[fate]/[budget]` 行、`clade_fate` 与 `clade_life` CSV 逐字节相同 | ✅ |
-| `phase63_kind_budget_test::default_world_double_run_and_roundtrip_is_bit_exact`（ignored） | 默认世界（= floor 8）双跑 60k + 存档往返 + 1 200 tick 锁步；`family_budget_total(DECO) = 80` | ✅ |
-| `phase62_floor_small_test::floor_arm_double_run_and_roundtrip_is_bit_exact`（ignored） | floor 臂双跑 + 往返 60k + 1 200 | ✅ |
-| 其余定向慢测（phase56/57/59/60/61 的 ignored 臂） | 见 §6 锚点表 | ✅ |
+| `phase63_kind_budget_test::default_world_double_run_and_roundtrip_is_bit_exact`（ignored） | 默认世界（= floor 8）双跑 60k + 存档往返 + 1 200 tick 锁步；`family_budget_total(DECO) = 80` | ✅ 867 s |
+| `phase62_floor_small_test::floor_arm_double_run_and_roundtrip_is_bit_exact`（ignored） | floor 臂双跑 + 往返 60k + 1 200 | ✅ 1 068 s |
+| `phase60_region_capacity_test`（2 个 ignored） | OFF 臂回放 `0xde2c…`；ON 臂双跑 + 往返 | ✅ 1 050 s |
+| `phase61_region_renorm_test`（2 个 ignored） | 默认臂 @60000 = `0x3272f0e3eaba9250`；ON 臂双跑 + 往返 | ✅ 314 s / 1 029 s |
+| `phase56_deco_resource_test`（2 个 ignored） | OFF 臂回放 `0x29e3…`；ON 臂双跑 + 往返；默认臂 @60000 = `0x3272…` | ✅ 232 s / 965 s |
+| `phase57_token_sign_test`（1 ignored） | signed @60000 = `0x3272…`；neutral 双跑 = `0xf18f…` | ✅ 918 s |
+| `phase59_repro_saturation_test`（1 ignored） | 旧映射 + region-cap off @60000 = `0x4428…` | ✅ 527 s |
 
 SaveState **v23** 不变；`fork_budget_min` / `fork_daughter_min` 仍不入档（读档后取编译默认 8）。v23 档案里若是 M10 世界（kind 预算 10/24/14 链），读回后保持其自身的 kind 预算，新的 8 地板只作用于之后的 fork——与 Phase 63 记录的反向语义一致。
 
@@ -275,7 +279,7 @@ SaveState **v23** 不变；`fork_budget_min` / `fork_daughter_min` 仍不入档�
 
 ### 8.1 构建
 
-- `rustc 1.99.1 (58cf8f9c3 2026-10-13)`（`living/build.py` 现已在构建日志打印，见 `living/build.py:29-33`）。
+- `rustc 1.99.1 (58cf8f9c3 2026-10-13)`（`living/build.py` 现已在构建日志打印，见 `living/build.py:35-37`）。
 - `living/build.py` 走 `wasm-release`（opt-level=z + fat LTO + panic=abort + strip）。
 - **本期新产物：826 127 B，sha256 `d1fb0d9558a904dc8b5a947647191bbf577c92bac5ce614b38e601dd7357130b`**（`ecology-sim.wasm` 与 `ecology-sim-v2.wasm` 相同）。
 
@@ -297,23 +301,50 @@ SaveState **v23** 不变；`fork_budget_min` / `fork_daughter_min` 仍不入档�
 
 三轮全部 < 16 ms；新旧在噪声内相当（差 ≤ 0.03 ms）。旧产物选 Phase 62 的 823 798 B 而不是 Phase 63 的 924 347 B，因为后者不可由任何已记录配置复现，作为性能基线没有意义。
 
-## 9. 验收
+## 9. 验收逐条
 
 | # | 验收 | 结果 |
 |---|---|---|
-| 1 | 预注册（seed 规则/判据/决策，跑前单独 commit） | ✅ `7b3f61b` |
-| 2 | 10 臂数据表 + 决策 | ✅ §3/§6（P1 0.867 败 → 回退） |
-| 3 | 回退后锚点恢复 Phase 62 值 | ✅ §7（测试实测） |
-| 4 | 双跑 bit-exact；全量 0 失败 | ✅ 定向测试全绿（golden 6/6、phase61 7/7、phase63 8/8、phase56 4/4） |
-| 5 | wasm <16ms 三次 + rustc 版本 | ✅ §8 + 实测 |
-| 6 | 报告 | 本文件 |
+| 1 | 预注册段落（新 seed 选择规则 + 判据 + 决策规则），跑前单独 commit | ✅ §1，提交 `7b3f61b`（12:38:15）；第一个臂在之后启动，运行期间 §1 未改 |
+| 2 | 10 臂数据表 + 10-seed 合并总表 | ✅ §3（10 臂）与 §4（10-seed 合并） |
+| 3 | 决策（M10 保留/回退，含理由） | ✅ §5：P1/P2 双败 → 回退 `FORK_BUDGET_MIN = 8` |
+| 4 | 第十九次 re-baseline 全锚点更新 | ✅ §6：@60000 回到 `0x3272f0e3eaba9250`；@300/@3000/@30000 及全部臂锚点不变 |
+| 5 | 双跑 bit-exact；全 workspace 0 失败 | ✅ §2.3（外部 200k 双跑）、§7（10 个定向慢测全过）；全 workspace **316 passed / 0 failed / 28 ignored**（61 个测试二进制） |
+| 6 | wasm < 16 ms 三次（同会话交错 A/B + rustc 版本） | ✅ §8.3：10.56 / 10.56 / 10.57 ms；rustc 1.99.1 |
+| 7 | 报告 `research/phase64-report.md` | ✅ 本文件 |
 
-## 10. Phase 65 遗留
+## 10. 改动文件
 
-1. **M10 的失败模式已定位**：灭绝收益是 seed 池特征。任何未来「预算/容量」类提案都必须用**新 seed 池**做 out-of-sample，且预注册 P1/P2 都要有 out-of-sample 证据——这条纪律现在是项目标准。
-2. **20261114 的根灭绝**：M10 下根族在 t=73.7k 整体灭绝（新 seed 首例）——floor 抬高会把世界重构成「更浅链 + 更厚根」，某些 seed 上反而更脆。Phase 65 可做「floor 对根族生存的影响」专项。
-3. **建支即失稳**（Phase 63 §10.2）仍未解；可逆分叉/宽限期设计仍是候选。
-4. **C 臂（A10/A12）**：Phase 63 §10.4 建议的「A10/A12 与 M10 直接对打」未做；在新 seed 上可能值得一试，但必须先预注册 out-of-sample 协议。
-5. **wasm 产物管理**：Phase 63 的 profile 错误说明「提交前用 `cargo build --profile wasm-release` 重建 + 记录 rustc」必须成为 build.py 的默认行为（本期已加 rustc 打印，profile 已是默认，待验证一次重建即提交产物）。
+### 核心
+- `core/crates/aether-sim-ecology/src/ecology.rs`
+  - `:1071-1089`：`FORK_BUDGET_MIN = 8`（第十九次 re-baseline 的唯一默认值变更；文档记录 Phase 63 的 8→10 与 Phase 64 的 out-of-sample 否定）
+  - `:3875-3878`：`fork_budget_grant` 的链注释回到 floor 8（80 → 60+20 → 45+15 → 34+11 → 26+8）
+  - `:9955-9962`：`growth_stops_at_the_parent_floor_and_at_the_extra_cap` 的 family total 改为 floor 参数化（`(FORK_BUDGET_MIN + 1) + 8`）
+  - `:10052`：`chain(FORK_BUDGET_MIN) = (6, 10)`；新增 `chain(10) = (5, 14)` 作为 M10 臂契约
+- `core/crates/aether-sim-ecology/tests/phase63_kind_budget_test.rs`
+  - `:30-45`：默认链回到 floor 8（新增 34→8、24→8、18→8 与 15→None 断言）
+  - `:110-113`：默认世界双跑注释（M10 已回退）
 
----
+### 断言与文档
+- `tests/phase49_budget_return_test.rs:26-43`：floor 8 的 grant 注释与链注释
+- `tests/phase56_deco_resource_test.rs:262-268`：默认臂 @60000 锚点 → `0x3272f0e3eaba9250`
+- `tests/phase57_token_sign_test.rs:133-140`：signed 臂 @60000 锚点 → `0x3272f0e3eaba9250`
+- `tests/phase61_region_renorm_test.rs:172-177`：renorm-off 回放锚点 → `0x3272f0e3eaba9250`
+
+### 构建与产物
+- `living/build.py:35-37`：构建日志打印 `rustc --version`
+- `living/ecology-sim.wasm`、`living/ecology-sim-v2.wasm`：**826 127 B**，sha256 `d1fb0d9558a904dc8b5a947647191bbf577c92bac5ce614b38e601dd7357130b`（同工具链可复现基线）
+- `research/phase64-report.md`（本文件；§1 单独提交 `7b3f61b`）
+
+### 临时（不入仓，已被容器清理）
+- `/tmp/p64/*.log`、`/tmp/p64/csv/`、`/tmp/clade_{fate,tree,culture,life}_*_p64_*.csv`、`/tmp/p64/{old_phase62,phase63,new_phase64}.wasm`、`/tmp/p64/wt63` 工作树、`~/.p64/fulltest.log`、`examples/_tmp_p64_anchor.rs`（锚点实测后删除）。
+
+## 11. Phase 65 遗留
+
+1. **A10 是唯一还没被分离的臂**：本期证明 M10 的支付方代价是真实的——floor 10 每次 fork 多从父方抽 2 槽，seed 20261114 上直接把 DECO 根支抽死（t=73 740，peak 60）。`PHASE_FORK_DAUGHTER_MIN=10`（父 floor 仍 8）能只给女儿容量、不动父方剩余，必须在同一套“全新 seed + 预注册”协议下测，不能回 5-seed 旧池挑。
+2. **5 seed 的判定力不足已量化**：本池 OFF 灭绝 19 起（单 seed 3–12），M10 的臂效应（−3…+2）与 seed 方差同量级。Phase 65 若继续做 A/B，应预注册 ≥8 seed 或成对 bootstrap，并在预注册里写明最小可检测效应。
+3. **根支出局后的预算搁浅**：seed 20261114（M10）与 20261112（两臂）的 DECO 根支灭绝后，`family total` 仍是 80，但根持有的 60–72 槽没有任何再分配对象，整个行实际只在 12–20 槽上运行。需要一条“根灭绝时预算回到族池/按存活份额重分配”的规则；否则 ADR 里的守恒不变量只是账面成立。
+4. **wasm 构建纪律**：本期证明 Phase 63 的 924 347 B 不可复现（§8.2）。建议在 `living/build.py` 之外加一步“重建 sha 必须等于 `git show HEAD:living/ecology-sim.wasm` 的 sha”，并写进 Phase 报告模板；否则下一期又会把未记录配置的产物当基线。
+5. **建支即失稳在新池 0 起**（38 起定因里没有 `peak ≤ 12 ∧ 两闸 0 ∧ <10k`）：Phase 63 §10.2 的问题没有在新池重现，保留观察，不要据此认为它已消失（样本 5 seed）。
+6. **SaveState v23 仍为一个默认 OFF 的 growth 臂付费**：G 臂连续两期没有正面证据；若 Phase 65 仍不用它，可单独规划回 v22 的破坏性迁移。
+7. **非 DECO 支系的连带效应**：seed 20261112 的 fish 灭绝时刻（144 600 → 75 300）与 seed 20261115 的 scav 灭绝都表明 floor 会通过资源轨迹改写无关支系。后续任何 floor 提案都应报告“非目标族的灭绝变化”，而不只报 DECO。
