@@ -297,49 +297,6 @@ SaveState **v23** 不变；`fork_budget_min` / `fork_daughter_min` 仍不入档�
 
 三轮全部 < 16 ms；新旧在噪声内相当（差 ≤ 0.03 ms）。旧产物选 Phase 62 的 823 798 B 而不是 Phase 63 的 924 347 B，因为后者不可由任何已记录配置复现，作为性能基线没有意义。
 
-## 4. 预注册判据
-
-| 判据 | 门槛 | 实测 | 结果 |
-|---|---|---|---|
-| P1 分化 | `Σ_M10 ≥ 0.90 × Σ_off` | 26 / 30 = **0.867** | ❌ **败** |
-| P2 灭绝 | `Σ_M10 ≤ 0.75 × Σ_off` 且反向 ≤ 2/5 | 19 / 19 = **1.000**；反向 2 个（20261114：5→7；20261115：5→6） | ❌ 败 |
-
-**P1 与 P2 同时失败。** Phase 63 的核心依据（灭绝 17→10）在全新 seed 上没有复现：灭绝完全持平（19→19），分化反而下降 13%（30→26，越过 10% 容差）。
-
-## 5. 灭绝定因（新 seed）
-
-`analysis.txt` 逐起分类（口径同 Phase 61/62）：20 起 OFF 灭绝中 16 起容量饥饿 / 4 起竞争排除；M10 的 19 起中 15 / 4。`full ≥ 0.99` 仍是绝大多数（15 起 OFF、13 起 M10）——**容量饥饿的形态在新 seed 上再次占主导**，M10 的 2 槽余量不足以改变它。
-
-新观察：20261114 的 M10 臂把根族 DECO 在 t=73 740 整体灭绝（根预算 60、peak 60、`full 0.996`），这是 5 新 seed 里唯一一次根灭绝；说明 floor 抬高会以「更浅的链 + 更厚的根」重构世界，某些 seed 上反而把根族推到悬崖。
-
-## 6. 决策（预注册 §1.5 第 3 条）
-
-**P1 败 → 回退 `FORK_BUDGET_MIN = 8`（第十九次 re-baseline，全锚点更新）。**
-
-- `FORK_BUDGET_MIN: usize = 8`；M10 保留为 `PHASE_FORK_MIN=10` 环境臂。
-- 结论：**M10 的灭绝收益不可复现**（Phase 63 的 17→10 是 seed 池特征，不是机制效应）；分化代价在 out-of-sample 上越界（−13%）。
-- 保留 `fork_budget_min` / `fork_daughter_min` 的运行期字段与 setter（Phase 63 的 A/G 臂代码不删，`PHASE_BUDGET_GROWTH` 等开关保留为实验路径）。
-
-## 7. 锚点（第十九次 re-baseline）
-
-回退到 floor 8 后，默认世界轨迹回到 Phase 62 世界——**所有 Phase 62 锚点重新生效**：
-
-| 锚点 | Phase 63 | **Phase 64（回退后）** |
-|---|---|---|
-| @300 | 不变 | **不变** `0x651cf47e6d54ca64` |
-| @3000 | 不变 | **不变** `0xbeb50df36733a6e9` |
-| @30000 | 不变 | **不变** `0x42e6da39caeecb24` |
-| @60000 | `0x80f65fa5f642aaf8` | **`0x3272f0e3eaba9250`**（= Phase 62） |
-| 其余 Phase 60 表锚点 | — | **全部恢复 Phase 62 值** |
-
-实测：`phase31_golden_regression` 6/6、`phase61_region_renorm_test` 7/7（含 `renorm_off_replays_the_phase60_default_anchor` = `0x3272…`）、`phase63_kind_budget_test` 8/8（floor 链断言已更新为 8 链）。SaveState：v23 不变（`BudgetGrowthOn`/`KindGrowthGrants` 字段保留，默认 false/空表）。
-
-## 8. wasm 与工具链（重要发现）
-
-- **Phase 63 提交的 924 347 B 产物是错误构建**：子代理对比函数数与 code 段后发现它不符合 `wasm-release`（opt-level=z）的特征，反而像 `--release`（opt-level 3）。用正确的 `wasm-release` 重建，当前源码产物 = **826 127 B**（Phase 62 正确产物 823 798 B + Phase 63/64 代码增量 ≈ +2.3 KB，量级合理）。
-- 本期修正：`living/build.py` 在构建日志打印 `rustc --version`（rustc 1.99.1），防止跨工具链误读；`living/ecology-sim.wasm` 用正确 profile 重建并提交。
-- 同会话交错 A/B 三次：见验收（全部 < 16 ms）。
-
 ## 9. 验收
 
 | # | 验收 | 结果 |
