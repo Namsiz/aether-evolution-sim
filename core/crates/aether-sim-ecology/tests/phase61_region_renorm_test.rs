@@ -173,9 +173,9 @@ fn renorm_off_replays_the_phase60_default_anchor() {
     let mut eco = Ecology::new(20261102);
     eco.deco_region_cap_renorm_off();
     run_ticks(&mut eco, 60_000);
-    assert_eq!(eco.checksum(), "0x80f65fa5f642aaf8",
-        "Phase 61 OFF: the Phase 63 default world at t=60000 must be bit-exact \
-         (telemetry must not touch the trajectory; 0x3272… is the Phase 60/62 world)");
+    assert_eq!(eco.checksum(), "0x3272f0e3eaba9250",
+        "Phase 61 OFF: the Phase 64 default world (floor 8 again) at t=60000 \
+         must be bit-exact; 0x80f6… was Phase 63's floor-10 world");
 }
 
 #[test]

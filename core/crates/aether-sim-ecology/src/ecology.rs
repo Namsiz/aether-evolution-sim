@@ -1067,22 +1067,26 @@ pub const SPECIATION_MIN_SIDE_LEGACY: usize = 2;
 pub const FORK_BUDGET_GRANT: usize = 20;
 /// Floor of a grant AND of the parent's post-grant remainder: a kind with
 /// less than `2 × FORK_BUDGET_MIN` cannot fork again (80 → 60+20 → 45+15 →
-/// 34+10 → 24+10 is the deepest legal chain from 80). Phase 53 raised the
-/// floor 5 → 8: SPECIATION_MIN_SIDE=8 declares a fork only when both sides
-/// hold 8 members, but a grant of 5 capped the newborn kind's spawn rate
-/// below its mint-time population — the clade shrank from day one and died
-/// young (200k observation: both grandchildren went extinct despite the
+/// 34+11 → 26+8 → 18+8 → 10+8 is the deepest legal chain from 80). Phase 53
+/// raised the floor 5 → 8: SPECIATION_MIN_SIDE=8 declares a fork only when
+/// both sides hold 8 members, but a grant of 5 capped the newborn kind's spawn
+/// rate below its mint-time population — the clade shrank from day one and
+/// died young (200k observation: both grandchildren went extinct despite the
 /// niche minimum distance).
 ///
 /// Phase 63 raised it 8 → 10 (`research/phase63-report.md`): an 8-slot floor
 /// declares a fork at 8 members, i.e. exactly at its own budget with no
-/// headroom — Phase 62 showed 13 of 15 daughter extinctions were ≥ 99.6 %
-/// birth-blocked on that share. A 10-slot floor gives the newborn two slots
-/// of headroom; over 5 seeds × 200k it cut extinctions 17 → 10 at a cost of
-/// 31 → 29 forks (both inside the pre-registered bars). 12 and 16 lost too
-/// many forks on the 80k screen (8/15 forks vs 16/15 for 10) and were not
-/// advanced.
-pub const FORK_BUDGET_MIN: usize = 10;
+/// headroom, and 13 of 15 daughter extinctions were ≥ 99.6 % birth-blocked on
+/// that share. On the Phase 57–62 seed pool the 10-slot floor cut extinctions
+/// 17 → 10 at a cost of 31 → 29 forks.
+///
+/// Phase 64 re-ran exactly that comparison on five seeds that had never
+/// entered a verdict (`research/phase64-report.md`): forks 30 → 26
+/// (R = 0.867, bar 0.90) and extinctions 19 → 19 (bar 0.75; two of the five
+/// seeds reversed). The extinction win did not survive out of sample, so the
+/// floor is back to 8 — the nineteenth re-baseline. 10 remains reachable as
+/// the `PHASE_FORK_MIN=10` arm.
+pub const FORK_BUDGET_MIN: usize = 8;
 /// Phase 49: is the fork-budget mechanism active? Default ON; the A/B arm
 /// (`budget_fork_off`) restores the Phase 47 family-shared-cap trajectory.
 pub const BUDGET_FORK_ON: bool = true;
@@ -3872,9 +3876,9 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
     /// Phase 49: how much budget a fork carves out of `parent_budget`, or
     /// `None` when the parent cannot afford a fork. Grant = a quarter of the
     /// parent's share, clamped to `[FORK_BUDGET_MIN, FORK_BUDGET_GRANT]`; the
-    /// parent must keep at least `FORK_BUDGET_MIN` (80 → 60+20 → 45+15 → 15+5,
-    /// and below 2 × FORK_BUDGET_MIN no fork fires at all). Pure function —
-    /// unit-tested (budget conservation + recursion floor).
+    /// parent must keep at least `FORK_BUDGET_MIN` (80 → 60+20 → 45+15 →
+    /// 34+11 → 26+8, and below 2 × FORK_BUDGET_MIN no fork fires at all).
+    /// Pure function — unit-tested (budget conservation + recursion floor).
     pub fn fork_budget_grant(parent_budget: usize) -> Option<usize> {
         Self::fork_budget_grant_with(parent_budget, FORK_BUDGET_MIN, FORK_BUDGET_MIN)
     }
@@ -9960,7 +9964,8 @@ mod phase63_fork_budget_tests {
         eco.grow_fork_budgets();
         assert_eq!(eco.kind_budget(DECO), FORK_BUDGET_MIN, "parent keeps the floor");
         assert_eq!(eco.kind_budget(d), 9, "paid only the one slot the parent can spare");
-        assert_eq!(eco.family_budget_total(DECO), 19, "synthetic family total unchanged");
+        assert_eq!(eco.family_budget_total(DECO), (FORK_BUDGET_MIN + 1) + 8,
+            "synthetic family total unchanged");
 
         let (mut eco, d) = growth_world(20261102, 8, 72);
         eco.tick_count = 1_000_000;
@@ -10026,7 +10031,7 @@ mod phase63_fork_budget_tests {
             }
         }
         // The arms are distinguishable: 23 slots can fund a 12-slot daughter
-        // while keeping the parent's own floor at 10, but not a symmetric
+        // while keeping the parent's own floor at 8, but not a symmetric
         // 12+12 (which needs 24).
         assert_eq!(Ecology::fork_budget_grant_with(23, FORK_BUDGET_MIN, 12), Some(12));
         assert_eq!(Ecology::fork_budget_grant_with(23, 12, 12), None);
@@ -10044,7 +10049,8 @@ mod phase63_fork_budget_tests {
             (forks, parent)
         };
         assert_eq!(chain(8), (6, 10), "Phase 49/53 chain from 80");
-        assert_eq!(chain(FORK_BUDGET_MIN), (5, 14), "Phase 63 default (10)");
+        assert_eq!(chain(FORK_BUDGET_MIN), (6, 10), "Phase 64 default (8)");
+        assert_eq!(chain(10), (5, 14), "Phase 63's floor, now the M10 arm");
         assert_eq!(chain(12), (4, 21));
         assert_eq!(chain(16), (3, 28));
     }

@@ -259,11 +259,11 @@ fn default_arm_anchor_at_60000_is_the_phase56_trajectory() {
     // default, so the default world moves again (0xde2c… is the
     // `deco_region_cap_off()` arm, pinned in phase60_region_capacity_test).
     //
-    // Phase 63 (re-baseline 18): FORK_BUDGET_MIN 8 → 10 (the 5-seed M10
-    // verdict) changes every fork grant from the first split on;
-    // 0x3272f0e3eaba9250 is the Phase 60/61/62 world.
+    // Phase 63 (re-baseline 18) raised FORK_BUDGET_MIN 8 → 10, and Phase 64
+    // (re-baseline 19) reverted it after the out-of-sample run failed, so the
+    // default world is the Phase 60/61/62 trajectory again.
     let mut eco = Ecology::new(20261102);
     run_ticks(&mut eco, 60_000);
-    assert_eq!(eco.checksum(), "0x80f65fa5f642aaf8",
-        "default arm (Phase 63 world) at t=60000");
+    assert_eq!(eco.checksum(), "0x3272f0e3eaba9250",
+        "default arm (Phase 64 = Phase 62 world) at t=60000");
 }

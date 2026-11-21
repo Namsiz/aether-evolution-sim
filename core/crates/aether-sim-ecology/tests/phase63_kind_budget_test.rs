@@ -30,14 +30,16 @@ fn run_ticks(eco: &mut Ecology, from: u32, to: u32) {
 
 #[test]
 fn the_default_world_keeps_the_phase49_grant_rule() {
-    // The Phase 63 chain from a DECO root: 80 → 20 + 60 → 15 + 45 → 11 + 34
-    // → 10 + 24 → 10 + 14 (the floor is the pre-registered M10 winner).
+    // Phase 64 reverted the floor to the Phase 49/53 chain after the
+    // out-of-sample run (`research/phase64-report.md`): from a DECO root,
+    // 80 → 20 + 60 → 15 + 45 → 11 + 34 → 8 + 26 → 8 + 18 → 8 + 10.
     assert_eq!(Ecology::fork_budget_grant(80), Some(20));
     assert_eq!(Ecology::fork_budget_grant(60), Some(15));
     assert_eq!(Ecology::fork_budget_grant(45), Some(11));
-    assert_eq!(Ecology::fork_budget_grant(34), Some(10));
-    assert_eq!(Ecology::fork_budget_grant(24), Some(10));
-    assert_eq!(Ecology::fork_budget_grant(19), None, "below 2 × FORK_BUDGET_MIN");
+    assert_eq!(Ecology::fork_budget_grant(34), Some(8));
+    assert_eq!(Ecology::fork_budget_grant(24), Some(8));
+    assert_eq!(Ecology::fork_budget_grant(18), Some(8));
+    assert_eq!(Ecology::fork_budget_grant(15), None, "below 2 × FORK_BUDGET_MIN");
     let eco = Ecology::new(20261102);
     assert_eq!(eco.fork_budget_min, FORK_BUDGET_MIN);
     assert_eq!(eco.fork_daughter_min, FORK_BUDGET_MIN);
@@ -103,9 +105,9 @@ fn the_growth_pass_is_a_no_op_before_the_first_fork() {
     assert_eq!(b.kind_budget(DECO), 80);
 }
 
-/// Phase 63 verdict: the M10 floor is the default world. A double run and a
-/// save/restore hop at 60 000 ticks must be bit-exact, and the guild total
-/// must stay 80 through both. Ignored — minutes in release.
+/// Phase 63 promoted M10, Phase 64's out-of-sample run reverted it (floor 8).
+/// A double run and a save/restore hop at 60 000 ticks must be bit-exact, and
+/// the guild total must stay 80 through both. Ignored — minutes in release.
 #[test]
 #[ignore = "double 60k run + save/restore lockstep — minutes in release"]
 fn default_world_double_run_and_roundtrip_is_bit_exact() {

@@ -31,6 +31,10 @@ def build_wasm():
     """
     core = ROOT.parent / "core"
     target = core / "target" / "wasm32-unknown-unknown" / "wasm-release" / "aether_sim_ecology.wasm"
+    # Binary size is not comparable across compiler releases (Phase 64 §7.3),
+    # so every build log states which rustc produced the artefact.
+    rustc = subprocess.run(["rustc", "--version"], capture_output=True, text=True, env=ENV)
+    print(f"rustc: {(rustc.stdout or rustc.stderr).strip()}")
     try:
         subprocess.run(
             ["cargo", "build", "--profile", "wasm-release", "--target", "wasm32-unknown-unknown",
