@@ -187,3 +187,91 @@ P1、P2、P3a 必须同时满足；D0 是必要条件。
 2. 200k 按 §1.7 原判据计算并如实报告，用于把失败模式钉死（P3a 是否仍过、P1/P2 是否同向）；
 3. 200k 只跑 R1（快筛里 spec 更好、半径更小的变体），R2 不进确证；
 4. 该偏差在本节写死，先于第一个 200k 进程启动提交。
+
+---
+
+## 2. 实现（R1/R2 与诊断遥测）
+
+### 2.1 常量与状态
+
+| 位置 | 内容 |
+|---|---|
+| `core/crates/aether-sim-ecology/src/ecology.rs:1126-1142` | `MATE_FLOOR_ON = false`、`MATE_FLOOR_N_REF = 4`、R1 `300/320`、R2 `420/420`；注释记录 §1.1 的 77.8 % 与 274.2 |
+| `:2247-2256` | `mate_radius_arm: u8`（0/1/2，臂旋钮，不入档）+ `radius_boost_searches` / `radius_only_finds`（瞬态遥测） |
+| `:2487-2492`、`:2731-2736`、`:10303-10308` | `new` / `new_with` / 测试构造器的初始化（编译默认 OFF） |
+| `:4106-4135` | `mate_radius_with_floor()`：派生 kind + 非 FISH 才进入；`n = region_count(kind, region)`；`floor = min(REF × sqrt(4/n), MAX)`；只返回 `(radius, boosted)`，无 RNG、无状态写 |
+| `:4100-4104`、`:4137-4144` | `mate_floor_r1/r2/off()`、`mate_radius_arm()`、`radius_boost_searches()`、`radius_only_finds()` |
+
+### 2.2 择偶搜索（`reproduce`）
+
+`ecology.rs:5907-5920`：
+
+- `legacy_mate_radius` 保持 Phase 42.1 原式（`11 × (1 + (1−d) × 3)`，FISH 60）；
+- `mate_radius = max(legacy, floor)`，`boosted` 时 `radius_boost_searches += 1`；
+- filter 的 `b.region == a_region` 闸完全不变；`nearest` 仍是几何最近、不是随机选择；
+- `:5948`：`mate_opt` 现在保留距离，`mate_dist > legacy_mate_radius` 时 `radius_only_finds += 1`（D0 的「只靠地板成配」）。
+
+### 2.3 诊断遥测（Phase 66 §1.1 的仪器）
+
+- `CladeLifeStats` 增加 14 个纯计数列：5 个互斥原因桶 + young 的 6 列 + kind/region 人口和 + `dispersal_out` / `deaths_off_region` + `ready_dist_sum/min`（`ecology.rs:1645-1685`）。
+- `mate_miss_bucket()`（`:4520-4575`）在 `nearest` 返回空后只读重扫，按 §1.1 的优先级分桶；`clade_life_mate_miss_detail()`（`:4577-4602`）记账并同时写 young 桶；`clade_is_young()` 用 `SpeciesClade::birth_tick` + `YOUNG_CLADE_TICKS = 10_000`。
+- `deaths_off_region` 在 `clade_life_death()`（`:4465`）用 `region_of(x,z) != region` 判定；`dispersal_out` 在两条出生路径的 `relocated_founders` 分支记账（`:5973`、`:6046`）。
+- `min_ready_dist` 的初值缺陷在 A/B 构建里修掉：首次写入时直接赋值（`:4596-4600`）。
+- 全部遥测：零 RNG、零状态回读、不入档。默认臂在 seed `20261102` / 200k 上复现 **9 分化 / 4 灭绝**（§1.1），证明轨迹未变。
+
+### 2.4 观测器
+
+- `PHASE_MATE_FLOOR=off|r1|r2`（`tests/clade_fate_observatory.rs:189-195`），臂名进入四个 CSV 文件名；
+- 结尾新增 `[mate] daughter_deco=… daughter_deco_young=…`（P3a 直接读数）与 `[radius] arm=… boost_searches=… only_finds=…`（D0）；
+- `clade_life` CSV 从 25 列扩到 42 列（原因桶、young 桶、人口和、所需距离、迁移/离域死亡）。
+
+### 2.5 测试
+
+`ecology.rs` 内 `phase66_mate_miss_tests`（10 个）：
+
+- 分桶：无同族 / 跨区域 / 超半径（并报告所需距离）/ 半径内不可育 / 半径内的可育者被判为 Other（与 `nearest` 一致）；
+- 地板：编译默认 OFF；R1 的 4 人 → 300、8 人 → 212.1（反平方根）；n=1 截到 320 / R2 420；9 人时 280 < legacy 400 → 退回 legacy 且不计 boost；
+- 根 kind 与 FISH 永不进入地板；
+- `extended_search_converts_a_miss_into_a_birth`：一对相距 60 的派生支系个体，OFF 臂 `births = 0`（母方 age 40 < 无性闸 45，排除自体繁殖干扰），R1 臂 `births = 1`、`radius_only_finds = 1`、`radius_boost_searches = 1`。
+
+`cargo test --release --lib phase66`：**10 passed / 0 failed**。
+
+### 2.6 存档
+
+不新增字段：`mate_radius_arm` 是臂旋钮（与 `fork_budget_min` / `grace_ticks` 同契约），读档回编译默认 OFF。`SaveState` 仍为 v24。
+
+---
+
+## 3. 80k 快筛（3 seed × 3 臂，只用于选臂）
+
+seed `20261128/29/30`，`PHASE_MATE_FLOOR=off|r1|r2`，同一 release 产物。
+
+| seed | 臂 | 分化 | 灭绝 | 派生支系 mate_misses | 其中 age<10k | boost 搜索 | only-find | 人口@80k | clades live/total |
+|---|---|---|---|---|---|---|---|---|---|
+| 20261128 | OFF | 3 | 1 | 148 371 | 28 844 | 0 | 0 | 528 | 3/4 |
+| 20261128 | **R1** | **4** | **2** | **113 451** | 35 526 | 293 549 | 69 320 | 513 | 4/5 |
+| 20261128 | R2 | 4 | 3 | 52 453 | 16 346 | 121 927 | 21 737 | 530 | 3/5 |
+| 20261129 | OFF | 6 | 1 | 394 122 | 108 901 | 0 | 0 | 608 | 7/7 |
+| 20261129 | **R1** | **6** | **2** | **142 722** | 61 498 | 477 162 | 97 562 | 531 | 5/6 |
+| 20261129 | R2 | 2 | 0 | 56 805 | 22 760 | 198 031 | 45 956 | 561 | 3/4 |
+| 20261130 | OFF | 6 | 3 | 216 138 | 92 299 | 0 | 0 | 538 | 3/7 |
+| 20261130 | **R1** | **1** | **1** | **99 221** | 8 186 | 479 947 | 47 017 | 486 | 1/2 |
+| 20261130 | R2 | 1 | 1 | 61 400 | 9 086 | 260 801 | 88 189 | 502 | 1/2 |
+| **合计** | **OFF** | **15** | **5** | **758 631** | 230 044 | 0 | 0 | — | — |
+| **合计** | **R1** | **11** | **5** | **355 394** | 105 210 | 1 250 658 | 213 899 | — | — |
+| **合计** | **R2** | **7** | **4** | **170 658** | 48 192 | 580 759 | 155 882 | — | — |
+
+快筛门（§1.9）：`Σ spec ≥ 0.90 × 15 = 13.5`。
+
+| 变体 | spec | 门 | ext（≤ 1.25 × 5 = 6.25） | 门 | 派生 miss ≤ 0.75 × 758 631 = 568 973 | 门 |
+|---|---|---|---|---|---|---|
+| **R1** | 11（0.733） | ❌ | 5 | ✅ | 355 394（0.468） | ✅ |
+| **R2** | 7（0.467） | ❌ | 4 | ✅ | 170 658（0.225） | ✅ |
+
+**读法**：
+
+1. **D0 在 80k 已成立**：R1 抬高搜索半径 125 万次、其中 21.4 万次在 legacy 半径外成配；R2 为 58.1 万 / 15.6 万。仪器确实咬到了，不是空转。
+2. **P3 的方向明确**：派生支系 mate_misses 降 53.2 %（R1）/ 77.5 %（R2），与「半径是主桶」的诊断一致。R1 的降幅已到 P3a 的 50 % 线。
+3. **代价集中在 `20261130`**：OFF 的 DECO 根 clade 0 活到 80k（peak 58、801 出生），R1/R2 下根支分别于 t=13 200 / 20 880 灭绝（peak 25），派生 deco-A 反而活到 80k（347 出生）。首叉在 t=5 400 两臂逐位相同，之后世界分岔。这不是「根 kind 被地板作用」——地板只对派生 kind 生效（§2.1）；这是第一条女儿支的高生育改变了食物/槽位竞争与 RNG 流后的盆地分岔。
+4. **快筛门未过**：R1 的 `11 < 13.5`，R2 的 `7 < 13.5`。按 §1.9 设计在 80k 被否；§1.12 已声明 200k 只作失败模式诊断、默认值不因它改变。
+5. **守恒**：全部 9 个臂的 DECO `family_total = 80`（`[budget]` 的 parent 链聚合），地板不铸槽、不耗能。
