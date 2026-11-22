@@ -1109,6 +1109,35 @@ pub const FORK_GRACE_ON: bool = false;
 /// Grace window after a fork (5 000 ticks: covers Phase 62's 3 960-tick and
 /// Phase 63's 8 710-tick dissipations at the 60-tick settlement cadence).
 pub const FORK_GRACE_TICKS: u32 = 5_000;
+
+/// Phase 66 diagnostic: a clade counts as a "new species" for this many ticks
+/// after its fork. Matches the 10k window of the `建支即失稳` definition.
+pub const YOUNG_CLADE_TICKS: u32 = 10_000;
+
+// ----- Phase 66: derived-clade regional mate-radius floor -------------------
+//
+// Phase 66 diagnosis (research/phase66-report.md §1.1): 77.8 % of a derived
+// DECO clade's failed mate searches have a fertile same-kind conspecific in
+// the SAME region, just beyond the radius. The dense-side addressable density
+// is 5.3 same-kind members per region, while the mean distance to that ready
+// partner is 274.2 — the Phase 42.1 Allee mitigation tops out at 44 (4 x the
+// legacy 11). The floor therefore follows the regional deme's spatial scale:
+// `REF * sqrt(N_REF / n)`, capped. Roots and FISH are out of scope (the root
+// guild is the Phase 47 island-model differentiation engine).
+//
+// Zero RNG, zero state read back, not persisted (same contract as the Phase
+// 61/63 arm knobs): the floor only changes the search bound.
+/// Compiled default: OFF until a pre-registered 5-seed A/B passes.
+pub const MATE_FLOOR_ON: bool = false;
+/// Density reference: the floor reaches `REF` at this many same-region members
+/// (the median observed deme size, 4).
+pub const MATE_FLOOR_N_REF: f64 = 4.0;
+/// R1 (moderate): 300 units at the reference density, capped at 320.
+pub const MATE_FLOOR_R1_REF: f64 = 300.0;
+pub const MATE_FLOOR_R1_MAX: f64 = 320.0;
+/// R2 (wide): 420 units, capped at 420 (screen-only calibration arm).
+pub const MATE_FLOOR_R2_REF: f64 = 420.0;
+pub const MATE_FLOOR_R2_MAX: f64 = 420.0;
 /// Overdraft ceiling = one minimum viable cohort. A no-further-fork parent is
 /// guaranteed to hold this much (its post-grant remainder floor is
 /// `FORK_BUDGET_MIN`), so settlement can always be paid in the simple case;
@@ -1648,6 +1677,36 @@ pub struct CladeLifeStats {
     /// failed search, not per tick: the search only runs when the mother is
     /// past cooldown and over her energy threshold).
     pub mate_misses: u64,
+    /// Phase 66 diagnostic: why the search came back empty (mutually
+    /// exclusive, classified by the fix that would rescue the pair).
+    pub mate_miss_no_kin: u64,
+    pub mate_miss_other_region: u64,
+    pub mate_miss_beyond_radius: u64,
+    pub mate_miss_filtered: u64,
+    pub mate_miss_other: u64,
+    /// Phase 66 diagnostic: the same total restricted to clades younger than
+    /// `YOUNG_CLADE_TICKS` at the miss (the "new species" window the phase is
+    /// about), with its own cause split.
+    pub mate_miss_young: u64,
+    pub mate_miss_young_no_kin: u64,
+    pub mate_miss_young_other_region: u64,
+    pub mate_miss_young_beyond_radius: u64,
+    pub mate_miss_young_filtered: u64,
+    pub mate_miss_young_other: u64,
+    /// Sums of the mother's kind/region population at each miss (÷ misses =
+    /// mean density the search ran in).
+    pub mate_miss_kind_pop_sum: u64,
+    pub mate_miss_region_pop_sum: u64,
+    /// Distance to the nearest *fertile* same-region conspecific on
+    /// `beyond_radius` misses: what search radius the miss would have needed.
+    pub mate_miss_ready_dist_sum: f64,
+    pub mate_miss_ready_dist_min: f64,
+    /// Births into this clade that fired natal dispersal (the family left its
+    /// home quadrant; see `relocate_founders`).
+    pub dispersal_out: u64,
+    /// Deaths whose body lay outside the agent's own `region` tag — the
+    /// stranded-founder signature of family dispersal.
+    pub deaths_off_region: u64,
     pub first_tick: u32,
     pub first_birth_tick: Option<u32>,
     pub last_birth_tick: Option<u32>,
@@ -1663,6 +1722,16 @@ pub struct CladeLifeStats {
     pub death_age_sum: f64,
     pub death_energy_sum: f64,
     pub last_death_energy: f64,
+}
+
+/// Phase 66: the constraint that makes a ready adult's mate search fail.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MateMissBucket {
+    NoKin,
+    OtherRegion,
+    BeyondRadius,
+    Filtered,
+    Other,
 }
 
 /// Phase 61: which spawn gate refused a birth (telemetry only).
@@ -2177,6 +2246,15 @@ pub struct Ecology {
     /// Overdraft the parent could not pay (dead/poor parent, or a clade below
     /// MIN_SIDE). Recorded, never minted.
     pub kind_grace_unpaid: Vec<usize>,
+    /// Phase 66 R1/R2 arm: 0 = legacy radius (default), 1 = R1, 2 = R2.
+    /// Arm knob, not persisted (read-back lands OFF).
+    pub mate_radius_arm: u8,
+    /// Phase 66 D0 telemetry (transient): mate searches whose radius the floor
+    /// raised above the legacy value.
+    pub radius_boost_searches: u64,
+    /// Phase 66 D0 telemetry (transient): successful finds that lay beyond the
+    /// legacy radius (only the floor made them possible).
+    pub radius_only_finds: u64,
     /// Phase 63 candidates M/A: floor of the parent's post-grant remainder and
     /// floor of the daughter's grant. Both default to `FORK_BUDGET_MIN` (the
     /// Phase 49 contract); the arms override them per instance and the values
@@ -2409,6 +2487,9 @@ impl Ecology {
             kind_grace_unpaid: Vec::new(),
             fork_budget_min: FORK_BUDGET_MIN,
             fork_daughter_min: FORK_BUDGET_MIN,
+            mate_radius_arm: if MATE_FLOOR_ON { 1 } else { 0 },
+            radius_boost_searches: 0,
+            radius_only_finds: 0,
             speciation_min_side: SPECIATION_MIN_SIDE_DEFAULT,
             // Phase 51: niche resource partition ON by default (the preference
             // multiplier is 1.0 for every clade inside the neutral band, so a
@@ -2650,6 +2731,9 @@ impl Ecology {
             kind_grace_unpaid: Vec::new(),
             fork_budget_min: FORK_BUDGET_MIN,
             fork_daughter_min: FORK_BUDGET_MIN,
+            mate_radius_arm: if MATE_FLOOR_ON { 1 } else { 0 },
+            radius_boost_searches: 0,
+            radius_only_finds: 0,
             speciation_min_side: SPECIATION_MIN_SIDE_DEFAULT,
             // Phase 51: niche resource partition ON by default (see `Ecology::new`).
             niche_partition: NICHE_PARTITION_ON,
@@ -3995,6 +4079,45 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         self.kind_growth_grants.get(kind as usize).copied().unwrap_or(0)
     }
 
+    // ----- Phase 66 R1/R2: derived-clade mate-radius floor ------------------
+
+    /// Phase 66 R1 arm (moderate floor).
+    pub fn mate_floor_r1(&mut self) { self.mate_radius_arm = 1; }
+
+    /// Phase 66 R2 arm (wide floor; screen calibration only).
+    pub fn mate_floor_r2(&mut self) { self.mate_radius_arm = 2; }
+
+    /// Phase 66 arm reset: legacy Phase 42.1 radius.
+    pub fn mate_floor_off(&mut self) { self.mate_radius_arm = 0; }
+
+    /// Phase 66 arm readout.
+    pub fn mate_radius_arm(&self) -> u8 { self.mate_radius_arm }
+
+    /// Phase 66 D0: searches whose radius the floor raised.
+    pub fn radius_boost_searches(&self) -> u64 { self.radius_boost_searches }
+
+    /// Phase 66 D0: finds that only the floor's radius made possible.
+    pub fn radius_only_finds(&self) -> u64 { self.radius_only_finds }
+
+    /// Phase 66: the search radius for one mate attempt and whether the floor
+    /// raised it. Pure geometry: `n` is the same-region (same tag) population
+    /// of the searcher's kind, so a sparse deme gets a wider search. Roots keep
+    /// the legacy radius: their four-quadrant deme structure is the Phase 47
+    /// differentiation engine, and Phase 61's candidate a showed the cost of
+    /// touching it. FISH keep their band radius.
+    fn mate_radius_with_floor(&self, kind: SpeciesKind, region: u8, legacy: f64) -> (f64, bool) {
+        if self.mate_radius_arm == 0 { return (legacy, false); }
+        if kind == FISH || self.kind_def(kind).parent_kind.is_none() { return (legacy, false); }
+        let n = self.region_count(kind, region).max(1) as f64;
+        let (ref_dist, cap) = if self.mate_radius_arm == 1 {
+            (MATE_FLOOR_R1_REF, MATE_FLOOR_R1_MAX)
+        } else {
+            (MATE_FLOOR_R2_REF, MATE_FLOOR_R2_MAX)
+        };
+        let floor = (ref_dist * (MATE_FLOOR_N_REF / n).sqrt()).min(cap);
+        if floor > legacy { (floor, true) } else { (legacy, false) }
+    }
+
     // ----- Phase 65 W1: fork grace -----------------------------------------
 
     /// Phase 65 W1 arm on. The window length is `grace_ticks`
@@ -4396,9 +4519,11 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             let a = &self.agents[idx];
             (a.clade_id, a.kind, a.age, a.energy)
         };
+        let off_region = Self::region_of(self.agents[idx].x, self.agents[idx].z) != self.agents[idx].region;
         let root = self.root_kind(kind);
         let i = self.clade_life_slot(clade_id, root);
         let s = &mut self.clade_life[i];
+        if off_region { s.deaths_off_region += 1; }
         s.deaths += 1;
         match cause {
             "starved" => s.deaths_starved += 1,
@@ -4421,11 +4546,105 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         }
     }
 
-    /// A ready adult whose mate search came back empty.
-    fn clade_life_mate_miss(&mut self, clade_id: u32, kind: SpeciesKind) {
+    /// Phase 66 diagnostic: classify a miss by the constraint that binds it.
+    /// Priority follows what the engine could change: a fertile same-region
+    /// partner beyond the radius (`beyond_radius`) is fixed by a wider search; a
+    /// same-region partner inside the radius that fails the age/cooldown/energy
+    /// test (`filtered`) is fixed only by the fertility side; a conspecific that
+    /// exists but lives in another region (`other_region`) needs recruitment;
+    /// no conspecific at all (`no_kin`) needs a new deme.
+    fn mate_miss_bucket(&self, idx: usize, radius: f64, min_e: f64) -> (MateMissBucket, usize, usize, Option<f64>) {
+        let a = &self.agents[idx];
+        let (a_region, kind) = (a.region, a.kind);
+        let (a_x, a_z) = (a.x, a.z);
+        let r2 = radius * radius;
+        let mut kind_pop = 0usize;
+        let mut region_pop = 0usize;
+        let mut ready_far = false;
+        let mut unready_near = false;
+        let mut any_other_region = false;
+        let mut ready_far_min = f64::INFINITY;
+        for (j, b) in self.agents.iter().enumerate() {
+            if j == idx || !b.alive || b.kind != kind { continue; }
+            kind_pop += 1;
+            if self.region_isolation && b.region != a_region { any_other_region = true; continue; }
+            region_pop += 1;
+            let min_e_b = if kind == DECO && self.deco_eff_choice_mode == save_state::DECO_CHOICE_SELECTIVE {
+                Self::deco_repro_threshold_for(b.genome.deco_efficiency, self.deco_repro_saturate)
+            } else {
+                min_e
+            };
+            let ready = b.age > 30.0 && b.repro <= 0.0 && b.energy > b.max_energy * min_e_b;
+            let dx = b.x - a_x;
+            let dz = b.z - a_z;
+            let d2 = dx * dx + dz * dz;
+            if ready && d2 < r2 {
+                return (MateMissBucket::Other, kind_pop + 1, region_pop + 1, None);
+            }
+            if ready {
+                ready_far = true;
+                if d2 < ready_far_min { ready_far_min = d2; }
+            } else if d2 < r2 {
+                unready_near = true;
+            }
+        }
+        let bucket = if kind_pop == 0 {
+            MateMissBucket::NoKin
+        } else if region_pop == 0 && self.region_isolation {
+            MateMissBucket::OtherRegion
+        } else if ready_far {
+            MateMissBucket::BeyondRadius
+        } else if unready_near {
+            MateMissBucket::Filtered
+        } else {
+            MateMissBucket::Other
+        };
+        let dist = if bucket == MateMissBucket::BeyondRadius { Some(ready_far_min.sqrt()) } else { None };
+        (bucket, kind_pop + 1, region_pop + 1, dist)
+    }
+
+    /// Phase 66 diagnostic: a miss plus the classification of its cause.
+    fn clade_life_mate_miss_detail(&mut self, clade_id: u32, kind: SpeciesKind, bucket: MateMissBucket, kind_pop: usize, region_pop: usize, ready_dist: Option<f64>) {
+        let root = self.root_kind(kind);
+        let young = self.clade_is_young(clade_id);
+        let i = self.clade_life_slot(clade_id, root);
+        let s = &mut self.clade_life[i];
+        s.mate_misses += 1;
+        if young { s.mate_miss_young += 1; }
+        match bucket {
+            MateMissBucket::NoKin => { s.mate_miss_no_kin += 1; if young { s.mate_miss_young_no_kin += 1; } }
+            MateMissBucket::OtherRegion => { s.mate_miss_other_region += 1; if young { s.mate_miss_young_other_region += 1; } }
+            MateMissBucket::BeyondRadius => { s.mate_miss_beyond_radius += 1; if young { s.mate_miss_young_beyond_radius += 1; } }
+            MateMissBucket::Filtered => { s.mate_miss_filtered += 1; if young { s.mate_miss_young_filtered += 1; } }
+            MateMissBucket::Other => { s.mate_miss_other += 1; if young { s.mate_miss_young_other += 1; } }
+        }
+        s.mate_miss_kind_pop_sum += kind_pop as u64;
+        s.mate_miss_region_pop_sum += region_pop as u64;
+        if let Some(d) = ready_dist {
+            s.mate_miss_ready_dist_sum += d;
+            if s.mate_miss_beyond_radius == 1 || d < s.mate_miss_ready_dist_min {
+                s.mate_miss_ready_dist_min = d;
+            }
+        }
+    }
+
+    /// Phase 66 diagnostic: is this clade inside its founding window? The
+    /// clade record's `birth_tick` is the fork tick; a clade without a record
+    /// is the root (age = world age).
+    fn clade_is_young(&self, clade_id: u32) -> bool {
+        let birth = self.species_clades.iter()
+            .find(|c| c.id == clade_id)
+            .map(|c| c.birth_tick)
+            .unwrap_or(0);
+        self.tick_count.saturating_sub(birth) < YOUNG_CLADE_TICKS
+    }
+
+    /// Phase 66 diagnostic: the birth that fired natal dispersal belongs to
+    /// this clade (the family left its home quadrant).
+    fn clade_life_dispersal(&mut self, clade_id: u32, kind: SpeciesKind) {
         let root = self.root_kind(kind);
         let i = self.clade_life_slot(clade_id, root);
-        self.clade_life[i].mate_misses += 1;
+        self.clade_life[i].dispersal_out += 1;
     }
 
     /// Standing population sampled at the speciation-check cadence (the pass
@@ -5685,11 +5904,18 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         // 「找不到 11 单位内的配偶」而落入零出生吸收态（42 诊断实测：
         // 满员时也只有 27% 的待育者在 11 单位内有配偶，稀疏后直接归零）。
         let a_region = self.agents[idx].region;
-        let mate_radius = if mate_kind == FISH {
+        let legacy_mate_radius = if mate_kind == FISH {
             60.0
         } else {
             11.0 * (1.0 + (1.0 - density_factor.clamp(0.0, 1.0)) * 3.0)
         };
+        // Phase 66 R1/R2: a derived clade's search reaches across its regional
+        // deme when the deme is too sparse for the legacy bound. The region
+        // gate in the filter below is unchanged, so cross-deme gene flow stays
+        // impossible by construction.
+        let (mate_radius, radius_boosted) =
+            self.mate_radius_with_floor(mate_kind, a_region, legacy_mate_radius);
+        if radius_boosted { self.radius_boost_searches += 1; }
         let mate_min_e_const = if mate_kind == FISH { 0.55 } else { 0.68 };
         let selected_mode = self.deco_eff_choice_mode;
         let saturate = self.deco_repro_saturate;
@@ -5711,11 +5937,15 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             let mate_opt = self.nearest(idx, mate_kind, mate_radius, mate_filter);
         if mate_opt.is_none() {
             // Phase 61 telemetry: a ready adult (past cooldown, over her energy
-            // threshold) found no mate inside the search radius.
+            // threshold) found no mate inside the search radius. Phase 66 adds
+            // the cause bucket (pure read of the same world state).
             let (cid, k) = (self.agents[idx].clade_id, self.agents[idx].kind);
-            self.clade_life_mate_miss(cid, k);
+            let (bucket, kind_pop, region_pop, ready_dist) =
+                self.mate_miss_bucket(idx, mate_radius, mate_min_e_const);
+            self.clade_life_mate_miss_detail(cid, k, bucket, kind_pop, region_pop, ready_dist);
         }
-        if let Some((mate_j, _)) = mate_opt {
+        if let Some((mate_j, mate_dist)) = mate_opt {
+            if mate_dist > legacy_mate_radius { self.radius_only_finds += 1; }
             let b_energy = self.agents[mate_j].energy;
             let b_max_e = self.agents[mate_j].max_energy;
             let b_age = self.agents[mate_j].age;
@@ -5855,6 +6085,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                     self.relocate_founders(idx, Some(mate_j), child_x, child_z);
                     self.dispersal_events += 1;
                     self.dispersal_last_tick = self.tick_count;
+                    self.clade_life_dispersal(parent_clade, child_kind);
                 }
                 return;
             }
@@ -5926,6 +6157,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                     self.relocate_founders(idx, None, cx, cz);
                     self.dispersal_events += 1;
                     self.dispersal_last_tick = self.tick_count;
+                    self.clade_life_dispersal(parent_clade, child_kind_a2);
                 }
             }
         }
@@ -10071,6 +10303,9 @@ impl Ecology {
             kind_grace_unpaid: Vec::new(),
             fork_budget_min: FORK_BUDGET_MIN,
             fork_daughter_min: FORK_BUDGET_MIN,
+            mate_radius_arm: if MATE_FLOOR_ON { 1 } else { 0 },
+            radius_boost_searches: 0,
+            radius_only_finds: 0,
             speciation_min_side: state.SpeciationMinSide,
             // Phase 51: niche resource partition. Pre-v18 archives carry no
             // flag → the current default world config (partition ON); the
@@ -10475,5 +10710,197 @@ mod phase65_fork_grace_tests {
         assert!(!restored.budget_grace);
         assert_eq!(restored.kind_grace_until(d), 0);
         assert_eq!(restored.grace_total_skips(), 0);
+    }
+}
+
+#[cfg(test)]
+mod phase66_mate_miss_tests {
+    use super::*;
+
+    /// A DECO daughter with a controlled budget, minted the way a fork mints
+    /// one, so the public birth gate accepts the fixture members.
+    fn daughter(eco: &mut Ecology) -> SpeciesKind {
+        eco.deco_region_cap_off();
+        let mut def = eco.kind_def(DECO).clone();
+        def.name = "deco-mate";
+        def.parent_kind = Some(DECO);
+        def.global_cap = 10;
+        let d = eco.register_kind(def);
+        eco.set_kind_budget(d, 10);
+        d
+    }
+
+    /// Spawn one live member and pin the fields the mate search reads.
+    fn plant(eco: &mut Ecology, d: SpeciesKind, x: f64, z: f64, region: u8, energy_frac: f64) -> usize {
+        let id = eco.spawn_agent(d, x, z).expect("spawn");
+        let i = eco.agents.iter().position(|a| a.id == id).unwrap();
+        let a = &mut eco.agents[i];
+        a.region = region;
+        a.age = 100.0;
+        a.repro = 0.0;
+        a.energy = a.max_energy * energy_frac;
+        i
+    }
+
+    #[test]
+    fn no_conspecific_at_all_is_no_kin() {
+        let mut eco = Ecology::new(20261123);
+        let d = daughter(&mut eco);
+        let i = plant(&mut eco, d, 0.0, 0.0, 0, 1.0);
+        let (b, kp, rp, dist) = eco.mate_miss_bucket(i, 11.0, 0.68);
+        assert_eq!(b, MateMissBucket::NoKin);
+        assert_eq!((kp, rp), (1, 1), "population sums include the searcher");
+        assert!(dist.is_none());
+    }
+
+    #[test]
+    fn a_conspecific_in_another_region_is_other_region() {
+        let mut eco = Ecology::new(20261123);
+        assert!(eco.region_isolation);
+        let d = daughter(&mut eco);
+        let i = plant(&mut eco, d, 0.0, 0.0, 0, 1.0);
+        plant(&mut eco, d, 4.0, 0.0, 1, 1.0);
+        let (b, kp, rp, _) = eco.mate_miss_bucket(i, 11.0, 0.68);
+        assert_eq!(b, MateMissBucket::OtherRegion);
+        assert_eq!((kp, rp), (2, 1), "region pop excludes the other region");
+    }
+
+    #[test]
+    fn a_fertile_conspecific_out_of_range_is_beyond_radius() {
+        let mut eco = Ecology::new(20261123);
+        let d = daughter(&mut eco);
+        let i = plant(&mut eco, d, 0.0, 0.0, 0, 1.0);
+        plant(&mut eco, d, 60.0, 0.0, 0, 1.0);
+        let (b, kp, rp, dist) = eco.mate_miss_bucket(i, 11.0, 0.68);
+        assert_eq!(b, MateMissBucket::BeyondRadius);
+        assert_eq!((kp, rp), (2, 2));
+        assert!((dist.unwrap() - 60.0).abs() < 1e-9, "reports the needed radius");
+    }
+
+    #[test]
+    fn an_unready_conspecific_in_range_is_filtered() {
+        let mut eco = Ecology::new(20261123);
+        let d = daughter(&mut eco);
+        let i = plant(&mut eco, d, 0.0, 0.0, 0, 1.0);
+        let j = plant(&mut eco, d, 5.0, 0.0, 0, 0.10);
+        let (b, _, _, dist) = eco.mate_miss_bucket(i, 11.0, 0.68);
+        assert_eq!(b, MateMissBucket::Filtered);
+        assert!(dist.is_none());
+        // The same partner with energy above the bar is a find, not a miss.
+        eco.agents[j].energy = eco.agents[j].max_energy;
+        let (b2, _, _, _) = eco.mate_miss_bucket(i, 11.0, 0.68);
+        assert_eq!(b2, MateMissBucket::Other);
+    }
+
+    fn many(eco: &mut Ecology, d: SpeciesKind, n: usize, region: u8) -> Vec<usize> {
+        (0..n).map(|i| plant(eco, d, i as f64 * 3.0, 0.0, region, 1.0)).collect()
+    }
+
+    #[test]
+    fn the_floor_is_off_by_default() {
+        let mut eco = Ecology::new(20261123);
+        assert_eq!(eco.mate_radius_arm(), 0);
+        let d = daughter(&mut eco);
+        assert_eq!(eco.mate_radius_with_floor(d, 0, 19.0), (19.0, false));
+        assert_eq!(eco.radius_boost_searches(), 0);
+    }
+
+    #[test]
+    fn r1_floor_follows_the_regional_deme_density() {
+        let mut eco = Ecology::new(20261123);
+        let d = daughter(&mut eco);
+        many(&mut eco, d, 4, 0);
+        eco.mate_floor_r1();
+        let (r4, boosted) = eco.mate_radius_with_floor(d, 0, 19.0);
+        assert!(boosted);
+        assert!((r4 - 300.0).abs() < 1e-9, "4 members -> the reference floor");
+        many(&mut eco, d, 4, 0);
+        let (r8, _) = eco.mate_radius_with_floor(d, 0, 19.0);
+        assert!((r8 - 300.0 * 0.5f64.sqrt()).abs() < 1e-9, "8 members -> half-density floor");
+        assert!(r8 < r4, "denser deme searches closer");
+    }
+
+    #[test]
+    fn the_floor_caps_and_never_shrinks_the_legacy_radius() {
+        let mut eco = Ecology::new(20261123);
+        let d = daughter(&mut eco);
+        many(&mut eco, d, 1, 0);
+        eco.mate_floor_r1();
+        assert_eq!(eco.mate_radius_with_floor(d, 0, 19.0).0, MATE_FLOOR_R1_MAX);
+        eco.mate_floor_r2();
+        assert_eq!(eco.mate_radius_with_floor(d, 0, 19.0).0, MATE_FLOOR_R2_MAX);
+        // Nine members: R2's floor is 280, so a wider legacy radius wins.
+        many(&mut eco, d, 8, 0);
+        let (r, boosted) = eco.mate_radius_with_floor(d, 0, 400.0);
+        assert_eq!(r, 400.0);
+        assert!(!boosted);
+    }
+
+    #[test]
+    fn roots_and_fish_keep_the_legacy_radius() {
+        let mut eco = Ecology::new(20261123);
+        eco.mate_floor_r2();
+        assert_eq!(eco.mate_radius_with_floor(DECO, 0, 19.0), (19.0, false));
+        assert_eq!(eco.mate_radius_with_floor(FISH, 0, 60.0), (60.0, false));
+    }
+
+    /// A daughter pair 60 units apart: outside the legacy Allee radius (the
+    /// density factor gives ~37 here) but inside R1's floor. The arm must
+    /// convert a miss into a birth; the OFF arm must not.
+    fn pair_world(arm: u8) -> (Ecology, usize) {
+        let mut eco = Ecology::new(20261128);
+        eco.deco_region_cap_off();
+        eco.dispersal_p = 0.0;
+        eco.gene_barrier_strength = 0.0;
+        let d = daughter(&mut eco);
+        // Keep the fixture density at 2/80 so the DECO selective threshold stays
+        // below 1.0 (the arm must not be what makes the parents fertile).
+        let mut def = eco.kind_def(DECO).clone();
+        def.name = "deco-mate";
+        def.parent_kind = Some(DECO);
+        def.global_cap = 80;
+        eco.kinds.defs[d as usize] = def;
+        let i = plant(&mut eco, d, 0.0, 0.0, 0, 1.0);
+        let j = plant(&mut eco, d, 60.0, 0.0, 0, 1.0);
+        for k in [i, j] {
+            eco.agents[k].genome.deco_efficiency = 1.0;
+            eco.agents[k].genome.hue = 0.5;
+            eco.agents[k].energy = eco.agents[k].max_energy;
+            eco.agents[k].age = 100.0;
+            eco.agents[k].repro = 0.0;
+        }
+        // Below the asexual fallback's age gate (45): a failed mate search must
+        // not be masked by a solo birth.
+        eco.agents[i].age = 40.0;
+        if arm == 1 { eco.mate_floor_r1(); }
+        (eco, i)
+    }
+
+    #[test]
+    fn extended_search_converts_a_miss_into_a_birth() {
+        let (mut off, i0) = pair_world(0);
+        off.reproduce(i0, 0.1);
+        assert_eq!(off.births, 0, "60 > the legacy radius: no mate");
+        assert_eq!(off.radius_only_finds(), 0);
+
+        let (mut on, i1) = pair_world(1);
+        on.reproduce(i1, 0.1);
+        assert_eq!(on.births, 1, "R1 reaches the partner at 60");
+        assert_eq!(on.radius_only_finds(), 1);
+        assert_eq!(on.radius_boost_searches(), 1);
+    }
+
+    #[test]
+    fn off_region_deaths_and_dispersals_are_booked_per_clade() {
+        let mut eco = Ecology::new(20261123);
+        let d = daughter(&mut eco);
+        // Position in region 2 (positive x) but tagged as region 1.
+        let i = plant(&mut eco, d, 300.0, 0.0, 1, 1.0);
+        assert_ne!(Ecology::region_of(eco.agents[i].x, eco.agents[i].z), eco.agents[i].region);
+        eco.clade_life_dispersal(0, d);
+        eco.die(i, "aged");
+        let s = eco.clade_life_stats().iter().find(|s| s.clade_id == 0 && s.root_kind == DECO).unwrap();
+        assert_eq!(s.dispersal_out, 1);
+        assert_eq!(s.deaths_off_region, 1);
     }
 }

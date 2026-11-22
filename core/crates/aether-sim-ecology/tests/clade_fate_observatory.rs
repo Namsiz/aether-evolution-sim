@@ -185,14 +185,21 @@ fn clade_fate_observation() {
         _ => "gracedflt",
     };
     let grace_ticks_env = env_str("PHASE_FORK_GRACE_TICKS");
+    // Phase 66 R1/R2: derived-clade regional mate-radius floor.
+    let mate_arm = match env_str("PHASE_MATE_FLOOR").as_deref() {
+        Some("off") => "mateoff",
+        Some("r1") => "mater1",
+        Some("r2") => "mater2",
+        _ => "matedflt",
+    };
     // Calibration-sweep tag (Phase 55): parallel arms of the same switch must
     // never overwrite each other's output files.
     let tag = env_str("PHASE_ARM_TAG").unwrap_or_default();
     let suffix = if tag.is_empty() { String::new() } else { format!("_{tag}") };
-    let csv_path = format!("/tmp/clade_fate_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}_{growth_arm}_{fork_min_arm}_{fork_dau_arm}_{grace_arm}{suffix}.csv");
-    let tree_path = format!("/tmp/clade_tree_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}_{growth_arm}_{fork_min_arm}_{fork_dau_arm}_{grace_arm}{suffix}.csv");
-    let culture_path = format!("/tmp/clade_culture_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}_{growth_arm}_{fork_min_arm}_{fork_dau_arm}_{grace_arm}{suffix}.csv");
-    let life_path = format!("/tmp/clade_life_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}_{growth_arm}_{fork_min_arm}_{fork_dau_arm}_{grace_arm}{suffix}.csv");
+    let csv_path = format!("/tmp/clade_fate_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}_{growth_arm}_{fork_min_arm}_{fork_dau_arm}_{grace_arm}_{mate_arm}{suffix}.csv");
+    let tree_path = format!("/tmp/clade_tree_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}_{growth_arm}_{fork_min_arm}_{fork_dau_arm}_{grace_arm}_{mate_arm}{suffix}.csv");
+    let culture_path = format!("/tmp/clade_culture_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}_{growth_arm}_{fork_min_arm}_{fork_dau_arm}_{grace_arm}_{mate_arm}{suffix}.csv");
+    let life_path = format!("/tmp/clade_life_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}_{growth_arm}_{fork_min_arm}_{fork_dau_arm}_{grace_arm}_{mate_arm}{suffix}.csv");
     let mut csv = String::from(
         "t,pop,herb,pred,scav,omn,fish,deco,clades_live,clades_total,events,tokens,bearers,groups,levels,authorities,grass_mean,grass_var,env_mean,env_var,structs,deco_r0,deco_r1,deco_r2,deco_r3,structs_r0,structs_r1,structs_r2,structs_r3,denv_mean,denv_var\n",
     );
@@ -229,8 +236,11 @@ fn clade_fate_observation() {
     if let Some(v) = &grace_ticks_env {
         if let Ok(t) = v.trim().parse::<u32>() { eco.fork_grace_ticks_set(t); }
     }
+    if mate_arm == "mater1" { eco.mate_floor_r1(); }
+    if mate_arm == "mater2" { eco.mate_floor_r2(); }
+    if mate_arm == "mateoff" { eco.mate_floor_off(); }
     let mut last_events = 0usize;
-    eprintln!("=== clade-fate seed {seed} ({ticks} ticks, structure_env={arm}, deco_env={deco_arm}, token_sign={sign_arm}, clamp={clamp_arm}, place={place_arm}, repro={repro_arm}, grace={grace_arm}) ===");
+    eprintln!("=== clade-fate seed {seed} ({ticks} ticks, structure_env={arm}, deco_env={deco_arm}, token_sign={sign_arm}, clamp={clamp_arm}, place={place_arm}, repro={repro_arm}, grace={grace_arm}, mate_floor={mate_arm}) ===");
     for t in 1..=ticks {
         eco.update(0.1, daylight(t));
         let n = eco.clade_events().len();
@@ -418,7 +428,7 @@ fn clade_fate_observation() {
     // Phase 61: engine-level per-clade life counters (births / deaths by
     // cause / refusals by gate / mate misses / peak / extinction tick).
     let mut life = String::from(
-        "clade_id,clade_name,root_kind,births,deaths,deaths_starved,deaths_aged,deaths_predation,deaths_other,region_cap_blocks,kind_budget_blocks,mate_misses,first_tick,first_birth_tick,last_birth_tick,peak_pop,peak_tick,region_peak_r0,region_peak_r1,region_peak_r2,region_peak_r3,extinction_tick,mean_death_age,mean_death_energy,last_death_energy\n",
+        "clade_id,clade_name,root_kind,births,deaths,deaths_starved,deaths_aged,deaths_predation,deaths_other,region_cap_blocks,kind_budget_blocks,mate_misses,mate_miss_no_kin,mate_miss_other_region,mate_miss_beyond_radius,mate_miss_filtered,mate_miss_other,mate_miss_young,mate_miss_young_no_kin,mate_miss_young_other_region,mate_miss_young_beyond_radius,mate_miss_young_filtered,mate_miss_young_other,mate_miss_kind_pop_sum,mate_miss_region_pop_sum,mate_miss_ready_dist_sum,mate_miss_ready_dist_min,dispersal_out,deaths_off_region,first_tick,first_birth_tick,last_birth_tick,peak_pop,peak_tick,region_peak_r0,region_peak_r1,region_peak_r2,region_peak_r3,extinction_tick,mean_death_age,mean_death_energy,last_death_energy\n",
     );
     let mut life_rows: Vec<_> = eco.clade_life_stats().to_vec();
     life_rows.sort_by_key(|s| (s.root_kind, s.clade_id));
@@ -430,12 +440,19 @@ fn clade_fate_observation() {
             _ => fam_name.to_string(),
         };
         life.push_str(&format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.2},{:.3},{:.3}\n",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.2},{:.2},{},{},{},{},{},{},{},{},{},{},{},{},{:.2},{:.3},{:.3}\n",
             s.clade_id,
             clade_label,
             fam_name,
             s.births, s.deaths, s.deaths_starved, s.deaths_aged, s.deaths_predation,
             s.deaths_other, s.region_cap_blocks, s.kind_budget_blocks, s.mate_misses,
+            s.mate_miss_no_kin, s.mate_miss_other_region, s.mate_miss_beyond_radius,
+            s.mate_miss_filtered, s.mate_miss_other,
+            s.mate_miss_young, s.mate_miss_young_no_kin, s.mate_miss_young_other_region,
+            s.mate_miss_young_beyond_radius, s.mate_miss_young_filtered, s.mate_miss_young_other,
+            s.mate_miss_kind_pop_sum, s.mate_miss_region_pop_sum,
+            s.mate_miss_ready_dist_sum, s.mate_miss_ready_dist_min,
+            s.dispersal_out, s.deaths_off_region,
             s.first_tick,
             s.first_birth_tick.map(|v| v.to_string()).unwrap_or_default(),
             s.last_birth_tick.map(|v| v.to_string()).unwrap_or_default(),
@@ -462,6 +479,18 @@ fn clade_fate_observation() {
                 if s.deaths > 0 { s.death_age_sum / s.deaths as f64 } else { 0.0 },
                 if s.deaths > 0 { s.death_energy_sum / s.deaths as f64 } else { 0.0 },
                 s.last_death_energy,
+            );
+            eprintln!(
+                "  [extinct] mate_miss_split clade={} no_kin={} other_region={} beyond_radius={} filtered={} other={} young={} young_no_kin={} young_other_region={} young_beyond_radius={} young_filtered={} mean_kind_pop={:.1} mean_region_pop={:.1} mean_ready_dist={:.1} min_ready_dist={:.1} dispersal_out={} deaths_off_region={}",
+                s.clade_id, s.mate_miss_no_kin, s.mate_miss_other_region,
+                s.mate_miss_beyond_radius, s.mate_miss_filtered, s.mate_miss_other,
+                s.mate_miss_young, s.mate_miss_young_no_kin, s.mate_miss_young_other_region,
+                s.mate_miss_young_beyond_radius, s.mate_miss_young_filtered,
+                s.mate_miss_kind_pop_sum as f64 / s.mate_misses.max(1) as f64,
+                s.mate_miss_region_pop_sum as f64 / s.mate_misses.max(1) as f64,
+                s.mate_miss_ready_dist_sum / s.mate_miss_beyond_radius.max(1) as f64,
+                s.mate_miss_ready_dist_min,
+                s.dispersal_out, s.deaths_off_region,
             );
         }
     }
@@ -504,4 +533,46 @@ fn clade_fate_observation() {
         }
     }
     eprintln!("  [grace] total_skips={grace_skips} windows_pending={grace_windows}");
+    // Phase 66: mate-miss composition (all clades).
+    let mut tot = [0u64; 5];
+    let mut young = [0u64; 5];
+    let mut kin_pop = 0u64;
+    let mut reg_pop = 0u64;
+    for s in &life_rows {
+        let row = [s.mate_miss_no_kin, s.mate_miss_other_region, s.mate_miss_beyond_radius, s.mate_miss_filtered, s.mate_miss_other];
+        for (i, &v) in row.iter().enumerate() { tot[i] += v; }
+        let yrow = [s.mate_miss_young_no_kin, s.mate_miss_young_other_region, s.mate_miss_young_beyond_radius, s.mate_miss_young_filtered, s.mate_miss_young_other];
+        for (i, &v) in yrow.iter().enumerate() { young[i] += v; }
+        kin_pop += s.mate_miss_kind_pop_sum;
+        reg_pop += s.mate_miss_region_pop_sum;
+    }
+    let n = tot.iter().sum::<u64>();
+    let ny = young.iter().sum::<u64>();
+    // Phase 66 P3a: the arm's scope is derived DECO clades (clade_id != 0).
+    let dau_deco: u64 = life_rows.iter()
+        .filter(|s| s.root_kind == aether_sim_ecology::ecology::DECO && s.clade_id != 0)
+        .map(|s| s.mate_misses)
+        .sum();
+    let dau_deco_young: u64 = life_rows.iter()
+        .filter(|s| s.root_kind == aether_sim_ecology::ecology::DECO && s.clade_id != 0)
+        .map(|s| s.mate_miss_young)
+        .sum();
+    eprintln!(
+        "  [mate] total={} no_kin={} other_region={} beyond_radius={} filtered={} other={} mean_kind_pop={:.1} mean_region_pop={:.1}",
+        n, tot[0], tot[1], tot[2], tot[3], tot[4],
+        kin_pop as f64 / n.max(1) as f64,
+        reg_pop as f64 / n.max(1) as f64,
+    );
+    eprintln!(
+        "  [mate] young={} no_kin={} other_region={} beyond_radius={} filtered={} other={}",
+        ny, young[0], young[1], young[2], young[3], young[4],
+    );
+    eprintln!(
+        "  [mate] daughter_deco={} daughter_deco_young={}",
+        dau_deco, dau_deco_young,
+    );
+    eprintln!(
+        "  [radius] arm={} boost_searches={} only_finds={}",
+        eco.mate_radius_arm(), eco.radius_boost_searches(), eco.radius_only_finds(),
+    );
 }
