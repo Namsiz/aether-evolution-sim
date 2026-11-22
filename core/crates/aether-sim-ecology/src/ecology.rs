@@ -1138,6 +1138,13 @@ pub const MATE_FLOOR_R1_MAX: f64 = 320.0;
 /// R2 (wide): 420 units, capped at 420 (screen-only calibration arm).
 pub const MATE_FLOOR_R2_REF: f64 = 420.0;
 pub const MATE_FLOOR_R2_MAX: f64 = 420.0;
+/// R3 (small, Phase 67): 80 units at the reference density, never below 80,
+/// capped at 120. Targets only the near end of the `min_ready_dist` spike at
+/// 44.00 (research/phase66-report.md §5.2); the 274-mean distance tail stays
+/// outside the search.
+pub const MATE_FLOOR_R3_REF: f64 = 80.0;
+pub const MATE_FLOOR_R3_MIN: f64 = 80.0;
+pub const MATE_FLOOR_R3_MAX: f64 = 120.0;
 /// Overdraft ceiling = one minimum viable cohort. A no-further-fork parent is
 /// guaranteed to hold this much (its post-grant remainder floor is
 /// `FORK_BUDGET_MIN`), so settlement can always be paid in the simple case;
@@ -1734,6 +1741,37 @@ pub enum MateMissBucket {
     Other,
 }
 
+impl CladeLifeStats {
+    /// Phase 67: lifetime used as the P3 denominator. `now` is the run end
+    /// (200 000 in the 5-seed A/B); extinct clades stop at their death tick.
+    pub fn life_ticks(&self, now: u32) -> u64 {
+        self.extinction_tick.unwrap_or(now).saturating_sub(self.first_tick) as u64
+    }
+
+    /// Phase 67 P3: mate misses per clade-tick (0 for an empty lifetime). The
+    /// denominator is the clade's own lifetime, so arms with different clade
+    /// counts (Phase 66 §11.1) are comparable.
+    pub fn mate_miss_rate_per_tick(&self, now: u32) -> f64 {
+        let life = self.life_ticks(now);
+        if life == 0 { 0.0 } else { self.mate_misses as f64 / life as f64 }
+    }
+
+    /// Phase 67 P3: one bucket per clade-tick, on the same denominator as the
+    /// total, so bucket shares stay comparable across arms.
+    pub fn mate_miss_bucket_rate_per_tick(&self, bucket: MateMissBucket, now: u32) -> f64 {
+        let life = self.life_ticks(now);
+        if life == 0 { return 0.0; }
+        let misses = match bucket {
+            MateMissBucket::NoKin => self.mate_miss_no_kin,
+            MateMissBucket::OtherRegion => self.mate_miss_other_region,
+            MateMissBucket::BeyondRadius => self.mate_miss_beyond_radius,
+            MateMissBucket::Filtered => self.mate_miss_filtered,
+            MateMissBucket::Other => self.mate_miss_other,
+        };
+        misses as f64 / life as f64
+    }
+}
+
 /// Phase 61: which spawn gate refused a birth (telemetry only).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CladeBirthBlock {
@@ -2246,8 +2284,8 @@ pub struct Ecology {
     /// Overdraft the parent could not pay (dead/poor parent, or a clade below
     /// MIN_SIDE). Recorded, never minted.
     pub kind_grace_unpaid: Vec<usize>,
-    /// Phase 66 R1/R2 arm: 0 = legacy radius (default), 1 = R1, 2 = R2.
-    /// Arm knob, not persisted (read-back lands OFF).
+    /// Phase 66 R1/R2 and Phase 67 R3 arm: 0 = legacy radius (default),
+    /// 1 = R1, 2 = R2, 3 = R3. Arm knob, not persisted (read-back lands OFF).
     pub mate_radius_arm: u8,
     /// Phase 66 D0 telemetry (transient): mate searches whose radius the floor
     /// raised above the legacy value.
@@ -2255,6 +2293,9 @@ pub struct Ecology {
     /// Phase 66 D0 telemetry (transient): successful finds that lay beyond the
     /// legacy radius (only the floor made them possible).
     pub radius_only_finds: u64,
+    /// Phase 67 D0 telemetry (transient): distance sum of the finds only the
+    /// floor made possible (÷ `radius_only_finds` = mean rescue distance).
+    pub radius_only_find_dist_sum: f64,
     /// Phase 63 candidates M/A: floor of the parent's post-grant remainder and
     /// floor of the daughter's grant. Both default to `FORK_BUDGET_MIN` (the
     /// Phase 49 contract); the arms override them per instance and the values
@@ -2490,6 +2531,7 @@ impl Ecology {
             mate_radius_arm: if MATE_FLOOR_ON { 1 } else { 0 },
             radius_boost_searches: 0,
             radius_only_finds: 0,
+            radius_only_find_dist_sum: 0.0,
             speciation_min_side: SPECIATION_MIN_SIDE_DEFAULT,
             // Phase 51: niche resource partition ON by default (the preference
             // multiplier is 1.0 for every clade inside the neutral band, so a
@@ -2734,6 +2776,7 @@ impl Ecology {
             mate_radius_arm: if MATE_FLOOR_ON { 1 } else { 0 },
             radius_boost_searches: 0,
             radius_only_finds: 0,
+            radius_only_find_dist_sum: 0.0,
             speciation_min_side: SPECIATION_MIN_SIDE_DEFAULT,
             // Phase 51: niche resource partition ON by default (see `Ecology::new`).
             niche_partition: NICHE_PARTITION_ON,
@@ -4087,6 +4130,9 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
     /// Phase 66 R2 arm (wide floor; screen calibration only).
     pub fn mate_floor_r2(&mut self) { self.mate_radius_arm = 2; }
 
+    /// Phase 67 R3 arm (near-neighbor floor, 80-120).
+    pub fn mate_floor_r3(&mut self) { self.mate_radius_arm = 3; }
+
     /// Phase 66 arm reset: legacy Phase 42.1 radius.
     pub fn mate_floor_off(&mut self) { self.mate_radius_arm = 0; }
 
@@ -4099,6 +4145,12 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
     /// Phase 66 D0: finds that only the floor's radius made possible.
     pub fn radius_only_finds(&self) -> u64 { self.radius_only_finds }
 
+    /// Phase 67 D0: mean distance of the finds only the floor made possible.
+    pub fn radius_only_find_dist_mean(&self) -> f64 {
+        if self.radius_only_finds == 0 { 0.0 }
+        else { self.radius_only_find_dist_sum / self.radius_only_finds as f64 }
+    }
+
     /// Phase 66: the search radius for one mate attempt and whether the floor
     /// raised it. Pure geometry: `n` is the same-region (same tag) population
     /// of the searcher's kind, so a sparse deme gets a wider search. Roots keep
@@ -4109,12 +4161,15 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         if self.mate_radius_arm == 0 { return (legacy, false); }
         if kind == FISH || self.kind_def(kind).parent_kind.is_none() { return (legacy, false); }
         let n = self.region_count(kind, region).max(1) as f64;
-        let (ref_dist, cap) = if self.mate_radius_arm == 1 {
-            (MATE_FLOOR_R1_REF, MATE_FLOOR_R1_MAX)
+        let (ref_dist, min_floor, cap) = if self.mate_radius_arm == 1 {
+            (MATE_FLOOR_R1_REF, 0.0, MATE_FLOOR_R1_MAX)
+        } else if self.mate_radius_arm == 2 {
+            (MATE_FLOOR_R2_REF, 0.0, MATE_FLOOR_R2_MAX)
         } else {
-            (MATE_FLOOR_R2_REF, MATE_FLOOR_R2_MAX)
+            (MATE_FLOOR_R3_REF, MATE_FLOOR_R3_MIN, MATE_FLOOR_R3_MAX)
         };
-        let floor = (ref_dist * (MATE_FLOOR_N_REF / n).sqrt()).min(cap);
+        let mut floor = (ref_dist * (MATE_FLOOR_N_REF / n).sqrt()).min(cap);
+        if floor < min_floor { floor = min_floor; }
         if floor > legacy { (floor, true) } else { (legacy, false) }
     }
 
@@ -5945,7 +6000,10 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             self.clade_life_mate_miss_detail(cid, k, bucket, kind_pop, region_pop, ready_dist);
         }
         if let Some((mate_j, mate_dist)) = mate_opt {
-            if mate_dist > legacy_mate_radius { self.radius_only_finds += 1; }
+            if mate_dist > legacy_mate_radius {
+                self.radius_only_finds += 1;
+                self.radius_only_find_dist_sum += mate_dist;
+            }
             let b_energy = self.agents[mate_j].energy;
             let b_max_e = self.agents[mate_j].max_energy;
             let b_age = self.agents[mate_j].age;
@@ -10306,6 +10364,7 @@ impl Ecology {
             mate_radius_arm: if MATE_FLOOR_ON { 1 } else { 0 },
             radius_boost_searches: 0,
             radius_only_finds: 0,
+            radius_only_find_dist_sum: 0.0,
             speciation_min_side: state.SpeciationMinSide,
             // Phase 51: niche resource partition. Pre-v18 archives carry no
             // flag → the current default world config (partition ON); the
@@ -10902,5 +10961,168 @@ mod phase66_mate_miss_tests {
         let s = eco.clade_life_stats().iter().find(|s| s.clade_id == 0 && s.root_kind == DECO).unwrap();
         assert_eq!(s.dispersal_out, 1);
         assert_eq!(s.deaths_off_region, 1);
+    }
+}
+
+#[cfg(test)]
+mod phase67_small_floor_tests {
+    use super::*;
+
+    /// A DECO daughter with a controlled budget, minted the way a fork mints
+    /// one, so the public birth gate accepts the fixture members.
+    fn daughter(eco: &mut Ecology) -> SpeciesKind {
+        eco.deco_region_cap_off();
+        let mut def = eco.kind_def(DECO).clone();
+        def.name = "deco-neighbor";
+        def.parent_kind = Some(DECO);
+        def.global_cap = 20;
+        let d = eco.register_kind(def);
+        eco.set_kind_budget(d, 20);
+        d
+    }
+
+    /// Spawn one live member and pin the fields the mate search reads.
+    fn plant(eco: &mut Ecology, d: SpeciesKind, x: f64, z: f64, region: u8, energy_frac: f64) -> usize {
+        let id = eco.spawn_agent(d, x, z).expect("spawn");
+        let i = eco.agents.iter().position(|a| a.id == id).unwrap();
+        let a = &mut eco.agents[i];
+        a.region = region;
+        a.age = 100.0;
+        a.repro = 0.0;
+        a.energy = a.max_energy * energy_frac;
+        i
+    }
+
+    #[test]
+    fn r3_floor_spans_the_80_to_120_band() {
+        let mut eco = Ecology::new(20261201);
+        let d = daughter(&mut eco);
+        eco.mate_floor_r3();
+        // n = 1: 80 * sqrt(4) = 160, capped at 120. (Region 0 has no member
+        // yet; the formula clamps the empty deme to one.)
+        let (r1, b1) = eco.mate_radius_with_floor(d, 0, 19.0);
+        assert!(b1);
+        assert!((r1 - 120.0).abs() < 1e-9, "one member -> the 120 cap");
+        plant(&mut eco, d, 3.0, 0.0, 0, 1.0);
+        assert_eq!(eco.mate_radius_with_floor(d, 0, 19.0).0, 120.0);
+        // n = 2: 113.14; n = 3: 92.38; both inside the band and above legacy.
+        plant(&mut eco, d, 6.0, 0.0, 0, 1.0);
+        let (r2, _) = eco.mate_radius_with_floor(d, 0, 19.0);
+        assert!((r2 - 80.0 * 2.0f64.sqrt()).abs() < 1e-9, "two members -> 113.14");
+        assert!(r2 > 80.0 && r2 < 120.0);
+        plant(&mut eco, d, 9.0, 0.0, 0, 1.0);
+        let (r3, _) = eco.mate_radius_with_floor(d, 0, 19.0);
+        assert!((r3 - 80.0 * (4.0f64 / 3.0).sqrt()).abs() < 1e-9, "three members -> 92.38");
+        // n = 4: 80 exactly; n >= 5: 80 by the floor, never below.
+        plant(&mut eco, d, 12.0, 0.0, 0, 1.0);
+        let (r4, _) = eco.mate_radius_with_floor(d, 0, 19.0);
+        assert!((r4 - 80.0).abs() < 1e-9, "four members -> the 80 floor");
+        for k in 5..=12 {
+            plant(&mut eco, d, k as f64 * 3.0, 0.0, 0, 1.0);
+        }
+        let (r12, _) = eco.mate_radius_with_floor(d, 0, 19.0);
+        assert!((r12 - 80.0).abs() < 1e-9, "twelve members -> still the 80 floor");
+    }
+
+    #[test]
+    fn r3_never_exceeds_120_or_shrinks_a_wider_legacy_radius() {
+        let mut eco = Ecology::new(20261201);
+        let d = daughter(&mut eco);
+        eco.mate_floor_r3();
+        assert_eq!(eco.mate_radius_with_floor(d, 0, 44.0), (120.0, true));
+        assert_eq!(eco.mate_radius_with_floor(d, 0, 150.0), (150.0, false),
+            "a legacy bound wider than the cap wins and is not a boost");
+    }
+
+    #[test]
+    fn r3_excludes_roots_and_fish() {
+        let mut eco = Ecology::new(20261201);
+        eco.mate_floor_r3();
+        assert_eq!(eco.mate_radius_with_floor(DECO, 0, 19.0), (19.0, false),
+            "the root guild is the differentiation engine and stays legacy");
+        assert_eq!(eco.mate_radius_with_floor(FISH, 0, 60.0), (60.0, false));
+    }
+
+    /// A daughter pair `dist` apart: outside the legacy Allee radius (~43 for
+    /// two members) but inside / outside R3's 80-120 band.
+    fn pair_world(seed: u32, arm: u8, dist: f64) -> (Ecology, usize) {
+        let mut eco = Ecology::new(seed);
+        eco.deco_region_cap_off();
+        eco.dispersal_p = 0.0;
+        eco.gene_barrier_strength = 0.0;
+        let d = daughter(&mut eco);
+        let mut def = eco.kind_def(DECO).clone();
+        def.name = "deco-neighbor";
+        def.parent_kind = Some(DECO);
+        def.global_cap = 80;
+        eco.kinds.defs[d as usize] = def;
+        let i = plant(&mut eco, d, 0.0, 0.0, 0, 1.0);
+        let j = plant(&mut eco, d, dist, 0.0, 0, 1.0);
+        for k in [i, j] {
+            eco.agents[k].genome.deco_efficiency = 1.0;
+            eco.agents[k].genome.hue = 0.5;
+            eco.agents[k].energy = eco.agents[k].max_energy;
+            eco.agents[k].age = 100.0;
+            eco.agents[k].repro = 0.0;
+        }
+        // Below the asexual fallback's age gate (45): a failed mate search must
+        // not be masked by a solo birth.
+        eco.agents[i].age = 40.0;
+        if arm == 3 { eco.mate_floor_r3(); }
+        (eco, i)
+    }
+
+    #[test]
+    fn r3_rescues_a_near_partner_that_legacy_cannot_reach() {
+        let (mut off, i0) = pair_world(20261201, 0, 100.0);
+        off.reproduce(i0, 0.1);
+        assert_eq!(off.births, 0, "100 > the legacy radius: no mate");
+        assert_eq!(off.radius_only_finds(), 0);
+
+        let (mut on, i1) = pair_world(20261201, 3, 100.0);
+        on.reproduce(i1, 0.1);
+        assert_eq!(on.births, 1, "R3 reaches the partner at 100 inside the 120 cap");
+        assert_eq!(on.radius_only_finds(), 1);
+        assert_eq!(on.radius_boost_searches(), 1);
+        assert!((on.radius_only_find_dist_mean() - 100.0).abs() < 1e-9,
+            "the rescue distance never exceeds the cap");
+    }
+
+    #[test]
+    fn r3_does_not_reach_the_far_tail() {
+        let (mut on, i) = pair_world(20261201, 3, 200.0);
+        on.reproduce(i, 0.1);
+        assert_eq!(on.births, 0, "200 > the 120 cap: the long tail stays out");
+        assert_eq!(on.radius_only_finds(), 0);
+        assert_eq!(on.radius_boost_searches(), 1, "the search itself was widened");
+    }
+
+    #[test]
+    fn p3_normalises_misses_by_clade_lifetime() {
+        let mut s = CladeLifeStats::default();
+        s.first_tick = 1_000;
+        s.extinction_tick = Some(11_000);
+        s.mate_misses = 500;
+        s.mate_miss_beyond_radius = 300;
+        s.mate_miss_filtered = 200;
+        assert_eq!(s.life_ticks(200_000), 10_000);
+        assert!((s.mate_miss_rate_per_tick(200_000) - 0.05).abs() < 1e-12);
+        assert!((s.mate_miss_bucket_rate_per_tick(MateMissBucket::BeyondRadius, 200_000) - 0.03).abs() < 1e-12);
+        assert!((s.mate_miss_bucket_rate_per_tick(MateMissBucket::Filtered, 200_000) - 0.02).abs() < 1e-12);
+        // A live clade runs to the end of the window.
+        s.extinction_tick = None;
+        assert_eq!(s.life_ticks(200_000), 199_000);
+        // An empty lifetime yields 0, never NaN/inf.
+        let empty = CladeLifeStats::default();
+        assert_eq!(empty.life_ticks(0), 0);
+        assert_eq!(empty.mate_miss_rate_per_tick(0), 0.0);
+        assert_eq!(empty.mate_miss_bucket_rate_per_tick(MateMissBucket::NoKin, 0), 0.0);
+    }
+
+    #[test]
+    fn r3_is_off_by_default() {
+        let eco = Ecology::new(20261201);
+        assert_eq!(eco.mate_radius_arm(), 0);
+        assert_eq!(eco.radius_only_finds(), 0);
     }
 }
