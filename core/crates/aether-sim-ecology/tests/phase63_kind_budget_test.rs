@@ -14,7 +14,8 @@
 //! The default world stays on the Phase 49 rule; the arms are per instance.
 
 use aether_sim_ecology::ecology::{
-    Ecology, DECO, FORK_BUDGET_GRANT, FORK_BUDGET_GROWTH_ON, FORK_BUDGET_MIN, SPECIATION_MIN_SIDE_DEFAULT,
+    Ecology, DECO, FORK_BUDGET_GRANT, FORK_BUDGET_GROWTH_ON, FORK_BUDGET_MIN, FORK_GRACE_ON,
+    SPECIATION_MIN_SIDE_DEFAULT,
 };
 use aether_sim_ecology::save_state::{SaveState, SAVE_STATE_VERSION};
 
@@ -45,7 +46,8 @@ fn the_default_world_keeps_the_phase49_grant_rule() {
     assert_eq!(eco.fork_daughter_min, FORK_BUDGET_MIN);
     assert_eq!(eco.speciation_min_side, SPECIATION_MIN_SIDE_DEFAULT);
     assert_eq!(eco.budget_growth, FORK_BUDGET_GROWTH_ON);
-    assert_eq!(SAVE_STATE_VERSION, 23);
+    assert_eq!(eco.budget_grace, FORK_GRACE_ON);
+    assert_eq!(SAVE_STATE_VERSION, 24);
 }
 
 #[test]

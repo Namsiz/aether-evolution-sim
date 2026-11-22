@@ -128,11 +128,16 @@
 /// unlike the Phase 61/62 region arms because its output lives in the
 /// persisted `KindBudgets` table: restoring the shares without the switch
 /// would freeze a daughter mid-growth.
+/// v23 → v24 (Phase 65): fork grace. The sim level gains `ForkGraceOn` and
+/// `KindGraceUntil` (both `#[serde(default)]` → a v23 archive lands with the
+/// arm OFF and no pending windows). The window changes future birth decisions
+/// for one `FORK_GRACE_TICKS` span, so a save taken inside it must carry it;
+/// the grace counters are telemetry and do not ride the archive.
 
 use serde::{Deserialize, Serialize};
 
 
-pub const SAVE_STATE_VERSION: u32 = 23;
+pub const SAVE_STATE_VERSION: u32 = 24;
 pub const SAVE_STATE_SCHEMA_NAME: &str = "aether-sim-save-state";
 
 /// DECO selection-pressure mode selector (persisted in SaveState v2).
@@ -1069,6 +1074,15 @@ pub struct SaveState {
     /// Empty on pre-v23 archives.
     #[serde(default)]
     pub KindGrowthGrants: Vec<usize>,
+    /// Phase 65: fork-grace arm switch (v24). `#[serde(default)]` → pre-v24
+    /// archives land on the compiled default (off).
+    #[serde(default)]
+    pub ForkGraceOn: bool,
+    /// Phase 65: per-kind grace window end tick (index = kind id; 0 = none).
+    /// Empty on pre-v24 archives. Only state that changes future birth
+    /// decisions is archived; the grace counters are telemetry.
+    #[serde(default)]
+    pub KindGraceUntil: Vec<u32>,
 }
 
 fn default_min_side_legacy() -> usize {

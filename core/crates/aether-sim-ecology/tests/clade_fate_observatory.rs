@@ -178,14 +178,21 @@ fn clade_fate_observation() {
     let fork_min_arm = fork_min_env.clone().unwrap_or_else(|| "forkmindflt".to_string());
     let fork_dau_env = env_str("PHASE_FORK_DAUGHTER_MIN");
     let fork_dau_arm = fork_dau_env.clone().unwrap_or_else(|| "forkdaudflt".to_string());
+    // Phase 65 W1: fork grace (births skip the kind-budget gate for one window).
+    let grace_arm = match env_str("PHASE_FORK_GRACE").as_deref() {
+        Some("on") => "graceon",
+        Some("off") => "graceoff",
+        _ => "gracedflt",
+    };
+    let grace_ticks_env = env_str("PHASE_FORK_GRACE_TICKS");
     // Calibration-sweep tag (Phase 55): parallel arms of the same switch must
     // never overwrite each other's output files.
     let tag = env_str("PHASE_ARM_TAG").unwrap_or_default();
     let suffix = if tag.is_empty() { String::new() } else { format!("_{tag}") };
-    let csv_path = format!("/tmp/clade_fate_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}_{growth_arm}_{fork_min_arm}_{fork_dau_arm}{suffix}.csv");
-    let tree_path = format!("/tmp/clade_tree_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}_{growth_arm}_{fork_min_arm}_{fork_dau_arm}{suffix}.csv");
-    let culture_path = format!("/tmp/clade_culture_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}_{growth_arm}_{fork_min_arm}_{fork_dau_arm}{suffix}.csv");
-    let life_path = format!("/tmp/clade_life_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}_{growth_arm}_{fork_min_arm}_{fork_dau_arm}{suffix}.csv");
+    let csv_path = format!("/tmp/clade_fate_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}_{growth_arm}_{fork_min_arm}_{fork_dau_arm}_{grace_arm}{suffix}.csv");
+    let tree_path = format!("/tmp/clade_tree_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}_{growth_arm}_{fork_min_arm}_{fork_dau_arm}_{grace_arm}{suffix}.csv");
+    let culture_path = format!("/tmp/clade_culture_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}_{growth_arm}_{fork_min_arm}_{fork_dau_arm}_{grace_arm}{suffix}.csv");
+    let life_path = format!("/tmp/clade_life_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}_{growth_arm}_{fork_min_arm}_{fork_dau_arm}_{grace_arm}{suffix}.csv");
     let mut csv = String::from(
         "t,pop,herb,pred,scav,omn,fish,deco,clades_live,clades_total,events,tokens,bearers,groups,levels,authorities,grass_mean,grass_var,env_mean,env_var,structs,deco_r0,deco_r1,deco_r2,deco_r3,structs_r0,structs_r1,structs_r2,structs_r3,denv_mean,denv_var\n",
     );
@@ -217,8 +224,13 @@ fn clade_fate_observation() {
     if let Some(v) = &fork_dau_env {
         if let Ok(m) = v.trim().parse::<usize>() { eco.fork_budget_daughter_min_set(m); }
     }
+    if grace_arm == "graceon" { eco.fork_grace_on(); }
+    if grace_arm == "graceoff" { eco.fork_grace_off(); }
+    if let Some(v) = &grace_ticks_env {
+        if let Ok(t) = v.trim().parse::<u32>() { eco.fork_grace_ticks_set(t); }
+    }
     let mut last_events = 0usize;
-    eprintln!("=== clade-fate seed {seed} ({ticks} ticks, structure_env={arm}, deco_env={deco_arm}, token_sign={sign_arm}, clamp={clamp_arm}, place={place_arm}, repro={repro_arm}) ===");
+    eprintln!("=== clade-fate seed {seed} ({ticks} ticks, structure_env={arm}, deco_env={deco_arm}, token_sign={sign_arm}, clamp={clamp_arm}, place={place_arm}, repro={repro_arm}, grace={grace_arm}) ===");
     for t in 1..=ticks {
         eco.update(0.1, daylight(t));
         let n = eco.clade_events().len();
@@ -469,4 +481,27 @@ fn clade_fate_observation() {
             eco.family_budget_total(aether_sim_ecology::ecology::DECO),
         );
     }
+    // Phase 65 W1: fork-grace ledger. `skips` counts births the window
+    // admitted that the legacy kind-budget gate would have refused; `settled`
+    // is the parent→daughter transfer at window close; `unpaid` is the
+    // overdraft the parent could not pay (recorded, never minted).
+    let mut grace_skips = 0u64;
+    let mut grace_windows = 0usize;
+    for k in 0..eco.kinds.len() {
+        let kind = k as aether_sim_ecology::ecology::SpeciesKind;
+        let skips = eco.kind_grace_skips(kind);
+        grace_skips += skips;
+        if eco.kind_grace_until(kind) != 0 { grace_windows += 1; }
+        if skips > 0 || eco.kind_grace_peak_over(kind) > 0
+            || eco.kind_grace_settled(kind) > 0 || eco.kind_grace_unpaid(kind) > 0
+        {
+            eprintln!(
+                "  [grace] kind={k} name={} budget={} until={} skips={} peak_over={} settled={} unpaid={}",
+                eco.kind_name(kind), eco.kind_budget(kind), eco.kind_grace_until(kind),
+                skips, eco.kind_grace_peak_over(kind),
+                eco.kind_grace_settled(kind), eco.kind_grace_unpaid(kind),
+            );
+        }
+    }
+    eprintln!("  [grace] total_skips={grace_skips} windows_pending={grace_windows}");
 }

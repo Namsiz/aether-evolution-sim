@@ -1091,6 +1091,31 @@ pub const FORK_BUDGET_MIN: usize = 8;
 /// (`budget_fork_off`) restores the Phase 47 family-shared-cap trajectory.
 pub const BUDGET_FORK_ON: bool = true;
 
+// ----- Phase 65: fork grace (candidate W1) ----------------------------------
+//
+// The Phase 62/63 「建支即失稳」 class: a daughter passes MIN_SIDE=8 at the cut,
+// then dissipates inside 4–10k ticks with `region_cap_blocks = 0` AND
+// `kind_budget_blocks = 0`. By construction neither capacity gate ever refused
+// a birth — the clade died on recruitment (6 births / 14 deaths in the Phase 62
+// instance), not on slots. W1 nevertheless tests the remaining capacity
+// hypothesis: a newborn clade may overdraw its grant for one window, and the
+// overdraft is settled out of the parent's share if the clade is still viable
+// when the window closes. Population may exceed the grant during the window;
+// the slot table does not move until settlement, so the family total stays
+// conserved by construction.
+/// Phase 65 W1 compiled default: OFF until a pre-registered 5-seed A/B passes
+/// (`research/phase65-report.md`).
+pub const FORK_GRACE_ON: bool = false;
+/// Grace window after a fork (5 000 ticks: covers Phase 62's 3 960-tick and
+/// Phase 63's 8 710-tick dissipations at the 60-tick settlement cadence).
+pub const FORK_GRACE_TICKS: u32 = 5_000;
+/// Overdraft ceiling = one minimum viable cohort. A no-further-fork parent is
+/// guaranteed to hold this much (its post-grant remainder floor is
+/// `FORK_BUDGET_MIN`), so settlement can always be paid in the simple case;
+/// deeper parents pay what they still hold and the shortfall is recorded, never
+/// minted. Same ceiling as Phase 63's growth arm (`grant + 8`).
+pub const FORK_GRACE_OVERDRAFT_MAX: usize = 8;
+
 // ----- Phase 63: fork-budget growth (candidate G) ---------------------------
 //
 // Phase 62 §3.3/§4: the daughters die on their OWN kind budget, not on the
@@ -2133,6 +2158,25 @@ pub struct Ecology {
     /// Phase 63: slots this kind has already earned through growth (index =
     /// kind id; zero for roots and for kinds that never grew). Persisted.
     pub kind_growth_grants: Vec<usize>,
+    /// Phase 65 W1: fork-grace arm switch (`FORK_GRACE_ON`). Persisted: the
+    /// window changes future birth decisions, so a restored world must keep it.
+    pub budget_grace: bool,
+    /// Phase 65 W1: tick at which each derived kind's grace window closes
+    /// (index = kind id; 0 = none). Persisted.
+    pub kind_grace_until: Vec<u32>,
+    /// Phase 65 W1: grace window length for this instance (arm knob).
+    pub grace_ticks: u32,
+    /// Phase 65 W1 telemetry (transient, like `clade_life`): births admitted
+    /// while the kind was already at its grant — the legacy gate would have
+    /// refused them.
+    pub kind_grace_skips: Vec<u64>,
+    /// Peak `count(kind) − budget` observed at an admitted grace birth.
+    pub kind_grace_peak_over: Vec<usize>,
+    /// Slots settled out of the parent at window close.
+    pub kind_grace_settled: Vec<usize>,
+    /// Overdraft the parent could not pay (dead/poor parent, or a clade below
+    /// MIN_SIDE). Recorded, never minted.
+    pub kind_grace_unpaid: Vec<usize>,
     /// Phase 63 candidates M/A: floor of the parent's post-grant remainder and
     /// floor of the daughter's grant. Both default to `FORK_BUDGET_MIN` (the
     /// Phase 49 contract); the arms override them per instance and the values
@@ -2356,6 +2400,13 @@ impl Ecology {
             kind_budgets,
             budget_growth: FORK_BUDGET_GROWTH_ON,
             kind_growth_grants: Vec::new(),
+            budget_grace: FORK_GRACE_ON,
+            kind_grace_until: Vec::new(),
+            grace_ticks: FORK_GRACE_TICKS,
+            kind_grace_skips: Vec::new(),
+            kind_grace_peak_over: Vec::new(),
+            kind_grace_settled: Vec::new(),
+            kind_grace_unpaid: Vec::new(),
             fork_budget_min: FORK_BUDGET_MIN,
             fork_daughter_min: FORK_BUDGET_MIN,
             speciation_min_side: SPECIATION_MIN_SIDE_DEFAULT,
@@ -2590,6 +2641,13 @@ impl Ecology {
             kind_budgets,
             budget_growth: FORK_BUDGET_GROWTH_ON,
             kind_growth_grants: Vec::new(),
+            budget_grace: FORK_GRACE_ON,
+            kind_grace_until: Vec::new(),
+            grace_ticks: FORK_GRACE_TICKS,
+            kind_grace_skips: Vec::new(),
+            kind_grace_peak_over: Vec::new(),
+            kind_grace_settled: Vec::new(),
+            kind_grace_unpaid: Vec::new(),
             fork_budget_min: FORK_BUDGET_MIN,
             fork_daughter_min: FORK_BUDGET_MIN,
             speciation_min_side: SPECIATION_MIN_SIDE_DEFAULT,
@@ -3217,6 +3275,7 @@ impl Ecology {
         // after, so this is only the transient default.
         while self.kind_budgets.len() <= id as usize { self.kind_budgets.push(0); }
         self.kind_budgets[id as usize] = self.kind_def(id).global_cap;
+        while self.kind_grace_until.len() <= id as usize { self.kind_grace_until.push(0); }
         id
     }
 
@@ -3936,6 +3995,135 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         self.kind_growth_grants.get(kind as usize).copied().unwrap_or(0)
     }
 
+    // ----- Phase 65 W1: fork grace -----------------------------------------
+
+    /// Phase 65 W1 arm on. The window length is `grace_ticks`
+    /// (`FORK_GRACE_TICKS` unless the arm overrides it).
+    pub fn fork_grace_on(&mut self) { self.budget_grace = true; }
+
+    /// Phase 65 W1 arm off: also drops any pending window (the default world
+    /// never has one, so this is exact).
+    pub fn fork_grace_off(&mut self) {
+        self.budget_grace = false;
+        self.kind_grace_until.clear();
+    }
+
+    /// Phase 65 W1 arm knob (parallel arms of the same mechanism use one
+    /// window length; values below 1 tick are clamped so a window always runs
+    /// at least until the next 60-tick settlement pass).
+    pub fn fork_grace_ticks_set(&mut self, ticks: u32) {
+        self.grace_ticks = ticks.max(1);
+    }
+
+    /// Phase 65 W1: is `kind` inside a fork window? Roots never are.
+    fn in_fork_grace(&self, kind: SpeciesKind) -> bool {
+        if !self.budget_grace { return false; }
+        if self.kind_def(kind).parent_kind.is_none() { return false; }
+        match self.kind_grace_until.get(kind as usize) {
+            Some(&until) => until != 0 && self.tick_count < until,
+            None => false,
+        }
+    }
+
+    fn set_kind_grace_until(&mut self, kind: SpeciesKind, until: u32) {
+        while self.kind_grace_until.len() <= kind as usize { self.kind_grace_until.push(0); }
+        self.kind_grace_until[kind as usize] = until;
+    }
+
+    fn bump_grace_stats(&mut self, kind: SpeciesKind, over: usize) {
+        while self.kind_grace_skips.len() <= kind as usize { self.kind_grace_skips.push(0); }
+        while self.kind_grace_peak_over.len() <= kind as usize { self.kind_grace_peak_over.push(0); }
+        self.kind_grace_skips[kind as usize] += 1;
+        if over > self.kind_grace_peak_over[kind as usize] {
+            self.kind_grace_peak_over[kind as usize] = over;
+        }
+    }
+
+    fn add_grace_settled(&mut self, kind: SpeciesKind, slots: usize) {
+        while self.kind_grace_settled.len() <= kind as usize { self.kind_grace_settled.push(0); }
+        self.kind_grace_settled[kind as usize] += slots;
+    }
+
+    fn add_grace_unpaid(&mut self, kind: SpeciesKind, slots: usize) {
+        while self.kind_grace_unpaid.len() <= kind as usize { self.kind_grace_unpaid.push(0); }
+        self.kind_grace_unpaid[kind as usize] += slots;
+    }
+
+    /// Phase 65 W1: births that only the grace window admitted (the legacy
+    /// gate would have refused them). The D0 arm criterion reads this sum.
+    pub fn kind_grace_skips(&self, kind: SpeciesKind) -> u64 {
+        self.kind_grace_skips.get(kind as usize).copied().unwrap_or(0)
+    }
+
+    /// Phase 65 W1: peak overdraft (`count − budget`) seen at an admitted
+    /// grace birth.
+    pub fn kind_grace_peak_over(&self, kind: SpeciesKind) -> usize {
+        self.kind_grace_peak_over.get(kind as usize).copied().unwrap_or(0)
+    }
+
+    /// Phase 65 W1: slots moved parent→daughter at window close.
+    pub fn kind_grace_settled(&self, kind: SpeciesKind) -> usize {
+        self.kind_grace_settled.get(kind as usize).copied().unwrap_or(0)
+    }
+
+    /// Phase 65 W1: overdraft the parent could not pay (recorded, not minted).
+    pub fn kind_grace_unpaid(&self, kind: SpeciesKind) -> usize {
+        self.kind_grace_unpaid.get(kind as usize).copied().unwrap_or(0)
+    }
+
+    /// Phase 65 W1: pending window end (0 = none).
+    pub fn kind_grace_until(&self, kind: SpeciesKind) -> u32 {
+        self.kind_grace_until.get(kind as usize).copied().unwrap_or(0)
+    }
+
+    /// Phase 65 W1: total admitted overdraft births across every kind (the
+    /// pre-registered D0 instrument).
+    pub fn grace_total_skips(&self) -> u64 {
+        self.kind_grace_skips.iter().sum()
+    }
+
+    /// Phase 65 W1 settlement, run from `check_speciation` after the extinct
+    /// kinds have returned their shares. One-shot per kind: the window is
+    /// cleared before any charge. `over` counts the derived kind's own
+    /// members only (founders keep the parent kind and sit outside its grant);
+    /// a viable clade charges the parent up to its whole share, a clade below
+    /// `speciation_min_side` (or extinct) charges nothing and records the
+    /// shortfall. No path mints slots, so every family total is unchanged.
+    fn settle_fork_grace(&mut self, now: u32) {
+        if !self.budget_grace { return; }
+        for k in 0..self.kind_grace_until.len() {
+            let until = self.kind_grace_until[k];
+            if until == 0 || now < until { continue; }
+            self.kind_grace_until[k] = 0;
+            let kind = k as SpeciesKind;
+            let budget = self.kind_budget(kind);
+            let over = self.count(kind).saturating_sub(budget);
+            if over == 0 { continue; }
+            let min_side = self.speciation_min_side;
+            let viable = self.species_clades.iter().any(|c| {
+                c.derived_kind == Some(k as u32)
+                    && c.death_tick.is_none()
+                    && c.members.len() >= min_side
+            });
+            if !viable {
+                self.add_grace_unpaid(kind, over);
+                continue;
+            }
+            let parent = match self.kind_def(kind).parent_kind {
+                Some(p) => p,
+                None => { self.add_grace_unpaid(kind, over); continue; }
+            };
+            let parent_budget = self.kind_budget(parent);
+            let pay = over.min(parent_budget);
+            if pay > 0 {
+                self.set_kind_budget(parent, parent_budget - pay);
+                self.set_kind_budget(kind, budget + pay);
+            }
+            self.add_grace_settled(kind, pay);
+            self.add_grace_unpaid(kind, over - pay);
+        }
+    }
+
     /// Phase 49: summed budget share of every kind in `root`'s guild. The
     /// invariant: this is conserved across forks and extinctions (grants move
     /// budget parent→child, returns move it back up), so a DECO family always
@@ -4554,17 +4742,32 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         let def_repro_cd = self.kind_def(kind).repro_cooldown;
         let (se0, se1) = self.kind_def(kind).start_energy;
         let cap = self.biome_max_for(kind, x, z);
+        // Phase 65 W1: whether this birth is only admissible because of the
+        // grace window (the legacy gate would have refused it). Recorded on
+        // success only — a region-cap refusal leaves the trajectory identical.
+        let mut grace_admitted = false;
         // Phase 49 A/B: with the fork budget active, each kind's births are
         // gated by its OWN carved-out share (min with the local biome cap):
         // a daughter's growth is decoupled from the root's occupancy. The
         // legacy arm keeps the Phase 47 family-shared check bit-exact.
         if self.budget_fork {
             let budget = self.kind_budget(kind);
-            let eff_cap = if budget < cap { budget } else { cap };
-            if self.count(kind) >= eff_cap {
+            // Phase 65 W1: a newborn kind's births skip the budget gate for
+            // one window (the regional cap below still applies). The family
+            // table stays untouched until settlement.
+            let grace = self.in_fork_grace(kind);
+            let allowance = if grace {
+                budget.saturating_add(FORK_GRACE_OVERDRAFT_MAX)
+            } else {
+                budget
+            };
+            let eff_cap = if allowance < cap { allowance } else { cap };
+            let standing = self.count(kind);
+            if standing >= eff_cap {
                 if let Some(t) = tag { self.clade_life_block(t, CladeBirthBlock::KindBudget); }
                 return None;
             }
+            grace_admitted = grace && standing >= budget;
         } else {
             let root = self.root_kind(kind);
             let family_total = if root == kind {
@@ -4689,6 +4892,10 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         };
         let idx = self.agents.len();
         self.agents.push(a);
+        if grace_admitted {
+            let over = self.count(kind).saturating_sub(self.kind_budget(kind));
+            self.bump_grace_stats(kind, over);
+        }
         if let Some(t) = tag { self.clade_life_birth(t.0, t.1); }
         Some(&mut self.agents[idx])
     }
@@ -7880,6 +8087,12 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             });
         }
 
+        // (a4) Phase 65 W1: windows that closed before this pass settle their
+        // overdraft now. Runs after the extinct-kind returns above so a dead
+        // daughter's share is already back with the parent (and its own
+        // budget is 0, so it has no debt to settle).
+        self.settle_fork_grace(now);
+
         // (b/c) per-kind: population → lazy root clade → repoint strays →
         // time-gated multi-axis split detection. Registry id order keeps the
         // pass deterministic.
@@ -8149,6 +8362,11 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 if let Some(ev) = event.as_mut() {
                     if ev.child_budget == 0 { ev.child_budget = g as u32; }
                 }
+            }
+            // Phase 65 W1: the newborn kind may exceed its grant for one
+            // window; the settlement pass charges the parent if it survives.
+            if self.budget_grace {
+                self.set_kind_grace_until(did, now + self.grace_ticks);
             }
             let derived_kind_name = self.kind_name(did);
             let refs: Vec<&Agent> = members.iter().map(|&p| &self.agents[idxs[p]]).collect();
@@ -9090,6 +9308,9 @@ impl Ecology {
             KindBudgets: self.kind_budgets.clone(),
             BudgetGrowthOn: self.budget_growth,
             KindGrowthGrants: self.kind_growth_grants.clone(),
+            // Phase 65: fork grace (the window end changes future births).
+            ForkGraceOn: self.budget_grace,
+            KindGraceUntil: self.kind_grace_until.clone(),
             SpeciationMinSide: self.speciation_min_side,
             NichePartitionOn: self.niche_partition,
             NicheGenAccum: self.niche_gen_accum,
@@ -9839,6 +10060,15 @@ impl Ecology {
             // 5-seed A/B) with an empty ledger.
             budget_growth: state.BudgetGrowthOn,
             kind_growth_grants: state.KindGrowthGrants.clone(),
+            // Phase 65: the grace switch and pending windows ride the archive;
+            // the counters are telemetry and restart at zero.
+            budget_grace: state.ForkGraceOn,
+            kind_grace_until: state.KindGraceUntil.clone(),
+            grace_ticks: FORK_GRACE_TICKS,
+            kind_grace_skips: Vec::new(),
+            kind_grace_peak_over: Vec::new(),
+            kind_grace_settled: Vec::new(),
+            kind_grace_unpaid: Vec::new(),
             fork_budget_min: FORK_BUDGET_MIN,
             fork_daughter_min: FORK_BUDGET_MIN,
             speciation_min_side: state.SpeciationMinSide,
@@ -10053,5 +10283,197 @@ mod phase63_fork_budget_tests {
         assert_eq!(chain(10), (5, 14), "Phase 63's floor, now the M10 arm");
         assert_eq!(chain(12), (4, 21));
         assert_eq!(chain(16), (3, 28));
+    }
+}
+
+#[cfg(test)]
+mod phase65_fork_grace_tests {
+    use super::*;
+    use crate::save_state::SaveState;
+
+    /// A DECO daughter with `grant` slots and `filled` live members, spawned
+    /// through the real birth gate (the grace window is exercised, not
+    /// bypassed). The clade record carries the spawned ids so the settlement's
+    /// viability check sees the same population.
+    fn grace_world(
+        seed: u32,
+        filled: usize,
+        root_budget: usize,
+        grant: usize,
+        grace: bool,
+    ) -> (Ecology, SpeciesKind) {
+        let mut eco = Ecology::new(seed);
+        if grace { eco.fork_grace_on(); } else { eco.fork_grace_off(); }
+        // Isolate the kind-budget gate from the Phase 60 regional split.
+        eco.deco_region_cap_off();
+        let d = {
+            let mut def = eco.kind_def(DECO).clone();
+            def.name = "deco-grace";
+            def.parent_kind = Some(DECO);
+            eco.register_kind(def)
+        };
+        eco.kind_budgets[DECO as usize] = root_budget;
+        eco.set_kind_budget(d, grant);
+        if grace { eco.set_kind_grace_until(d, eco.grace_ticks); }
+        let cell = GRID_SPAN / GRID_N as f64;
+        let j = (0..eco.suit.len()).find(|&j| eco.suit[j] > 0.5).expect("land");
+        let x = -GRID_SPAN / 2.0 + ((j % GRID_N as usize) as f64 + 0.5) * cell;
+        let z = -GRID_SPAN / 2.0 + ((j / GRID_N as usize) as f64 + 0.5) * cell;
+        let mut members = Vec::new();
+        for i in 0..filled {
+            let id = eco.spawn_agent(d, x, z);
+            assert!(id.is_some(), "spawn {i} of {filled} (grant {grant})");
+            members.push(id.unwrap());
+        }
+        let centroid = eco.agents[0].genome.clone();
+        eco.species_clades.push(SpeciesClade {
+            id: 100,
+            parent_id: None,
+            kind: "deco",
+            name: "deco-grace".to_string(),
+            birth_tick: 0,
+            death_tick: None,
+            centroid_genome: centroid,
+            members,
+            niche_offset: 0.0,
+            kind_id: DECO as u32,
+            derived_kind: Some(d as u32),
+            axes: Vec::new(),
+        });
+        (eco, d)
+    }
+
+    #[test]
+    fn without_grace_the_grant_is_a_hard_ceiling() {
+        let (mut eco, d) = grace_world(20261116, FORK_BUDGET_MIN, 72, FORK_BUDGET_MIN, false);
+        let (x, z) = (eco.agents[0].x, eco.agents[0].z);
+        assert!(eco.spawn_agent(d, x, z).is_none(), "the legacy gate refuses at the grant");
+        assert_eq!(eco.count(d), FORK_BUDGET_MIN);
+        assert_eq!(eco.grace_total_skips(), 0);
+        assert_eq!(eco.family_budget_total(DECO), 80);
+    }
+
+    #[test]
+    fn grace_admits_at_most_one_extra_cohort() {
+        let cap = FORK_BUDGET_MIN + FORK_GRACE_OVERDRAFT_MAX;
+        let (mut eco, d) = grace_world(20261116, cap, 72, FORK_BUDGET_MIN, true);
+        assert_eq!(eco.count(d), cap, "the whole overdraft is admissible");
+        assert_eq!(eco.kind_grace_skips(d), FORK_GRACE_OVERDRAFT_MAX as u64);
+        assert_eq!(eco.kind_grace_peak_over(d), FORK_GRACE_OVERDRAFT_MAX);
+        let (x, z) = (eco.agents[0].x, eco.agents[0].z);
+        assert!(eco.spawn_agent(d, x, z).is_none(), "grant + overdraft is a hard ceiling");
+        assert_eq!(eco.kind_budget(d), FORK_BUDGET_MIN, "the window never moves slots");
+        assert_eq!(eco.family_budget_total(DECO), 80);
+    }
+
+    #[test]
+    fn settlement_moves_the_overdraft_out_of_the_parent_and_conserves_the_family() {
+        let (mut eco, d) = grace_world(20261116, 12, 72, FORK_BUDGET_MIN, true);
+        assert_eq!(eco.family_budget_total(DECO), 80);
+        let now = eco.grace_ticks;
+        eco.tick_count = now;
+        eco.settle_fork_grace(now);
+        assert_eq!(eco.kind_budget(DECO), 68, "the parent pays the four over-budget members");
+        assert_eq!(eco.kind_budget(d), 12);
+        assert_eq!(eco.kind_grace_settled(d), 4);
+        assert_eq!(eco.kind_grace_unpaid(d), 0);
+        assert_eq!(eco.family_budget_total(DECO), 80, "parent→daughter transfer only");
+        assert_eq!(eco.kind_grace_until(d), 0, "the window is one-shot");
+        // A second pass at the same tick must not charge again.
+        eco.settle_fork_grace(now);
+        assert_eq!(eco.kind_budget(DECO), 68);
+        assert_eq!(eco.kind_budget(d), 12);
+    }
+
+    #[test]
+    fn settlement_pays_at_most_the_parents_share_and_records_the_shortfall() {
+        let (mut eco, d) = grace_world(20261116, 12, 3, FORK_BUDGET_MIN, true);
+        assert_eq!(eco.family_budget_total(DECO), 11);
+        let now = eco.grace_ticks;
+        eco.tick_count = now;
+        eco.settle_fork_grace(now);
+        assert_eq!(eco.kind_budget(DECO), 0, "the parent is charged to zero, never below");
+        assert_eq!(eco.kind_budget(d), 11);
+        assert_eq!(eco.kind_grace_settled(d), 3);
+        assert_eq!(eco.kind_grace_unpaid(d), 1, "the unpaid slot is recorded, not minted");
+        assert_eq!(eco.family_budget_total(DECO), 11);
+    }
+
+    #[test]
+    fn a_clade_below_min_side_charges_nothing() {
+        // Contract test: with the real floor a derived kind cannot hold more
+        // than its grant while its clade sits below MIN_SIDE, so the branch is
+        // synthetic (budget 4 = below the floor).
+        let (mut eco, d) = grace_world(20261116, 6, 72, FORK_BUDGET_MIN, true);
+        eco.set_kind_budget(d, 4);
+        eco.species_clades[0].members.truncate(6);
+        let now = eco.grace_ticks;
+        eco.tick_count = now;
+        eco.settle_fork_grace(now);
+        assert_eq!(eco.kind_budget(d), 4, "no transfer into a sub-viable clade");
+        assert_eq!(eco.kind_budget(DECO), 72);
+        assert_eq!(eco.kind_grace_settled(d), 0);
+        assert_eq!(eco.kind_grace_unpaid(d), 2);
+        assert_eq!(eco.family_budget_total(DECO), 76);
+    }
+
+    #[test]
+    fn an_extinct_daughter_has_no_debt_after_its_share_returns() {
+        let (mut eco, d) = grace_world(20261116, 12, 72, FORK_BUDGET_MIN, true);
+        // The extinction path (check_speciation) removes the members, returns
+        // the whole share to the parent and zeroes the daughter.
+        for a in eco.agents.iter_mut() { a.alive = false; }
+        eco.species_clades[0].members.clear();
+        eco.species_clades[0].death_tick = Some(1);
+        eco.set_kind_budget(DECO, 80);
+        eco.set_kind_budget(d, 0);
+        let now = eco.grace_ticks;
+        eco.tick_count = now;
+        eco.settle_fork_grace(now);
+        assert_eq!(eco.kind_grace_settled(d), 0);
+        assert_eq!(eco.kind_grace_unpaid(d), 0);
+        assert_eq!(eco.family_budget_total(DECO), 80);
+    }
+
+    #[test]
+    fn roots_never_enter_a_grace_window() {
+        let (mut eco, _d) = grace_world(20261116, 10, 72, FORK_BUDGET_MIN, true);
+        eco.set_kind_grace_until(DECO, eco.grace_ticks);
+        assert!(!eco.in_fork_grace(DECO));
+        assert_eq!(eco.kind_grace_until(DECO), 5_000);
+    }
+
+    #[test]
+    fn grace_off_is_the_compiled_default_and_starts_clean() {
+        let eco = Ecology::new(20261116);
+        assert!(!eco.budget_grace, "W1 is arm-only until the 5-seed verdict");
+        assert_eq!(eco.grace_ticks, FORK_GRACE_TICKS);
+        assert_eq!(eco.grace_total_skips(), 0);
+        assert!(eco.kind_grace_until.is_empty());
+    }
+
+    #[test]
+    fn grace_window_rides_the_archive_and_pre_v24_lands_off() {
+        let (mut eco, d) = grace_world(20261116, 12, 72, FORK_BUDGET_MIN, true);
+        let mut json = serde_json::to_value(eco.to_save_state()).unwrap();
+        assert_eq!(json["Version"], crate::save_state::SAVE_STATE_VERSION);
+        assert_eq!(json["ForkGraceOn"], true);
+        assert_eq!(json["KindGraceUntil"][d as usize], eco.grace_ticks);
+        let restored = Ecology::from_save_state(
+            serde_json::from_value::<SaveState>(json.clone()).unwrap());
+        assert!(restored.budget_grace);
+        assert_eq!(restored.kind_grace_until(d), eco.grace_ticks);
+        assert_eq!(restored.family_budget_total(DECO), 80);
+
+        // A v23 archive has neither key: lands OFF with no pending window.
+        let obj = json.as_object_mut().unwrap();
+        obj.remove("ForkGraceOn");
+        obj.remove("KindGraceUntil");
+        obj.insert("Version".to_string(), serde_json::json!(23));
+        let old: SaveState = serde_json::from_value(json).unwrap();
+        let restored = Ecology::from_save_state(old);
+        assert!(!restored.budget_grace);
+        assert_eq!(restored.kind_grace_until(d), 0);
+        assert_eq!(restored.grace_total_skips(), 0);
     }
 }
