@@ -214,9 +214,9 @@ P1、P2、P3a 必须同时满足；D0 是必要条件。
 ### 2.3 诊断遥测（Phase 66 §1.1 的仪器）
 
 - `CladeLifeStats` 增加 14 个纯计数列：5 个互斥原因桶 + young 的 6 列 + kind/region 人口和 + `dispersal_out` / `deaths_off_region` + `ready_dist_sum/min`（`ecology.rs:1645-1685`）。
-- `mate_miss_bucket()`（`:4520-4575`）在 `nearest` 返回空后只读重扫，按 §1.1 的优先级分桶；`clade_life_mate_miss_detail()`（`:4577-4602`）记账并同时写 young 桶；`clade_is_young()` 用 `SpeciesClade::birth_tick` + `YOUNG_CLADE_TICKS = 10_000`。
-- `deaths_off_region` 在 `clade_life_death()`（`:4465`）用 `region_of(x,z) != region` 判定；`dispersal_out` 在两条出生路径的 `relocated_founders` 分支记账（`:5973`、`:6046`）。
-- `min_ready_dist` 的初值缺陷在 A/B 构建里修掉：首次写入时直接赋值（`:4596-4600`）。
+- `mate_miss_bucket()`（`:4556-4605`）在 `nearest` 返回空后只读重扫，按 §1.1 的优先级分桶；`clade_life_mate_miss_detail()`（`:4607-4633`）记账并同时写 young 桶；`clade_is_young()` 用 `SpeciesClade::birth_tick` + `YOUNG_CLADE_TICKS = 10_000`。
+- `deaths_off_region` 在 `clade_life_death()`（`:4526`）用 `region_of(x,z) != region` 判定；`dispersal_out` 在两条出生路径的 `dispersal.is_some()` 分支记账（`:6088`、`:6160`）。
+- `min_ready_dist` 的初值缺陷在 A/B 构建里修掉：首次写入时直接赋值（`:4626-4630`）。
 - 全部遥测：零 RNG、零状态回读、不入档。默认臂在 seed `20261102` / 200k 上复现 **9 分化 / 4 灭绝**（§1.1），证明轨迹未变。
 
 ### 2.4 观测器
@@ -455,9 +455,9 @@ seed 池按 §1.8 替换：`20261125` 的 DECO 根 clade 0 在**两臂**都于 t
   - `:2487-2492`、`:2731-2736`、`:10303-10308`：三个构造器的初始化
   - `:4106-4135`：`mate_radius_with_floor()`
   - `:5907-5920`、`:5948`：`reproduce` 的地板与 `only_find` 记账
-  - `:4520-4602`：`mate_miss_bucket()` / `clade_life_mate_miss_detail()` / `clade_is_young()`
-  - `:4465`、`:5973`、`:6046`：`deaths_off_region` / `dispersal_out` 记账
-  - `:10720-10910`：`phase66_mate_miss_tests`（10 个）
+  - `:4556-4641`：`mate_miss_bucket()` / `clade_life_mate_miss_detail()` / `clade_is_young()`
+  - `:4526`、`:6088`、`:6160`：`deaths_off_region` / `dispersal_out` 记账
+  - `:10717-10910`：`phase66_mate_miss_tests`（10 个）
 - `core/crates/aether-sim-ecology/tests/clade_fate_observatory.rs`
   - `:189-195`：`PHASE_MATE_FLOOR`
   - `:198-201`：臂名进入 CSV 文件名
