@@ -551,13 +551,25 @@ fn clade_fate_observation() {
     }
     let n = tot.iter().sum::<u64>();
     let ny = young.iter().sum::<u64>();
-    // Phase 66 P3a: the arm's scope is derived DECO clades (clade_id != 0).
+    // Phase 66 P3a / Phase 67 P3: the arm's scope is derived DECO KINDS.
+    // `clade_id != 0` is not a valid proxy: on the Phase 67 pool the DECO root
+    // clade materialized as id 1 (the pred root took 0), so the proxy booked
+    // the root's legacy-radius misses into the "daughter" total. A clade is in
+    // scope iff its kind has a parent kind; the root's misses stay out.
+    let is_derived_deco = |s: &aether_sim_ecology::ecology::CladeLifeStats| {
+        s.root_kind == aether_sim_ecology::ecology::DECO
+            && eco.species_clades().iter().find(|c| c.id == s.clade_id)
+                .map(|c| c.kind_id != u32::MAX
+                    && eco.kind_def(c.kind_id as aether_sim_ecology::ecology::SpeciesKind)
+                        .parent_kind.is_some())
+                .unwrap_or(false)
+    };
     let dau_deco: u64 = life_rows.iter()
-        .filter(|s| s.root_kind == aether_sim_ecology::ecology::DECO && s.clade_id != 0)
+        .filter(|s| is_derived_deco(s))
         .map(|s| s.mate_misses)
         .sum();
     let dau_deco_young: u64 = life_rows.iter()
-        .filter(|s| s.root_kind == aether_sim_ecology::ecology::DECO && s.clade_id != 0)
+        .filter(|s| is_derived_deco(s))
         .map(|s| s.mate_miss_young)
         .sum();
     eprintln!(
@@ -577,7 +589,7 @@ fn clade_fate_observation() {
     // Phase 67 P3: miss/clade-tick (the Phase 66 §11.1 fix). The denominator
     // is the same population the numerator comes from: derived DECO clades.
     let dau_rows: Vec<&aether_sim_ecology::ecology::CladeLifeStats> = life_rows.iter()
-        .filter(|s| s.root_kind == aether_sim_ecology::ecology::DECO && s.clade_id != 0)
+        .filter(|s| is_derived_deco(s))
         .collect();
     let dau_ticks: u64 = dau_rows.iter().map(|s| s.life_ticks(ticks)).sum();
     let dau_births: u64 = dau_rows.iter().map(|s| s.births).sum();
