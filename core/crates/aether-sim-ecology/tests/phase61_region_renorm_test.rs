@@ -162,6 +162,7 @@ fn telemetry_books_every_death_exactly_once() {
         assert_eq!(s.deaths, s.deaths_starved + s.deaths_aged + s.deaths_predation + s.deaths_other,
             "the death causes must partition the total");
         assert!(s.births + s.deaths + s.region_cap_blocks + s.kind_budget_blocks + s.mate_misses > 0
+            || s.repro_ready + s.mate_finds + s.birth_attempts > 0
             || s.peak_pop > 0,
             "a booked clade must have booked an event");
     }

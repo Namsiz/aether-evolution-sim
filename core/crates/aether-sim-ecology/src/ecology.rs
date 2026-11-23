@@ -1657,11 +1657,11 @@ pub struct CladeSpeciationEvent {
 
 /// Phase 61 engine-level per-clade life bookkeeping (Phase 59 §10.5): births,
 /// deaths by cause, birth-refusal reasons, mate-search misses, peak standing
-/// population and the extinction tick. Keyed by `(clade_id, root_kind)`
-/// because clade id 0 doubles as the "unassigned" sentinel — an agent that
-/// has not been attached to a materialized clade yet books into the
-/// `(0, family)` slot, which then merges with the root clade when it
-/// materializes (the root always takes id 0).
+/// population and the extinction tick. Keyed by `(clade_id, kind_id)` because
+/// clade id 0 doubles as the "unassigned" sentinel — an agent that has not
+/// been attached to a materialized clade yet books into the `(0, kind)` slot.
+/// The old `(clade_id, root_kind)` key merged a stray root-kind agent into a
+/// derived-kind row; Phase 68 splits them so derived-clade rates are exact.
 ///
 /// Pure telemetry: no RNG draws, no state the simulation reads back, and never
 /// persisted. Deaths and blocks counted here are exactly the events the engine
@@ -1670,7 +1670,23 @@ pub struct CladeSpeciationEvent {
 pub struct CladeLifeStats {
     pub clade_id: u32,
     pub root_kind: SpeciesKind,
+    /// Phase 68: the actual kind this row counts (root or derived).
+    pub kind_id: u32,
     pub births: u64,
+    /// Phase 68 funnel: mothers that entered mate search (mature, off
+    /// cooldown, over the energy threshold).
+    pub repro_ready: u64,
+    pub mate_finds: u64,
+    pub mate_reject_hue: u64,
+    pub mate_reject_barrier: u64,
+    pub mate_reject_sig: u64,
+    /// Total spawn attempts (sexual + asexual): `sexual_attempts +
+    /// asexual_attempts`, and the denominator for both block gates.
+    pub birth_attempts: u64,
+    pub sexual_attempts: u64,
+    pub sexual_births: u64,
+    pub asexual_attempts: u64,
+    pub asexual_births: u64,
     pub deaths: u64,
     pub deaths_starved: u64,
     pub deaths_aged: u64,
@@ -1777,6 +1793,21 @@ impl CladeLifeStats {
 pub enum CladeBirthBlock {
     RegionCap,
     KindBudget,
+}
+
+/// Phase 68: one stage of the per-clade reproductive funnel. Every variant is
+/// a pure counter increment on the mother's `(clade_id, kind_id)` row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FunnelStage {
+    Ready,
+    MateFind,
+    RejectHue,
+    RejectBarrier,
+    RejectSig,
+    SexualAttempt,
+    SexualBirth,
+    AsexualAttempt,
+    AsexualBirth,
 }
 
 /// Tiny union-find over MST vertex slots (n ≤ MAX_DECO = 80; no rank or
@@ -4541,15 +4572,18 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         &self.clade_life
     }
 
-    /// Find (or create) the `(clade_id, root_kind)` telemetry slot.
-    fn clade_life_slot(&mut self, clade_id: u32, root_kind: SpeciesKind) -> usize {
+    /// Find (or create) the `(clade_id, kind_id)` telemetry slot.
+    fn clade_life_slot(&mut self, clade_id: u32, kind: SpeciesKind) -> usize {
+        let root_kind = self.root_kind(kind);
+        let kind_id = kind as u32;
         if let Some(i) = self.clade_life.iter()
-            .position(|s| s.clade_id == clade_id && s.root_kind == root_kind) {
+            .position(|s| s.clade_id == clade_id && s.kind_id == kind_id) {
             return i;
         }
         self.clade_life.push(CladeLifeStats {
             clade_id,
             root_kind,
+            kind_id,
             first_tick: self.tick_count,
             ..CladeLifeStats::default()
         });
@@ -4558,9 +4592,8 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
 
     /// A parented birth into `clade_id` (agent `kind` resolves the family).
     fn clade_life_birth(&mut self, clade_id: u32, kind: SpeciesKind) {
-        let root = self.root_kind(kind);
         let now = self.tick_count;
-        let i = self.clade_life_slot(clade_id, root);
+        let i = self.clade_life_slot(clade_id, kind);
         let s = &mut self.clade_life[i];
         s.births += 1;
         if s.first_birth_tick.is_none() { s.first_birth_tick = Some(now); }
@@ -4575,8 +4608,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             (a.clade_id, a.kind, a.age, a.energy)
         };
         let off_region = Self::region_of(self.agents[idx].x, self.agents[idx].z) != self.agents[idx].region;
-        let root = self.root_kind(kind);
-        let i = self.clade_life_slot(clade_id, root);
+        let i = self.clade_life_slot(clade_id, kind);
         let s = &mut self.clade_life[i];
         if off_region { s.deaths_off_region += 1; }
         s.deaths += 1;
@@ -4593,11 +4625,27 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
 
     /// A refused birth, attributed to the mother's clade.
     fn clade_life_block(&mut self, tag: (u32, SpeciesKind), why: CladeBirthBlock) {
-        let root = self.root_kind(tag.1);
-        let i = self.clade_life_slot(tag.0, root);
+        let i = self.clade_life_slot(tag.0, tag.1);
         match why {
             CladeBirthBlock::RegionCap => self.clade_life[i].region_cap_blocks += 1,
             CladeBirthBlock::KindBudget => self.clade_life[i].kind_budget_blocks += 1,
+        }
+    }
+
+    /// Phase 68: one funnel-stage increment on the mother's clade/kind row.
+    fn clade_life_funnel(&mut self, clade_id: u32, kind: SpeciesKind, stage: FunnelStage) {
+        let i = self.clade_life_slot(clade_id, kind);
+        let s = &mut self.clade_life[i];
+        match stage {
+            FunnelStage::Ready => s.repro_ready += 1,
+            FunnelStage::MateFind => s.mate_finds += 1,
+            FunnelStage::RejectHue => s.mate_reject_hue += 1,
+            FunnelStage::RejectBarrier => s.mate_reject_barrier += 1,
+            FunnelStage::RejectSig => s.mate_reject_sig += 1,
+            FunnelStage::SexualAttempt => { s.sexual_attempts += 1; s.birth_attempts += 1; }
+            FunnelStage::SexualBirth => s.sexual_births += 1,
+            FunnelStage::AsexualAttempt => { s.asexual_attempts += 1; s.birth_attempts += 1; }
+            FunnelStage::AsexualBirth => s.asexual_births += 1,
         }
     }
 
@@ -4660,9 +4708,8 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
 
     /// Phase 66 diagnostic: a miss plus the classification of its cause.
     fn clade_life_mate_miss_detail(&mut self, clade_id: u32, kind: SpeciesKind, bucket: MateMissBucket, kind_pop: usize, region_pop: usize, ready_dist: Option<f64>) {
-        let root = self.root_kind(kind);
         let young = self.clade_is_young(clade_id);
-        let i = self.clade_life_slot(clade_id, root);
+        let i = self.clade_life_slot(clade_id, kind);
         let s = &mut self.clade_life[i];
         s.mate_misses += 1;
         if young { s.mate_miss_young += 1; }
@@ -4697,8 +4744,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
     /// Phase 66 diagnostic: the birth that fired natal dispersal belongs to
     /// this clade (the family left its home quadrant).
     fn clade_life_dispersal(&mut self, clade_id: u32, kind: SpeciesKind) {
-        let root = self.root_kind(kind);
-        let i = self.clade_life_slot(clade_id, root);
+        let i = self.clade_life_slot(clade_id, kind);
         self.clade_life[i].dispersal_out += 1;
     }
 
@@ -4707,9 +4753,8 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
     /// per-quadrant split for the capacity evidence.
     fn clade_life_peak(&mut self, clade_id: u32, kind_id: u32, pop: usize, by_region: &[u32; REGION_COUNT as usize]) {
         if kind_id == u32::MAX { return; }
-        let root = self.root_kind(kind_id as SpeciesKind);
         let now = self.tick_count;
-        let i = self.clade_life_slot(clade_id, root);
+        let i = self.clade_life_slot(clade_id, kind_id as SpeciesKind);
         if pop as u32 > self.clade_life[i].peak_pop {
             self.clade_life[i].peak_pop = pop as u32;
             self.clade_life[i].peak_tick = now;
@@ -4724,9 +4769,8 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
     /// The tick the engine logged this clade's extinction event.
     fn clade_life_extinct(&mut self, clade_id: u32, kind_id: u32) {
         if kind_id == u32::MAX { return; }
-        let root = self.root_kind(kind_id as SpeciesKind);
         let now = self.tick_count;
-        let i = self.clade_life_slot(clade_id, root);
+        let i = self.clade_life_slot(clade_id, kind_id as SpeciesKind);
         self.clade_life[i].extinction_tick = Some(now);
     }
 
@@ -5953,6 +5997,8 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         // spread along the narrow shoreline band, so nearest-neighbor distance
         // is much larger than for land species.
         let mate_id = self.agents[idx].id; let mate_max_e = self.agents[idx].max_energy; let mate_kind = self.agents[idx].kind;
+        let (funnel_cid, funnel_kind) = (self.agents[idx].clade_id, mate_kind);
+        self.clade_life_funnel(funnel_cid, funnel_kind, FunnelStage::Ready);
         // Phase 42: Allee 缓解——择偶搜索半径随稀疏程度扩大（密度越低，
         // 找到配偶的搜寻成本越高）。满员（density_factor == 1）时半径恰为
         // legacy 11.0，密集世界的动力学逐位不变；稀疏世界则不会因为
@@ -5990,6 +6036,9 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             }
         });
             let mate_opt = self.nearest(idx, mate_kind, mate_radius, mate_filter);
+        if mate_opt.is_some() {
+            self.clade_life_funnel(funnel_cid, funnel_kind, FunnelStage::MateFind);
+        }
         if mate_opt.is_none() {
             // Phase 61 telemetry: a ready adult (past cooldown, over her energy
             // threshold) found no mate inside the search radius. Phase 66 adds
@@ -6011,7 +6060,10 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             let hue_diff = (self.agents[idx].genome.hue - self.agents[mate_j].genome.hue).abs();
             if hue_diff > 0.35 {
                 let roll = if mate_kind == FISH { self.fish_rng.next_f64() } else { self.rng.next_f64() };
-                if roll < 0.5 { return; }
+                if roll < 0.5 {
+                    self.clade_life_funnel(funnel_cid, funnel_kind, FunnelStage::RejectHue);
+                    return;
+                }
             }
             // Pair compatible
             let a_is_iso = self.agents[idx].lineage.is_some() && self.isolated_groups.contains_key(self.agents[idx].lineage.unwrap());
@@ -6020,6 +6072,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             let lineage_b = self.agents[mate_j].lineage;
             if self.gene_barrier_strength > 0.0 && (a_is_iso || b_is_iso) && lineage_a != lineage_b {
                 self.barrier_blocks += 1;
+                self.clade_life_funnel(funnel_cid, funnel_kind, FunnelStage::RejectBarrier);
                 return;
             }
             let mut dist = self.pair_trait_distance(idx, mate_j);
@@ -6033,6 +6086,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 self.sig_attempts += 1;
                 if self.rng.next_f64() >= self.sig_match(&self.agents[idx].genome, &self.agents[mate_j].genome) {
                     self.sig_blocks += 1;
+                    self.clade_life_funnel(funnel_cid, funnel_kind, FunnelStage::RejectSig);
                     return;
                 }
             }
@@ -6083,6 +6137,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             let mut child_triune = self.agents[idx].triune.clone();
             child_triune.mutate(&mut self.brain_learning_rng, TRIUNE_MUTATE_SIGMA);
             child_triune.reset_transients();
+            self.clade_life_funnel(funnel_cid, funnel_kind, FunnelStage::SexualAttempt);
             if let Some(child) = self.spawn_tagged(child_kind, child_x, child_z, Some(g), max_gen_child, 0.0, Some((parent_clade, a_kind))) {
                 child.lineage = a_lineage.or(b_lineage);
                 child.clade_id = parent_clade;
@@ -6145,6 +6200,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                     self.dispersal_last_tick = self.tick_count;
                     self.clade_life_dispersal(parent_clade, child_kind);
                 }
+                self.clade_life_funnel(funnel_cid, funnel_kind, FunnelStage::SexualBirth);
                 return;
             }
         }
@@ -6176,6 +6232,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             let mut child_triune_a2 = self.agents[idx].triune.clone();
             child_triune_a2.mutate(&mut self.brain_learning_rng, TRIUNE_MUTATE_SIGMA);
             child_triune_a2.reset_transients();
+            self.clade_life_funnel(funnel_cid, funnel_kind, FunnelStage::AsexualAttempt);
             if let Some(child) = self.spawn_tagged(child_kind_a2, cx, cz, Some(g), a_gen_a2 + 1, 0.0, Some((parent_clade, a_kind_a2))) {
                 child.lineage = a_lineage_a2;
                 child.clade_id = parent_clade;
@@ -6217,6 +6274,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                     self.dispersal_last_tick = self.tick_count;
                     self.clade_life_dispersal(parent_clade, child_kind_a2);
                 }
+                self.clade_life_funnel(funnel_cid, funnel_kind, FunnelStage::AsexualBirth);
             }
         }
     }
@@ -10958,7 +11016,8 @@ mod phase66_mate_miss_tests {
         assert_ne!(Ecology::region_of(eco.agents[i].x, eco.agents[i].z), eco.agents[i].region);
         eco.clade_life_dispersal(0, d);
         eco.die(i, "aged");
-        let s = eco.clade_life_stats().iter().find(|s| s.clade_id == 0 && s.root_kind == DECO).unwrap();
+        let s = eco.clade_life_stats().iter()
+            .find(|s| s.clade_id == 0 && s.kind_id == d as u32).unwrap();
         assert_eq!(s.dispersal_out, 1);
         assert_eq!(s.deaths_off_region, 1);
     }
@@ -11124,5 +11183,95 @@ mod phase67_small_floor_tests {
         let eco = Ecology::new(20261201);
         assert_eq!(eco.mate_radius_arm(), 0);
         assert_eq!(eco.radius_only_finds(), 0);
+    }
+}
+
+#[cfg(test)]
+mod phase68_funnel_tests {
+    use super::*;
+
+    fn daughter(eco: &mut Ecology) -> SpeciesKind {
+        eco.deco_region_cap_off();
+        let mut def = eco.kind_def(DECO).clone();
+        def.name = "deco-funnel";
+        def.parent_kind = Some(DECO);
+        def.global_cap = 20;
+        let d = eco.register_kind(def);
+        eco.set_kind_budget(d, 20);
+        d
+    }
+
+    fn plant(eco: &mut Ecology, d: SpeciesKind, x: f64, z: f64) -> usize {
+        let id = eco.spawn_agent(d, x, z).expect("spawn");
+        let i = eco.agents.iter().position(|a| a.id == id).unwrap();
+        let a = &mut eco.agents[i];
+        a.region = 0;
+        a.age = 40.0;
+        a.repro = 0.0;
+        a.energy = a.max_energy;
+        a.genome.hue = 0.5;
+        a.genome.deco_efficiency = 1.0;
+        i
+    }
+
+    #[test]
+    fn kind_id_separates_root_and_derived_rows_in_one_clade() {
+        let mut eco = Ecology::new(20261208);
+        let d = daughter(&mut eco);
+        eco.clade_life_birth(0, DECO);
+        eco.clade_life_birth(0, d);
+        let rows: Vec<_> = eco.clade_life_stats().iter()
+            .filter(|s| s.clade_id == 0 && s.root_kind == DECO)
+            .collect();
+        assert_eq!(rows.len(), 2, "root and derived kinds are separate rows");
+        assert_eq!(rows.iter().find(|s| s.kind_id == DECO as u32).unwrap().births, 1);
+        assert_eq!(rows.iter().find(|s| s.kind_id == d as u32).unwrap().births, 1);
+    }
+
+    #[test]
+    fn sexual_birth_fills_the_funnel_identity() {
+        let mut eco = Ecology::new(20261208);
+        eco.dispersal_p = 0.0;
+        eco.gene_barrier_strength = 0.0;
+        let d = daughter(&mut eco);
+        let i = plant(&mut eco, d, 0.0, 0.0);
+        plant(&mut eco, d, 5.0, 0.0);
+        eco.reproduce(i, 0.1);
+        let s = eco.clade_life_stats().iter()
+            .find(|s| s.clade_id == 0 && s.kind_id == d as u32)
+            .expect("derived row");
+        assert_eq!(s.repro_ready, 1);
+        assert_eq!(s.mate_finds, 1);
+        assert_eq!(s.birth_attempts, 1);
+        assert_eq!(s.sexual_births, 1);
+        assert_eq!(s.asexual_births, 0);
+        assert_eq!(s.births, 1);
+        assert_eq!(s.sexual_births + s.kind_budget_blocks + s.region_cap_blocks, s.birth_attempts);
+        assert_eq!(s.births, s.sexual_births + s.asexual_births);
+    }
+
+    #[test]
+    fn direct_stage_increments_stay_on_the_kind_row() {
+        let mut eco = Ecology::new(20261208);
+        let d = daughter(&mut eco);
+        for stage in [FunnelStage::Ready, FunnelStage::MateFind, FunnelStage::RejectHue,
+                      FunnelStage::RejectBarrier, FunnelStage::RejectSig,
+                      FunnelStage::SexualAttempt, FunnelStage::SexualBirth,
+                      FunnelStage::AsexualAttempt, FunnelStage::AsexualBirth] {
+            eco.clade_life_funnel(0, d, stage);
+        }
+        let s = eco.clade_life_stats().iter()
+            .find(|s| s.clade_id == 0 && s.kind_id == d as u32)
+            .unwrap();
+        assert_eq!(s.repro_ready, 1);
+        assert_eq!(s.mate_finds, 1);
+        assert_eq!(s.mate_reject_hue, 1);
+        assert_eq!(s.mate_reject_barrier, 1);
+        assert_eq!(s.mate_reject_sig, 1);
+        assert_eq!(s.birth_attempts, 2);
+        assert_eq!(s.sexual_attempts, 1);
+        assert_eq!(s.sexual_births, 1);
+        assert_eq!(s.asexual_attempts, 1);
+        assert_eq!(s.asexual_births, 1);
     }
 }
