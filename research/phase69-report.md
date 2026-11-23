@@ -135,3 +135,171 @@ P1、P2、P3 必须同时满足；D0 是必要条件。P2 用**出生率**而不
 5. 跑 5 seed × 2 臂 + 双跑；记录逐 seed 与聚合。
 6. 重建 wasm；三次 <16 ms。
 7. 写报告 §2 之后：逐 seed、D0-D2、锚点、测试、wasm、决策。
+
+---
+
+## 2. 实现（Phase 69.2，已提交 `4a38acd`）
+
+### 2.1 常量与开关
+
+| 位置 | 内容 |
+|---|---|
+| `ecology.rs:1130` | `BUILD_WINDOW_ON = false`、`BUILD_WINDOW_TICKS = 10_000`、`BUILD_WINDOW_FLOOR = SPECIATION_MIN_SIDE_DEFAULT`（=8） |
+| `ecology.rs:2288` | `Ecology.build_window: bool`；三个构造器（`new` / `with_biomes` / `from_save_state`）全部初始化 `BUILD_WINDOW_ON`，读档回编译默认 OFF |
+| `ecology.rs:4518` | `build_window_treg_on/off`、`build_window_treg()` |
+| `ecology.rs:4576` | `deco_region_cap_limit_with` = `deco_region_natural_cap` + T-region 分支 |
+| `ecology.rs:5252` | `spawn_tagged` 区域闸：先 natural、再 protected，判拒；`protection_admitted` 只在 natural 拒绝且 protected 放行时置位 |
+| `ecology.rs:5362` | 成功出生后按 `(clade_id, kind_id)` 记 `protection_admitted` |
+| `ecology.rs:1727` | `CladeLifeStats.protection_admitted: u64` |
+| `ecology.rs:11475` | `phase69_build_window_tests`（6 个测试） |
+
+### 2.2 语义
+
+- **作用对象**：派生 DECO（`root_kind == DECO ∧ parent_kind.is_some()`）；根 DECO、FISH 永不进入。
+- **窗口起算**：`SpeciesClade.birth_tick`（fork tick），不是首次出生；`tick − birth_tick < 10_000` 有效，第 10 000 tick 到期回落。
+- **区域 cap**：已占据象限 `max(natural, min(kind_budget, 8))`；空象限与到期后保持自然份额。
+- **守恒**：区域 cap 只是空间份额；kind 预算仍是硬顶，`Σ kind_budget` 恒 80，不新增个体。
+- **零 RNG / 不入档 / 不改搜索或出生顺序**；Phase 69.1 的 `would_region_blocks` 在 T 臂看到的是受保护 cap，因此 D0 可直接比较。
+- **歧义处理**：仓库只有 `SPECIATION_MIN_SIDE_DEFAULT=8` 与每实例 `speciation_min_side`；按预注册「与分裂门一致、不调参」，floor 固定取 8，不随 legacy 2 漂移。
+
+### 2.3 观测器
+
+- `clade_fate_observatory.rs`：解析 `PHASE_BUILD_WINDOW=off|treg`，臂名 `bwinoff/bwinon` 进入输出文件名；`clade_life` CSV 末尾追加 `protection_admitted`；`[funnel]` 派生/根聚合加 `protection_admitted=`。
+
+---
+
+## 3. 执行
+
+| 项 | 内容 |
+|---|---|
+| 实现提交 | `4a38acd`（默认 OFF） |
+| 自检 | `20261102 / 200k` = 9 分化 / 4 灭绝 |
+| 判定 | `20261215–19` × 200k × 2 臂（OFF / T） |
+| 双跑 | `20261215 / T` 两次（`p69t15` / `p69tdbl15`） |
+| 退化 | `20261216` 两臂均 `spec+ext=0`（无派生 DECO）；按 §1.4 用备用 `20261220` × OFF/T 替换 |
+| 最终可测 | `20261215 / 17 / 18 / 19 / 20`（5 个） |
+| 并发 | 4 进程/批；单臂 649–1 402 s |
+| 运行脚本 | `/tmp/p69/run_ab.sh` + `/tmp/p69/run_backup.sh`；日志/CSV 在 `/tmp/p69/runs/` |
+
+**小偏差**：OFF 臂实际传空环境变量（编译默认 `bwindflt`），预注册写的是 `PHASE_BUILD_WINDOW=off`；两者语义都是 OFF，不影响判定。
+
+---
+
+## 4. 结果
+
+### 4.1 逐 seed（5 个可测 seed，派生 DECO 聚合）
+
+| seed | 臂 | spec | ext | live/total | births/kt | deaths/kt | kind_block | region_block | would/kt | protect | deaths/birth |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 20261215 | OFF | 10 | 5 | 6 / 11 | 2.10 | 2.10 | 0.863 | 0.136 | 401.8 | 0 | 1.002 |
+| 20261215 | T | 10 | 7 | 4 / 11 | 2.01 | 2.05 | 0.872 | 0.127 | 561.9 | 128 | 1.019 |
+| 20261217 | OFF | 2 | 2 | 1 / 3 | 1.23 | 1.25 | 0.694 | 0.303 | 130.0 | 0 | 1.020 |
+| 20261217 | T | 7 | 3 | 5 / 8 | 2.00 | 1.99 | 0.958 | 0.041 | 353.9 | 81 | 0.997 |
+| 20261218 | OFF | 1 | 0 | 2 / 2 | 5.03 | 4.86 | 0.975 | 0.023 | 331.7 | 0 | 0.966 |
+| 20261218 | T | 3 | 0 | 4 / 4 | 2.41 | 2.36 | 0.983 | 0.015 | 258.8 | 7 | 0.979 |
+| 20261219 | OFF | 9 | 6 | 4 / 10 | 2.07 | 2.09 | 0.889 | 0.109 | 449.0 | 0 | 1.014 |
+| 20261219 | T | 13 | 12 | 2 / 14 | 1.61 | 1.71 | 0.956 | 0.043 | 190.9 | 127 | 1.062 |
+| 20261220 | OFF | 2 | 2 | 1 / 3 | 1.47 | 1.50 | 0.840 | 0.158 | 52.4 | 0 | 1.022 |
+| 20261220 | T | 10 | 6 | 5 / 11 | 2.48 | 2.51 | 0.953 | 0.046 | 241.5 | 89 | 1.009 |
+
+`protection_admitted` 原始计数：15=128、17=81、18=7、19=127、20=89，合计 **432**。
+
+### 4.2 聚合与判据（5 个可测 seed）
+
+| 指标 | OFF | T | 比值（T/OFF） |
+|---|---|---|---|
+| 分化 `Σ spec` | 24 | 43 | **1.792** |
+| 灭绝 `Σ ext` | 15 | 28 | 1.867 |
+| 派生 births/kt | 2.021 | 2.049 | **1.014** |
+| 派生 deaths/birth | 1.0058 | 1.0160 | **1.010** |
+| `kind_block` 份额 | 0.874 | 0.939 | 1.074 |
+| `region_block` 份额 | 0.125 | 0.060 | 0.481 |
+| `would_region` / ktick | 357.6 | 331.1 | 0.926 |
+| `would_region` 原始总量 | 940 540 | 1 339 671 | **1.424** |
+| `protection_admitted` | 0 | **432** | — |
+
+| 判据 | 门槛 | 结果 | 判定 |
+|---|---|---|---|
+| P1 分化 | `Σ_T spec ≥ 0.90 × Σ_OFF` | 43 ≥ 21.6（1.792×） | **过** |
+| P2 出生率 | `births/kt_T ≥ 1.10 × OFF` | 1.014× | **败** |
+| P3 死亡/出生 | `deaths/birth_T ≤ 1.05 × OFF` | 1.010× | **过** |
+| D0 作用力 | `protection_admitted > 0` 且 `Σ_T would ≤ 0.80 × Σ_OFF` | 432 > 0；原始 **1.424×**，归一化 **0.926×** | **败** |
+
+**D0 的口径陷阱**：预注册 §1.6 写的是原始总量之比，实测 1.424×；按 derived clade-ticks 归一化后是 0.926×。两者都 >0.80，所以 D0 的结论不依赖口径。原始总量反向上升的原因是 T 臂 clade-ticks 更长、派生 clade 更多（spec 43 vs 24），`would_region` 被更多支系寿命放大；按 tick 密度它只降了 7.4%。
+
+### 4.3 机制读数
+
+- **T-region 把 region 闸换成了 kind 闸**：`region_block` 0.125→0.060，`kind_block` 0.874→0.939；合计拒绝仍约 99.9%。这与 Phase 61 b 臂 / Phase 62 d 变体的「floor 只是换闸门」完全一致。
+- **保护确实咬到，但很小**：`protection_admitted = 432`，相对 5 个 T seed 的千万级 spawn 尝试是极小份额；P2 只 +1.4%，远低于 1.10 门。
+- **P1 的 +79% 是周转放大器，不是存活改善**：T 的 spec 43、ext 28、live 20；OFF spec 24、ext 15、live 14。T 同时多生支系、多灭支系，`deaths/birth` 还略差（1.016 vs 1.006）。
+- **空间集中（D1，报告不判定）**：T 臂出现明显单象限集中（seed15 r0 83%、seed19 r2 71%），但没有 100% 单象限退化；`DECO@200k` 分布：15 `40/2/1/5`、17 `11/0/1/14`、18 `20/19/1/5`、19 `2/3/45/13`。
+
+### 4.4 自检 / 双跑 / 身份式
+
+- 自检 `20261102` = **9 分化 / 4 灭绝**。
+- 双跑 `p69t15` vs `p69tdbl15`：`clade_life` / `clade_fate` / `clade_tree` CSV **逐字节相同**。
+- 14 个 run（12 个主跑 + 2 个备用） × derived/root 两个作用域，共 28 条 `[funnel] identity ... ok=true`，`ok=false` 为 0。
+- `20261216` 两臂的 life/fate/tree CSV 逐字节相同（无派生 DECO，T-region 无作用对象），确认退化不是机制差异。
+
+---
+
+## 5. 决策
+
+**默认 OFF，不 re-baseline（第二十次 re-baseline 未发生）。** 按 §1.7：
+
+1. **P2 败**（1.014× < 1.10×）→ 第 4 行：区域闸不是出生率杠杆；
+2. **D0 败**（原始 1.424×、归一化 0.926×，均 >0.80）→ 第 1 行：作用力门槛未过；
+3. P1 过（1.792×）与 P3 过（1.010×）不能补偿 P2/D0；P1 是周转放大器的伴生现象。
+
+**结论：T-region 不是出生率杠杆，而是「把 region 拒绝换成 kind 拒绝」的闸门搬运；建支窗口的区域份额方向关闭。**
+
+### 5.1 Phase 69.3 方向
+
+Phase 69.1 已经给出下一步的靶点：派生 DECO 的真实拒绝里 **kind-only 68.7%**、region 31.2%；T-region 又把 region 压到 6.0%、kind 抬到 93.9%。**Phase 69.3 应直接针对 kind-only**，候选：
+
+1. **资源流导出的总承载容量**：让 DECO 全族预算随分解场/初级生产力变化，而不是固定 80；这是唯一还没被否证的「增加总额」方向，但必须保留根 kind 的 deme 分割。
+2. **kind 预算的建支窗口**：fork 后前 N tick 允许 daughter 预算临时抬到 ≥16，从父系未用槽位借、到期归还；与 W1 的区别是「预算」而非「出生闸」，但 W1 的 69% 消散是强反例，优先级低于 1。
+3. **目标重定义**：若继续只数 spec，T/ R3 都会「通过」；若以 live clades / 支系持续期为主，需要单独预注册。
+
+**不再做**：region cap 的永久/临时 floor（61/62/69.2 三次否证）；择偶半径；`FORK_BUDGET_MIN` 微调；W1。
+
+### 5.2 预注册口径教训
+
+- D0 的「原始总量」门槛对 clade-ticks 敏感：T 臂支系更多、活得更久时，原始 `would_region` 会反向上升。下期主指标应固定为 **per-clade-tick**，原始总量只作报告项。
+- `protection_admitted` 是「被保护放行的出生」而非「唯一被救母亲」；下期若做个体级漏斗，加「首次拒绝 / 窗口」计数。
+
+---
+
+## 6. 锚点 / 测试 / wasm
+
+| 项 | 结果 |
+|---|---|
+| 默认 `@60000` | `0x3272f0e3eaba9250` 位精确（phase61 `renorm_off…`，333.00 s） |
+| 默认 200k | seed 20261102 = 9 分化 / 4 灭绝 |
+| 生态 crate 全测试 | **50 二进制 / 316 passed / 0 failed / 28 ignored** |
+| Phase 69 单测 | **8 passed / 0 failed**（新增 6 + Phase 69.1 的 2） |
+| 双跑 | `p69t15` vs `p69tdbl15`：life/fate/tree CSV 逐字节相同 |
+| wasm | **831 807 B**，sha256 `901eab33502df49b6820fad7ba9510479a9aa6bc9a0f2c98bb3fbdfd19de719b`（Phase 68 旧 830 787 B；+1 020 B） |
+| 帧预算 | 三轮新旧交错：old 10.59 / 11.64 / 12.35 ms；new 10.80 / 11.85 / 12.60 ms；全部 <16 ms |
+| wasm 冒烟 | `WASM VIEWER SMOKE OK`（空闲态 10.62 ms/frame） |
+
+---
+
+## 7. 改动文件
+
+- `core/crates/aether-sim-ecology/src/ecology.rs`：常量、`build_window` 字段/开关、`deco_region_natural_cap`、T-region cap 分支、`protection_admitted`、6 个单测。
+- `core/crates/aether-sim-ecology/tests/clade_fate_observatory.rs`：`PHASE_BUILD_WINDOW` 解析、文件名臂标记、CSV/`[funnel]` 新列。
+- `living/ecology-sim.wasm`、`living/ecology-sim-v2.wasm`：831 807 B / `901eab33…`。
+
+---
+
+## 8. 遗留
+
+1. **SpeciesClade 缺失即无窗口**：按 `kind_id` 查 `species_clades` 取 `birth_tick`；未物化或 pre-v8 的 kind 不进入窗口；默认 OFF 不受影响。
+2. **kind_id 唯一性依赖**：同 kind_id 多记录时 `find` 取第一条；现引擎每 kind 只 mint 一次，风险低。
+3. **空间份额可超 budget**：窗口内多象限同时 floor 时区域 cap 之和可临时超过 kind 预算；不新增个体，但报告必须给 `DECO@200k` 四象限分布。
+4. **T-region 已否证**：P2 1.014×、D0 原始 1.424× / 归一化 0.926×；Phase 69.3 直接针对 kind-only（OFF 68.7 %，T 臂 93.9 %），不要再动 region cap。
+5. **D0 原始总量门槛被 clade-ticks 放大**：T 臂支系更多、活得更久时 `would_region` 原始总量会反向上升；下期主指标固定 per-clade-tick，原始总量只作报告项。
+6. **seed 池教训**：`20261216` 两臂均 `spec+ext=0`，按预注册用 `20261220` 补位；下一期 seed 池应先用 80k 快筛剔除「无派生 DECO」的退化 seed，不要等到 200k 才发现。
+7. **P1 的 +79 % 不是存活改善**：T 的 spec 43 / ext 28 / live 20，OFF 24 / 15 / 14；它是周转放大器，不能作为 Phase 69.3 的正面证据。
+8. **尝试加权**：`would_region_blocks` / `protection_admitted` 仍是母亲-tick 计数；Phase 69.3 若要个体级漏斗，需加「首次拒绝/窗口」计数。
