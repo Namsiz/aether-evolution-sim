@@ -1696,6 +1696,10 @@ pub struct CladeLifeStats {
     pub region_cap_blocks: u64,
     /// Births refused by the Phase 49 kind budget / biome cap gate.
     pub kind_budget_blocks: u64,
+    /// Phase 69: kind-budget-refused spawns that the Phase 60 regional cap
+    /// would also have refused. Pure read-only probe; closes the gate-order
+    /// blind spot (region is only evaluated when kind budget passes).
+    pub would_region_blocks: u64,
     /// Ready-adult ticks whose mate search came back empty (one count per
     /// failed search, not per tick: the search only runs when the mother is
     /// past cooldown and over her energy threshold).
@@ -4481,7 +4485,7 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
     /// decomposition field. Mean `deco_env` over habitable cells only; a region
     /// that rots carcasses faster retains less food, so its weight falls.
     /// Pure arithmetic + table lookups, zero RNG.
-    fn refresh_deco_region_weights(&mut self) {
+    fn deco_region_weights_now(&self) -> ([f64; REGION_COUNT as usize], f64) {
         let nr = REGION_COUNT as usize;
         let mut sum = [0.0f64; REGION_COUNT as usize];
         let mut cnt = [0usize; REGION_COUNT as usize];
@@ -4493,14 +4497,20 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             sum[r] += self.deco_env[j] as f64;
             cnt[r] += 1;
         }
+        let mut w = [0.0f64; REGION_COUNT as usize];
         let mut wsum = 0.0f64;
         for r in 0..nr {
             let mean = if cnt[r] > 0 { sum[r] / cnt[r] as f64 } else { 1.0 };
-            let w = (1.0 + DECO_REGION_CAP_GAIN * (1.0 - mean))
+            w[r] = (1.0 + DECO_REGION_CAP_GAIN * (1.0 - mean))
                 .clamp(DECO_REGION_CAP_W_MIN, DECO_REGION_CAP_W_MAX);
-            self.deco_region_weight[r] = w;
-            wsum += w;
+            wsum += w[r];
         }
+        (w, wsum)
+    }
+
+    fn refresh_deco_region_weights(&mut self) {
+        let (w, wsum) = self.deco_region_weights_now();
+        self.deco_region_weight = w;
         self.deco_region_weight_sum = wsum;
         self.deco_region_weight_tick = self.tick_count;
     }
@@ -4516,6 +4526,15 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
     /// identity moves with it: the occupied regions' caps still sum to the
     /// kind budget.
     fn deco_region_cap_limit(&self, kind: SpeciesKind, region: u8) -> f64 {
+        self.deco_region_cap_limit_with(
+            kind, region, &self.deco_region_weight, self.deco_region_weight_sum,
+        )
+    }
+
+    fn deco_region_cap_limit_with(
+        &self, kind: SpeciesKind, region: u8,
+        weights: &[f64; REGION_COUNT as usize], wsum_total: f64,
+    ) -> f64 {
         let budget = self.kind_budget(kind) as f64;
         let r = (region as usize).min(REGION_COUNT as usize - 1);
         if self.deco_region_cap_renorm
@@ -4523,15 +4542,15 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             let mut wsum = 0.0f64;
             for rr in 0..REGION_COUNT as usize {
                 if rr == r || self.deco_region_count(kind, rr as u8) > 0 {
-                    wsum += self.deco_region_weight[rr];
+                    wsum += weights[rr];
                 }
             }
             if wsum > 0.0 {
-                return budget * self.deco_region_weight[r] / wsum;
+                return budget * weights[r] / wsum;
             }
         }
-        let natural = if self.deco_region_weight_sum > 0.0 {
-            budget * self.deco_region_weight[r] / self.deco_region_weight_sum
+        let natural = if wsum_total > 0.0 {
+            budget * weights[r] / wsum_total
         } else {
             budget / REGION_COUNT as f64
         };
@@ -4544,6 +4563,24 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             return natural.max(floor);
         }
         natural
+    }
+
+    /// Phase 69: would the regional cap refuse this spawn if the kind-budget
+    /// gate had passed? Read-only: if the cached weights are stale, compute
+    /// a local copy instead of refreshing the cache (the normal gate may run
+    /// later in the same tick and must see the same cache it would have seen).
+    fn deco_region_cap_would_refuse(&self, kind: SpeciesKind, x: f64, z: f64) -> bool {
+        if !(self.deco_region_cap && self.deco_env_on && self.root_kind(kind) == DECO) {
+            return false;
+        }
+        let (weights, wsum) = if self.deco_region_weight_tick == self.tick_count {
+            (self.deco_region_weight, self.deco_region_weight_sum)
+        } else {
+            self.deco_region_weights_now()
+        };
+        let r = Self::region_of(x, z);
+        let limit = self.deco_region_cap_limit_with(kind, r, &weights, wsum);
+        self.deco_region_count(kind, r) as f64 >= limit
     }
 
     /// Phase 60: living members of `kind` whose home quadrant is `region`.
@@ -4630,6 +4667,13 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             CladeBirthBlock::RegionCap => self.clade_life[i].region_cap_blocks += 1,
             CladeBirthBlock::KindBudget => self.clade_life[i].kind_budget_blocks += 1,
         }
+    }
+
+    /// Phase 69: a kind-budget refusal that the regional cap would also have
+    /// refused (read-only probe; no weights cache write, no RNG).
+    fn clade_life_would_region_block(&mut self, tag: (u32, SpeciesKind)) {
+        let i = self.clade_life_slot(tag.0, tag.1);
+        self.clade_life[i].would_region_blocks += 1;
     }
 
     /// Phase 68: one funnel-stage increment on the mother's clade/kind row.
@@ -5082,7 +5126,12 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
             let eff_cap = if allowance < cap { allowance } else { cap };
             let standing = self.count(kind);
             if standing >= eff_cap {
-                if let Some(t) = tag { self.clade_life_block(t, CladeBirthBlock::KindBudget); }
+                if let Some(t) = tag {
+                    self.clade_life_block(t, CladeBirthBlock::KindBudget);
+                    if self.deco_region_cap_would_refuse(kind, x, z) {
+                        self.clade_life_would_region_block(t);
+                    }
+                }
                 return None;
             }
             grace_admitted = grace && standing >= budget;
@@ -5094,7 +5143,12 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 self.count_family(root)
             };
             if family_total >= cap {
-                if let Some(t) = tag { self.clade_life_block(t, CladeBirthBlock::KindBudget); }
+                if let Some(t) = tag {
+                    self.clade_life_block(t, CladeBirthBlock::KindBudget);
+                    if self.deco_region_cap_would_refuse(kind, x, z) {
+                        self.clade_life_would_region_block(t);
+                    }
+                }
                 return None;
             }
         }
@@ -11273,5 +11327,51 @@ mod phase68_funnel_tests {
         assert_eq!(s.sexual_births, 1);
         assert_eq!(s.asexual_attempts, 1);
         assert_eq!(s.asexual_births, 1);
+    }
+}
+
+#[cfg(test)]
+mod phase69_would_region_tests {
+    use super::*;
+
+    fn daughter(eco: &mut Ecology, budget: usize) -> SpeciesKind {
+        let mut def = eco.kind_def(DECO).clone();
+        def.name = "deco-would-region";
+        def.parent_kind = Some(DECO);
+        def.global_cap = budget;
+        let d = eco.register_kind(def);
+        eco.set_kind_budget(d, budget);
+        d
+    }
+
+    #[test]
+    fn kind_budget_fail_probes_region_cap_without_touching_the_cache() {
+        let mut eco = Ecology::new(20261208);
+        assert!(eco.budget_fork, "the probe is on the Phase 49 fork-budget path");
+        let d = daughter(&mut eco, 0);
+        let before = (eco.deco_region_weight_tick, eco.deco_region_weight_sum);
+        assert!(eco.deco_region_cap_would_refuse(d, 0.0, 0.0));
+        assert_eq!((eco.deco_region_weight_tick, eco.deco_region_weight_sum), before,
+            "the read-only probe must not refresh the weights cache");
+        assert!(eco.spawn_tagged(d, 0.0, 0.0, None, 0, 0.0, Some((0, d))).is_none());
+        let s = eco.clade_life_stats().iter()
+            .find(|s| s.clade_id == 0 && s.kind_id == d as u32).unwrap();
+        assert_eq!(s.kind_budget_blocks, 1);
+        assert_eq!(s.would_region_blocks, 1);
+        assert_eq!((eco.deco_region_weight_tick, eco.deco_region_weight_sum), before,
+            "the refused spawn still must not refresh the weights cache");
+    }
+
+    #[test]
+    fn the_probe_is_false_when_the_region_cap_is_off() {
+        let mut eco = Ecology::new(20261208);
+        eco.deco_region_cap_off();
+        let d = daughter(&mut eco, 0);
+        assert!(!eco.deco_region_cap_would_refuse(d, 0.0, 0.0));
+        assert!(eco.spawn_tagged(d, 0.0, 0.0, None, 0, 0.0, Some((0, d))).is_none());
+        let s = eco.clade_life_stats().iter()
+            .find(|s| s.clade_id == 0 && s.kind_id == d as u32).unwrap();
+        assert_eq!(s.kind_budget_blocks, 1);
+        assert_eq!(s.would_region_blocks, 0);
     }
 }

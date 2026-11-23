@@ -430,7 +430,7 @@ fn clade_fate_observation() {
     // Phase 61: engine-level per-clade life counters (births / deaths by
     // cause / refusals by gate / mate misses / peak / extinction tick).
     let mut life = String::from(
-        "clade_id,clade_name,root_kind,kind_id,kind,births,deaths,deaths_starved,deaths_aged,deaths_predation,deaths_other,region_cap_blocks,kind_budget_blocks,mate_misses,mate_miss_no_kin,mate_miss_other_region,mate_miss_beyond_radius,mate_miss_filtered,mate_miss_other,mate_miss_young,mate_miss_young_no_kin,mate_miss_young_other_region,mate_miss_young_beyond_radius,mate_miss_young_filtered,mate_miss_young_other,mate_miss_kind_pop_sum,mate_miss_region_pop_sum,mate_miss_ready_dist_sum,mate_miss_ready_dist_min,dispersal_out,deaths_off_region,first_tick,first_birth_tick,last_birth_tick,peak_pop,peak_tick,region_peak_r0,region_peak_r1,region_peak_r2,region_peak_r3,extinction_tick,mean_death_age,mean_death_energy,last_death_energy,life_ticks,repro_ready,mate_finds,mate_reject_hue,mate_reject_barrier,mate_reject_sig,birth_attempts,sexual_attempts,sexual_births,asexual_attempts,asexual_births\n",
+        "clade_id,clade_name,root_kind,kind_id,kind,births,deaths,deaths_starved,deaths_aged,deaths_predation,deaths_other,region_cap_blocks,kind_budget_blocks,mate_misses,mate_miss_no_kin,mate_miss_other_region,mate_miss_beyond_radius,mate_miss_filtered,mate_miss_other,mate_miss_young,mate_miss_young_no_kin,mate_miss_young_other_region,mate_miss_young_beyond_radius,mate_miss_young_filtered,mate_miss_young_other,mate_miss_kind_pop_sum,mate_miss_region_pop_sum,mate_miss_ready_dist_sum,mate_miss_ready_dist_min,dispersal_out,deaths_off_region,first_tick,first_birth_tick,last_birth_tick,peak_pop,peak_tick,region_peak_r0,region_peak_r1,region_peak_r2,region_peak_r3,extinction_tick,mean_death_age,mean_death_energy,last_death_energy,life_ticks,repro_ready,mate_finds,mate_reject_hue,mate_reject_barrier,mate_reject_sig,birth_attempts,sexual_attempts,sexual_births,asexual_attempts,asexual_births,would_region_blocks\n",
     );
     let mut life_rows: Vec<_> = eco.clade_life_stats().to_vec();
     life_rows.sort_by_key(|s| (s.root_kind, s.kind_id, s.clade_id));
@@ -447,7 +447,7 @@ fn clade_fate_observation() {
             _ => fam_name.to_string(),
         };
         life.push_str(&format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.2},{:.2},{},{},{},{},{},{},{},{},{},{},{},{},{:.2},{:.3},{:.3},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.2},{:.2},{},{},{},{},{},{},{},{},{},{},{},{},{:.2},{:.3},{:.3},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
             s.clade_id,
             clade_label,
             fam_name,
@@ -474,7 +474,7 @@ fn clade_fate_observation() {
             s.life_ticks(ticks),
             s.repro_ready, s.mate_finds, s.mate_reject_hue, s.mate_reject_barrier,
             s.mate_reject_sig, s.birth_attempts, s.sexual_attempts, s.sexual_births,
-            s.asexual_attempts, s.asexual_births,
+            s.asexual_attempts, s.asexual_births, s.would_region_blocks,
         ));
     }
     std::fs::write(&csv_path, csv).unwrap();
@@ -627,7 +627,7 @@ fn clade_fate_observation() {
         .filter(|s| s.root_kind == aether_sim_ecology::ecology::DECO && !is_derived_deco(s))
         .collect();
     let funnel_totals = |rows: &[&aether_sim_ecology::ecology::CladeLifeStats]| {
-        let mut t = [0u64; 14];
+        let mut t = [0u64; 15];
         for s in rows {
             t[0] += s.repro_ready;
             t[1] += s.mate_finds;
@@ -643,6 +643,7 @@ fn clade_fate_observation() {
             t[11] += s.region_cap_blocks;
             t[12] += s.births;
             t[13] += s.deaths;
+            t[14] += s.would_region_blocks;
         }
         t
     };
@@ -650,8 +651,8 @@ fn clade_fate_observation() {
     let df = funnel_totals(&dau_rows);
     let rf = funnel_totals(&root_deco_rows);
     eprintln!(
-        "  [funnel] derived_deco ready={} finds={} reject_hue={} reject_barrier={} reject_sig={} attempts={} sexual_attempts={} sexual_births={} asexual_attempts={} asexual_births={} kind_blocks={} region_blocks={} births={} deaths={}",
-        df[0], df[1], df[2], df[3], df[4], df[5], df[6], df[7], df[8], df[9], df[10], df[11], df[12], df[13],
+        "  [funnel] derived_deco ready={} finds={} reject_hue={} reject_barrier={} reject_sig={} attempts={} sexual_attempts={} sexual_births={} asexual_attempts={} asexual_births={} kind_blocks={} region_blocks={} would_region_blocks={} births={} deaths={}",
+        df[0], df[1], df[2], df[3], df[4], df[5], df[6], df[7], df[8], df[9], df[10], df[11], df[14], df[12], df[13],
     );
     eprintln!(
         "  [funnel] derived_deco rates find={:.3} compat={:.3} birth={:.3} kind_block={:.3} region_block={:.3} sexual_share={:.3} deaths_per_birth={:.3}",
@@ -659,8 +660,8 @@ fn clade_fate_observation() {
         rate(df[10], df[5]), rate(df[11], df[5]), rate(df[7], df[12]), rate(df[13], df[12]),
     );
     eprintln!(
-        "  [funnel] root_deco ready={} finds={} reject_hue={} reject_barrier={} reject_sig={} attempts={} sexual_attempts={} sexual_births={} asexual_attempts={} asexual_births={} kind_blocks={} region_blocks={} births={} deaths={}",
-        rf[0], rf[1], rf[2], rf[3], rf[4], rf[5], rf[6], rf[7], rf[8], rf[9], rf[10], rf[11], rf[12], rf[13],
+        "  [funnel] root_deco ready={} finds={} reject_hue={} reject_barrier={} reject_sig={} attempts={} sexual_attempts={} sexual_births={} asexual_attempts={} asexual_births={} kind_blocks={} region_blocks={} would_region_blocks={} births={} deaths={}",
+        rf[0], rf[1], rf[2], rf[3], rf[4], rf[5], rf[6], rf[7], rf[8], rf[9], rf[10], rf[11], rf[14], rf[12], rf[13],
     );
     eprintln!(
         "  [funnel] root_deco rates find={:.3} compat={:.3} birth={:.3} kind_block={:.3} region_block={:.3} sexual_share={:.3} deaths_per_birth={:.3}",
