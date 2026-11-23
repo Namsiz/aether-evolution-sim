@@ -50,9 +50,10 @@ Phase 67 的关键读法是：R3 没有创造新生物量，只是在同一个�
 | `mate_reject_hue` | 找到配偶但 hue 兼容 roll 失败 | `hue_diff > 0.35` 分支的 `roll < 0.5` 早退 |
 | `mate_reject_barrier` | 找到配偶但基因屏障拒绝 | `barrier_blocks += 1` 早退 |
 | `mate_reject_sig` | 找到配偶但 sig 匹配失败 | `sig_blocks += 1` 早退 |
-| `birth_attempts` | 通过全部兼容检查，即将调用 `spawn_tagged` 的性繁殖尝试 | `spawn_tagged` 调用之前 |
-| `sexual_births` | 性繁殖 spawn 成功 | `spawn_tagged` 返回 `Some` 之后 |
-| `asexual_attempts` | 性繁殖路径失败后进入无性 fallback 的次数 | 无性分支入口 |
+| `sexual_attempts` | 通过全部兼容检查，即将调用 `spawn_tagged` 的性繁殖尝试 | 性繁殖 `spawn_tagged` 之前 |
+| `asexual_attempts` | 性繁殖路径失败后进入无性 fallback 的 spawn 尝试 | 无性 `spawn_tagged` 之前 |
+| `birth_attempts` | **所有** spawn 尝试 = `sexual_attempts + asexual_attempts` | 两个 spawn 入口各加一次 |
+| `sexual_births` | 性繁殖 spawn 成功 | 性繁殖 `spawn_tagged` 返回 `Some` 之后 |
 | `asexual_births` | 无性 fallback spawn 成功 | 无性 spawn 成功之后 |
 
 保留既有字段：`births`（总出生）、`kind_budget_blocks`、`region_cap_blocks`、`deaths_*`、`mate_misses`、`life_ticks`。
@@ -62,11 +63,14 @@ Phase 67 的关键读法是：R3 没有创造新生物量，只是在同一个�
 **恒等式（必须在每个 clade 行上成立）**：
 
 1. `mate_finds ≤ repro_ready`
-2. `birth_attempts ≤ mate_finds`
-3. `sexual_births + kind_budget_blocks + region_cap_blocks = birth_attempts`
-4. `births = sexual_births + asexual_births`
-5. `asexual_births ≤ asexual_attempts`
-6. `mate_reject_hue + mate_reject_barrier + mate_reject_sig ≤ mate_finds`
+2. `sexual_attempts ≤ mate_finds`
+3. `sexual_attempts + asexual_attempts = birth_attempts`
+4. `sexual_births + asexual_births + kind_budget_blocks + region_cap_blocks = birth_attempts`
+5. `births = sexual_births + asexual_births`
+6. `asexual_births ≤ asexual_attempts`
+7. `mate_reject_hue + mate_reject_barrier + mate_reject_sig ≤ mate_finds`
+
+> **预注册修正（2026-11-23，5k 冒烟后、正式 200k 之前）**：冒烟发现 `spawn_tagged` 的容量拒绝同时覆盖有性与无性路径，而初版 `birth_attempts` 只数有性，导致 root DECO 出现 `region_blocks > attempts`。现将尝试数拆为 `sexual_attempts` / `asexual_attempts`，`birth_attempts` 定义为两者之和；判据、seed 池、作用域与指标不变。此修正在任何 200k 判定臂启动之前完成。
 
 > 恒等式 3 依赖 `spawn_tagged` 只有两个失败出口（kind 预算、区域容量）；当前源码确实如此（见 Phase 68 实现时复核）。
 
@@ -92,11 +96,12 @@ Phase 67 的关键读法是：R3 没有创造新生物量，只是在同一个�
 **段间存活率（每个 seed、每个作用域）**：
 
 - `find_rate = mate_finds / repro_ready`
-- `compat_rate = birth_attempts / mate_finds`
-- `birth_rate = sexual_births / birth_attempts`
+- `compat_rate = sexual_attempts / mate_finds`
+- `birth_rate = sexual_births / sexual_attempts`
+- `asexual_attempt_rate = asexual_attempts / (sexual_attempts + asexual_attempts)`
 - `kind_block_rate = kind_budget_blocks / birth_attempts`
 - `region_block_rate = region_cap_blocks / birth_attempts`
-- `asexual_share = asexual_births / births`
+- `sexual_share = sexual_births / births`
 
 **按 clade-tick 归一（主指标）**：
 
