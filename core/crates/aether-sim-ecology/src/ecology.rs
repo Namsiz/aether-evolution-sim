@@ -1114,6 +1114,27 @@ pub const FORK_GRACE_TICKS: u32 = 5_000;
 /// after its fork. Matches the 10k window of the `建支即失稳` definition.
 pub const YOUNG_CLADE_TICKS: u32 = 10_000;
 
+// ----- Phase 69.2: temporary daughter regional-share protection (T-region) --
+//
+// Phase 69.1 put the real regional-gate share at 31.2 % of derived DECO spawn
+// attempts (kind-only 68.7 %, research/phase69-report.md §1.1). T-region tests
+// whether the *build-up* window is the salvageable part of that 31.2 %: for
+// `BUILD_WINDOW_TICKS` after its fork, a daughter keeps
+// `max(natural, min(budget, SPECIATION_MIN_SIDE))` in every quadrant it already
+// occupies. It differs from the Phase 61 (b) floor (permanent, whole life) and
+// from Phase 65 W1 (kind-budget gate) in both scope and duration: only the
+// regional cap moves, only inside the window, and no floor survives it. Zero
+// RNG; the cap is a spatial share while the kind budget stays the hard
+// ceiling, so the DECO family total stays 80. Arm-only, not persisted.
+/// Compiled default: OFF until the pre-registered 5-seed A/B passes.
+pub const BUILD_WINDOW_ON: bool = false;
+/// Protection window after a fork (same scale as `YOUNG_CLADE_TICKS`: the
+/// Phase 62 dissipation window is 3 960–10 000 ticks).
+pub const BUILD_WINDOW_TICKS: u32 = 10_000;
+/// Protected share floor: the species split minimum side (8), the same value
+/// the Phase 49 fork gate uses. Never raised above the kind's own budget.
+pub const BUILD_WINDOW_FLOOR: usize = SPECIATION_MIN_SIDE_DEFAULT;
+
 // ----- Phase 66: derived-clade regional mate-radius floor -------------------
 //
 // Phase 66 diagnosis (research/phase66-report.md §1.1): 77.8 % of a derived
@@ -1700,6 +1721,10 @@ pub struct CladeLifeStats {
     /// would also have refused. Pure read-only probe; closes the gate-order
     /// blind spot (region is only evaluated when kind budget passes).
     pub would_region_blocks: u64,
+    /// Phase 69.2: births admitted only because the T-region window lifted the
+    /// kind's regional cap above its natural share (the natural cap would have
+    /// refused). Pure read-only accounting.
+    pub protection_admitted: u64,
     /// Ready-adult ticks whose mate search came back empty (one count per
     /// failed search, not per tick: the search only runs when the mother is
     /// past cooldown and over her energy threshold).
@@ -2257,6 +2282,10 @@ pub struct Ecology {
     /// speciation collapses — so this arm leaves the root untouched and only
     /// unpinches the daughters. Not persisted.
     pub deco_region_cap_renorm_daughters: bool,
+    /// Phase 69.2 T-region arm: temporary regional-share protection for a
+    /// derived DECO kind inside `BUILD_WINDOW_TICKS` of its fork. Arm knob,
+    /// not persisted (a restored world lands on `BUILD_WINDOW_ON`).
+    pub build_window: bool,
     /// Phase 61 runtime telemetry: per-clade birth/death counters. Pure
     /// observation — not persisted, never read by the simulation.
     pub clade_life: Vec<CladeLifeStats>,
@@ -2538,6 +2567,7 @@ impl Ecology {
             deco_region_cap_floor: DECO_REGION_CAP_FLOOR_ON,
             deco_region_cap_floor_small: DECO_REGION_CAP_FLOOR_SMALL_ON,
             deco_region_cap_renorm_daughters: false,
+            build_window: BUILD_WINDOW_ON,
             clade_life: Vec::new(),
             isolation_by_kind: Vec::new(),
             culture_value_on: true,
@@ -2783,6 +2813,7 @@ impl Ecology {
             deco_region_cap_floor: DECO_REGION_CAP_FLOOR_ON,
             deco_region_cap_floor_small: DECO_REGION_CAP_FLOOR_SMALL_ON,
             deco_region_cap_renorm_daughters: false,
+            build_window: BUILD_WINDOW_ON,
             clade_life: Vec::new(),
             isolation_by_kind: Vec::new(),
             culture_value_on: true,
@@ -4481,6 +4512,17 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         self.deco_region_cap_renorm_daughters = false;
     }
 
+    /// Phase 69.2 T-region arm on: a derived DECO kind keeps
+    /// `min(budget, SPECIATION_MIN_SIDE)` slots in each quadrant it occupies for
+    /// `BUILD_WINDOW_TICKS` after its fork.
+    pub fn build_window_treg_on(&mut self) { self.build_window = true; }
+
+    /// Phase 69.2 T-region arm off (the compiled default).
+    pub fn build_window_treg_off(&mut self) { self.build_window = false; }
+
+    /// Phase 69.2: is the T-region arm on for this instance?
+    pub fn build_window_treg(&self) -> bool { self.build_window }
+
     /// Phase 60: refresh the per-home-region capacity weights from the current
     /// decomposition field. Mean `deco_env` over habitable cells only; a region
     /// that rots carcasses faster retains less food, so its weight falls.
@@ -4532,6 +4574,40 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
     }
 
     fn deco_region_cap_limit_with(
+        &self, kind: SpeciesKind, region: u8,
+        weights: &[f64; REGION_COUNT as usize], wsum_total: f64,
+    ) -> f64 {
+        let natural = self.deco_region_natural_cap(kind, region, weights, wsum_total);
+        // Phase 69.2 T-region: inside a daughter's build-up window an occupied
+        // quadrant keeps at least `min(budget, SPECIATION_MIN_SIDE)` slots. Empty
+        // quadrants and expired windows return the natural share untouched; the
+        // kind budget is still the hard ceiling (`min(budget, floor)`).
+        let r = (region as usize).min(REGION_COUNT as usize - 1);
+        if self.build_window_active(kind) && self.deco_region_count(kind, r as u8) > 0 {
+            let floor = (self.kind_budget(kind) as f64).min(BUILD_WINDOW_FLOOR as f64);
+            return natural.max(floor);
+        }
+        natural
+    }
+
+    /// Phase 69.2: is `kind` a derived DECO kind still inside its fork window?
+    /// The clade record's `birth_tick` is the fork tick (never the first birth);
+    /// a kind without a materialized clade has no date to measure from, so it
+    /// never enters the window.
+    fn build_window_active(&self, kind: SpeciesKind) -> bool {
+        if !self.build_window { return false; }
+        if self.root_kind(kind) != DECO { return false; }
+        if self.kind_def(kind).parent_kind.is_none() { return false; }
+        match self.species_clades.iter().find(|c| c.kind_id == kind as u32) {
+            Some(c) => self.tick_count.saturating_sub(c.birth_tick) < BUILD_WINDOW_TICKS,
+            None => false,
+        }
+    }
+
+    /// Phase 60/61: the natural capacity share of one kind in one home region
+    /// (Phase 69.2 factored this out so the spawn gate can compare it with the
+    /// protected cap).
+    fn deco_region_natural_cap(
         &self, kind: SpeciesKind, region: u8,
         weights: &[f64; REGION_COUNT as usize], wsum_total: f64,
     ) -> f64 {
@@ -4674,6 +4750,13 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
     fn clade_life_would_region_block(&mut self, tag: (u32, SpeciesKind)) {
         let i = self.clade_life_slot(tag.0, tag.1);
         self.clade_life[i].would_region_blocks += 1;
+    }
+
+    /// Phase 69.2: a birth admitted only because the T-region window lifted the
+    /// regional cap above this kind's natural share (read-only accounting).
+    fn clade_life_protection_admitted(&mut self, tag: (u32, SpeciesKind)) {
+        let i = self.clade_life_slot(tag.0, tag.1);
+        self.clade_life[i].protection_admitted += 1;
     }
 
     /// Phase 68: one funnel-stage increment on the mother's clade/kind row.
@@ -5108,6 +5191,9 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         // grace window (the legacy gate would have refused it). Recorded on
         // success only — a region-cap refusal leaves the trajectory identical.
         let mut grace_admitted = false;
+        // Phase 69.2: whether this birth passed only because the T-region
+        // window lifted the regional cap (recorded on the tagged success path).
+        let mut protection_admitted = false;
         // Phase 49 A/B: with the fork budget active, each kind's births are
         // gated by its OWN carved-out share (min with the local biome cap):
         // a daughter's growth is decoupled from the root's occupancy. The
@@ -5166,11 +5252,16 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
                 self.refresh_deco_region_weights();
             }
             let r = Self::region_of(x, z);
+            let natural = self.deco_region_natural_cap(
+                kind, r, &self.deco_region_weight, self.deco_region_weight_sum,
+            );
             let limit = self.deco_region_cap_limit(kind, r);
-            if self.deco_region_count(kind, r) as f64 >= limit {
+            let standing = self.deco_region_count(kind, r) as f64;
+            if standing >= limit {
                 if let Some(t) = tag { self.clade_life_block(t, CladeBirthBlock::RegionCap); }
                 return None;
             }
+            protection_admitted = self.build_window && limit > natural && standing >= natural;
         }
         let g = match genome {
             Some(g) => g,
@@ -5267,6 +5358,9 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         if grace_admitted {
             let over = self.count(kind).saturating_sub(self.kind_budget(kind));
             self.bump_grace_stats(kind, over);
+        }
+        if protection_admitted {
+            if let Some(t) = tag { self.clade_life_protection_admitted(t); }
         }
         if let Some(t) = tag { self.clade_life_birth(t.0, t.1); }
         Some(&mut self.agents[idx])
@@ -10430,6 +10524,7 @@ impl Ecology {
             deco_region_cap_floor: DECO_REGION_CAP_FLOOR_ON,
             deco_region_cap_floor_small: DECO_REGION_CAP_FLOOR_SMALL_ON,
             deco_region_cap_renorm_daughters: false,
+            build_window: BUILD_WINDOW_ON,
             clade_life: Vec::new(),
             isolation_by_kind: Vec::new(),
             culture_value_on: state.CultureValueOn,
@@ -11373,5 +11468,187 @@ mod phase69_would_region_tests {
             .find(|s| s.clade_id == 0 && s.kind_id == d as u32).unwrap();
         assert_eq!(s.kind_budget_blocks, 1);
         assert_eq!(s.would_region_blocks, 0);
+    }
+}
+
+#[cfg(test)]
+mod phase69_build_window_tests {
+    use super::*;
+
+    /// A derived DECO kind funded out of the root's share, so the guild total
+    /// stays 80 (the Phase 49 invariant the arm must not touch).
+    fn daughter(eco: &mut Ecology, budget: usize) -> SpeciesKind {
+        let mut def = eco.kind_def(DECO).clone();
+        def.name = "deco-build-window";
+        def.parent_kind = Some(DECO);
+        def.global_cap = budget;
+        let d = eco.register_kind(def);
+        eco.set_kind_budget(d, budget);
+        eco.set_kind_budget(DECO, 80 - budget);
+        d
+    }
+
+    /// The materialized clade record the window is dated from (`birth_tick` is
+    /// the fork tick). `kind_id` is unique per kind, which is how the gate
+    /// finds it from a live agent's kind.
+    fn fork_clade(eco: &mut Ecology, id: u32, kind: SpeciesKind, birth_tick: u32) {
+        let centroid = eco.agents[0].genome.clone();
+        eco.species_clades.push(SpeciesClade {
+            id,
+            parent_id: None,
+            kind: "deco",
+            name: "deco-build-window".to_string(),
+            birth_tick,
+            death_tick: None,
+            centroid_genome: centroid,
+            members: Vec::new(),
+            niche_offset: 0.0,
+            kind_id: kind as u32,
+            derived_kind: Some(kind as u32),
+            axes: Vec::new(),
+        });
+    }
+
+    fn build_world(seed: u32, budget: usize, treg: bool, birth_tick: u32) -> (Ecology, SpeciesKind) {
+        let mut eco = Ecology::new(seed);
+        if treg { eco.build_window_treg_on(); } else { eco.build_window_treg_off(); }
+        let d = daughter(&mut eco, budget);
+        fork_clade(&mut eco, 100, d, birth_tick);
+        (eco, d)
+    }
+
+    /// A habitable cell whose centre lies in `region`.
+    fn land_point(eco: &Ecology, region: u8) -> (f64, f64) {
+        let cell = GRID_SPAN / GRID_N as f64;
+        for row in 0..GRID_N as i32 {
+            for col in 0..GRID_N as i32 {
+                let x = -GRID_SPAN / 2.0 + (col as f64 + 0.5) * cell;
+                let z = -GRID_SPAN / 2.0 + (row as f64 + 0.5) * cell;
+                if Ecology::region_of(x, z) != region { continue; }
+                let j = row as usize * GRID_N as usize + col as usize;
+                if eco.suit_field()[j] > 0.5 { return (x, z); }
+            }
+        }
+        panic!("no habitable cell in region {region}");
+    }
+
+    fn row(eco: &Ecology, clade_id: u32, kind: SpeciesKind) -> &CladeLifeStats {
+        eco.clade_life_stats().iter()
+            .find(|s| s.clade_id == clade_id && s.kind_id == kind as u32)
+            .expect("tagged row")
+    }
+
+    #[test]
+    fn the_window_lifts_an_occupied_quadrant_and_leaves_vacant_ones_alone() {
+        let (mut eco, d) = build_world(20261215, 16, true, 0);
+        let (x0, z0) = land_point(&eco, 0);
+        // Natural Phase 60 share: 16 / 4 quadrants = 4 slots.
+        assert!((eco.deco_region_cap_for(d, 0) - 4.0).abs() < 1e-9);
+        for i in 0..8 {
+            assert!(eco.spawn_agent(d, x0, z0).is_some(), "protected spawn {i}");
+        }
+        assert_eq!(eco.agents.iter().filter(|a| a.alive && a.kind == d && a.region == 0).count(), 8,
+            "the occupied quadrant fills to min(budget, 8)");
+        assert!((eco.deco_region_cap_for(d, 0) - 8.0).abs() < 1e-9,
+            "the occupied quadrant keeps min(budget, SPECIATION_MIN_SIDE) = 8");
+        for r in [1u8, 2, 3] {
+            assert!((eco.deco_region_cap_for(d, r) - 4.0).abs() < 1e-9,
+                "a vacant quadrant keeps the natural share ({r})");
+        }
+        // Conservation: the protected cap is a spatial share, never new slots.
+        assert_eq!(eco.kind_budget(d), 16);
+        assert_eq!(eco.family_budget_total(DECO), 80);
+    }
+
+    #[test]
+    fn the_window_expires_ten_thousand_ticks_after_the_fork() {
+        let (mut eco, d) = build_world(20261216, 16, true, 5_000);
+        let (x0, z0) = land_point(&eco, 0);
+        eco.tick_count = 5_000;
+        for _ in 0..8 {
+            assert!(eco.spawn_agent(d, x0, z0).is_some());
+        }
+        eco.tick_count = 5_000 + BUILD_WINDOW_TICKS - 1;
+        assert!((eco.deco_region_cap_for(d, 0) - 8.0).abs() < 1e-9,
+            "one tick before expiry the floor still holds");
+        eco.tick_count = 5_000 + BUILD_WINDOW_TICKS;
+        assert!((eco.deco_region_cap_for(d, 0) - 4.0).abs() < 1e-9,
+            "the window is measured from the fork tick and leaves no permanent floor");
+    }
+
+    #[test]
+    fn roots_and_fish_never_enter_the_window() {
+        let mut eco = Ecology::new(20261217);
+        eco.build_window_treg_on();
+        assert!(!eco.build_window_active(DECO), "the root DECO is the partition itself");
+        assert!(!eco.build_window_active(FISH));
+        let (x0, z0) = land_point(&eco, 0);
+        for _ in 0..8 {
+            assert!(eco.spawn_agent(DECO, x0, z0).is_some());
+        }
+        assert!((eco.deco_region_cap_for(DECO, 0) - eco.kind_budget(DECO) as f64 / 4.0).abs() < 1e-9,
+            "the root DECO keeps the plain four-quadrant split");
+        for _ in 0..3 {
+            assert!(eco.spawn_agent(FISH, x0, z0).is_some());
+        }
+        assert!((eco.deco_region_cap_for(FISH, 0) - eco.kind_budget(FISH) as f64 / 4.0).abs() < 1e-9,
+            "FISH keep their natural share");
+    }
+
+    #[test]
+    fn the_arm_defaults_off_and_a_restore_lands_off() {
+        let eco = Ecology::new(20261218);
+        assert!(!BUILD_WINDOW_ON);
+        assert!(!eco.build_window_treg(), "T-region is arm-only until the 5-seed verdict");
+        let (mut off, d) = build_world(20261218, 16, false, 0);
+        let (x0, z0) = land_point(&off, 0);
+        for _ in 0..4 {
+            assert!(off.spawn_agent(d, x0, z0).is_some());
+        }
+        assert!(off.spawn_agent(d, x0, z0).is_none(), "the natural share is the ceiling when off");
+        assert!((off.deco_region_cap_for(d, 0) - 4.0).abs() < 1e-9);
+        // A restore never carries an arm knob: it runs the compiled default.
+        let (mut armed, _d) = build_world(20261218, 16, true, 0);
+        let json = serde_json::to_string(&armed.to_save_state()).unwrap();
+        assert!(!json.contains("BuildWindow"), "the arm never enters the save state");
+        let restored = Ecology::from_save_state(serde_json::from_str(&json).unwrap());
+        assert!(!restored.build_window_treg());
+        armed.build_window_treg_off();
+        assert!(!armed.build_window_treg());
+    }
+
+    #[test]
+    fn protection_admitted_counts_only_floor_rescued_births() {
+        let (mut eco, d) = build_world(20261219, 16, true, 0);
+        let (x0, z0) = land_point(&eco, 0);
+        // The first four births pass on the natural share: not protected.
+        for _ in 0..4 {
+            assert!(eco.spawn_tagged(d, x0, z0, None, 0, 0.0, Some((100, d))).is_some());
+        }
+        assert_eq!(row(&eco, 100, d).protection_admitted, 0);
+        assert_eq!(row(&eco, 100, d).region_cap_blocks, 0);
+        // Births 5–8 pass only because the window lifted the cap to 8.
+        for _ in 0..4 {
+            assert!(eco.spawn_tagged(d, x0, z0, None, 0, 0.0, Some((100, d))).is_some());
+        }
+        assert_eq!(row(&eco, 100, d).protection_admitted, 4);
+        // The ninth is refused by the protected cap itself.
+        assert!(eco.spawn_tagged(d, x0, z0, None, 0, 0.0, Some((100, d))).is_none());
+        assert_eq!(row(&eco, 100, d).region_cap_blocks, 1);
+        assert_eq!(row(&eco, 100, d).protection_admitted, 4);
+        assert_eq!(eco.grace_total_skips(), 0, "T-region never touches the kind gate");
+        assert_eq!(eco.family_budget_total(DECO), 80);
+    }
+
+    #[test]
+    fn the_off_arm_books_no_protection_at_all() {
+        let (mut eco, d) = build_world(20261220, 16, false, 0);
+        let (x0, z0) = land_point(&eco, 0);
+        for _ in 0..4 {
+            assert!(eco.spawn_tagged(d, x0, z0, None, 0, 0.0, Some((100, d))).is_some());
+        }
+        assert!(eco.spawn_tagged(d, x0, z0, None, 0, 0.0, Some((100, d))).is_none());
+        assert_eq!(row(&eco, 100, d).protection_admitted, 0);
+        assert_eq!(row(&eco, 100, d).region_cap_blocks, 1);
     }
 }

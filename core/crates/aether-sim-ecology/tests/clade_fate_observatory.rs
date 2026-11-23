@@ -38,6 +38,12 @@
 //! (candidate M: both fork floors) and `PHASE_FORK_DAUGHTER_MIN=12`
 //! (candidate A: only the daughter's grant floor). The final stderr block also
 //! prints every kind's budget, its growth ledger and the DECO family total.
+//!
+//! Phase 69.2 adds `PHASE_BUILD_WINDOW=off|treg`: "treg" lifts a derived DECO
+//! kind's occupied-quadrant cap to `max(natural, min(budget, 8))` for
+//! `BUILD_WINDOW_TICKS` after its fork (arm-only, not persisted); "off" runs
+//! the compiled default. Output files carry the `bwin` arm so the two arms
+//! never overwrite each other.
 
 use aether_sim_ecology::civilization_metrics::{format_line, measure};
 use aether_sim_ecology::ecology::Ecology;
@@ -193,14 +199,20 @@ fn clade_fate_observation() {
         Some("r3") => "mater3",
         _ => "matedflt",
     };
+    // Phase 69.2: temporary daughter regional-share protection (T-region).
+    let bwin_arm = match env_str("PHASE_BUILD_WINDOW").as_deref() {
+        Some("treg") => "bwinon",
+        Some("off") => "bwinoff",
+        _ => "bwindflt",
+    };
     // Calibration-sweep tag (Phase 55): parallel arms of the same switch must
     // never overwrite each other's output files.
     let tag = env_str("PHASE_ARM_TAG").unwrap_or_default();
     let suffix = if tag.is_empty() { String::new() } else { format!("_{tag}") };
-    let csv_path = format!("/tmp/clade_fate_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}_{growth_arm}_{fork_min_arm}_{fork_dau_arm}_{grace_arm}_{mate_arm}{suffix}.csv");
-    let tree_path = format!("/tmp/clade_tree_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}_{growth_arm}_{fork_min_arm}_{fork_dau_arm}_{grace_arm}_{mate_arm}{suffix}.csv");
-    let culture_path = format!("/tmp/clade_culture_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}_{growth_arm}_{fork_min_arm}_{fork_dau_arm}_{grace_arm}_{mate_arm}{suffix}.csv");
-    let life_path = format!("/tmp/clade_life_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}_{growth_arm}_{fork_min_arm}_{fork_dau_arm}_{grace_arm}_{mate_arm}{suffix}.csv");
+    let csv_path = format!("/tmp/clade_fate_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}_{growth_arm}_{fork_min_arm}_{fork_dau_arm}_{grace_arm}_{mate_arm}_{bwin_arm}{suffix}.csv");
+    let tree_path = format!("/tmp/clade_tree_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}_{growth_arm}_{fork_min_arm}_{fork_dau_arm}_{grace_arm}_{mate_arm}_{bwin_arm}{suffix}.csv");
+    let culture_path = format!("/tmp/clade_culture_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}_{growth_arm}_{fork_min_arm}_{fork_dau_arm}_{grace_arm}_{mate_arm}_{bwin_arm}{suffix}.csv");
+    let life_path = format!("/tmp/clade_life_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}_{growth_arm}_{fork_min_arm}_{fork_dau_arm}_{grace_arm}_{mate_arm}_{bwin_arm}{suffix}.csv");
     let mut csv = String::from(
         "t,pop,herb,pred,scav,omn,fish,deco,clades_live,clades_total,events,tokens,bearers,groups,levels,authorities,grass_mean,grass_var,env_mean,env_var,structs,deco_r0,deco_r1,deco_r2,deco_r3,structs_r0,structs_r1,structs_r2,structs_r3,denv_mean,denv_var\n",
     );
@@ -241,8 +253,10 @@ fn clade_fate_observation() {
     if mate_arm == "mater2" { eco.mate_floor_r2(); }
     if mate_arm == "mater3" { eco.mate_floor_r3(); }
     if mate_arm == "mateoff" { eco.mate_floor_off(); }
+    if bwin_arm == "bwinon" { eco.build_window_treg_on(); }
+    if bwin_arm == "bwinoff" { eco.build_window_treg_off(); }
     let mut last_events = 0usize;
-    eprintln!("=== clade-fate seed {seed} ({ticks} ticks, structure_env={arm}, deco_env={deco_arm}, token_sign={sign_arm}, clamp={clamp_arm}, place={place_arm}, repro={repro_arm}, grace={grace_arm}, mate_floor={mate_arm}) ===");
+    eprintln!("=== clade-fate seed {seed} ({ticks} ticks, structure_env={arm}, deco_env={deco_arm}, token_sign={sign_arm}, clamp={clamp_arm}, place={place_arm}, repro={repro_arm}, grace={grace_arm}, mate_floor={mate_arm}, build_window={bwin_arm}) ===");
     for t in 1..=ticks {
         eco.update(0.1, daylight(t));
         let n = eco.clade_events().len();
@@ -430,7 +444,7 @@ fn clade_fate_observation() {
     // Phase 61: engine-level per-clade life counters (births / deaths by
     // cause / refusals by gate / mate misses / peak / extinction tick).
     let mut life = String::from(
-        "clade_id,clade_name,root_kind,kind_id,kind,births,deaths,deaths_starved,deaths_aged,deaths_predation,deaths_other,region_cap_blocks,kind_budget_blocks,mate_misses,mate_miss_no_kin,mate_miss_other_region,mate_miss_beyond_radius,mate_miss_filtered,mate_miss_other,mate_miss_young,mate_miss_young_no_kin,mate_miss_young_other_region,mate_miss_young_beyond_radius,mate_miss_young_filtered,mate_miss_young_other,mate_miss_kind_pop_sum,mate_miss_region_pop_sum,mate_miss_ready_dist_sum,mate_miss_ready_dist_min,dispersal_out,deaths_off_region,first_tick,first_birth_tick,last_birth_tick,peak_pop,peak_tick,region_peak_r0,region_peak_r1,region_peak_r2,region_peak_r3,extinction_tick,mean_death_age,mean_death_energy,last_death_energy,life_ticks,repro_ready,mate_finds,mate_reject_hue,mate_reject_barrier,mate_reject_sig,birth_attempts,sexual_attempts,sexual_births,asexual_attempts,asexual_births,would_region_blocks\n",
+        "clade_id,clade_name,root_kind,kind_id,kind,births,deaths,deaths_starved,deaths_aged,deaths_predation,deaths_other,region_cap_blocks,kind_budget_blocks,mate_misses,mate_miss_no_kin,mate_miss_other_region,mate_miss_beyond_radius,mate_miss_filtered,mate_miss_other,mate_miss_young,mate_miss_young_no_kin,mate_miss_young_other_region,mate_miss_young_beyond_radius,mate_miss_young_filtered,mate_miss_young_other,mate_miss_kind_pop_sum,mate_miss_region_pop_sum,mate_miss_ready_dist_sum,mate_miss_ready_dist_min,dispersal_out,deaths_off_region,first_tick,first_birth_tick,last_birth_tick,peak_pop,peak_tick,region_peak_r0,region_peak_r1,region_peak_r2,region_peak_r3,extinction_tick,mean_death_age,mean_death_energy,last_death_energy,life_ticks,repro_ready,mate_finds,mate_reject_hue,mate_reject_barrier,mate_reject_sig,birth_attempts,sexual_attempts,sexual_births,asexual_attempts,asexual_births,would_region_blocks,protection_admitted\n",
     );
     let mut life_rows: Vec<_> = eco.clade_life_stats().to_vec();
     life_rows.sort_by_key(|s| (s.root_kind, s.kind_id, s.clade_id));
@@ -447,7 +461,7 @@ fn clade_fate_observation() {
             _ => fam_name.to_string(),
         };
         life.push_str(&format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.2},{:.2},{},{},{},{},{},{},{},{},{},{},{},{},{:.2},{:.3},{:.3},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.2},{:.2},{},{},{},{},{},{},{},{},{},{},{},{},{:.2},{:.3},{:.3},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
             s.clade_id,
             clade_label,
             fam_name,
@@ -475,6 +489,7 @@ fn clade_fate_observation() {
             s.repro_ready, s.mate_finds, s.mate_reject_hue, s.mate_reject_barrier,
             s.mate_reject_sig, s.birth_attempts, s.sexual_attempts, s.sexual_births,
             s.asexual_attempts, s.asexual_births, s.would_region_blocks,
+            s.protection_admitted,
         ));
     }
     std::fs::write(&csv_path, csv).unwrap();
@@ -627,7 +642,7 @@ fn clade_fate_observation() {
         .filter(|s| s.root_kind == aether_sim_ecology::ecology::DECO && !is_derived_deco(s))
         .collect();
     let funnel_totals = |rows: &[&aether_sim_ecology::ecology::CladeLifeStats]| {
-        let mut t = [0u64; 15];
+        let mut t = [0u64; 16];
         for s in rows {
             t[0] += s.repro_ready;
             t[1] += s.mate_finds;
@@ -644,6 +659,7 @@ fn clade_fate_observation() {
             t[12] += s.births;
             t[13] += s.deaths;
             t[14] += s.would_region_blocks;
+            t[15] += s.protection_admitted;
         }
         t
     };
@@ -651,8 +667,8 @@ fn clade_fate_observation() {
     let df = funnel_totals(&dau_rows);
     let rf = funnel_totals(&root_deco_rows);
     eprintln!(
-        "  [funnel] derived_deco ready={} finds={} reject_hue={} reject_barrier={} reject_sig={} attempts={} sexual_attempts={} sexual_births={} asexual_attempts={} asexual_births={} kind_blocks={} region_blocks={} would_region_blocks={} births={} deaths={}",
-        df[0], df[1], df[2], df[3], df[4], df[5], df[6], df[7], df[8], df[9], df[10], df[11], df[14], df[12], df[13],
+        "  [funnel] derived_deco ready={} finds={} reject_hue={} reject_barrier={} reject_sig={} attempts={} sexual_attempts={} sexual_births={} asexual_attempts={} asexual_births={} kind_blocks={} region_blocks={} would_region_blocks={} protection_admitted={} births={} deaths={}",
+        df[0], df[1], df[2], df[3], df[4], df[5], df[6], df[7], df[8], df[9], df[10], df[11], df[14], df[15], df[12], df[13],
     );
     eprintln!(
         "  [funnel] derived_deco rates find={:.3} compat={:.3} birth={:.3} kind_block={:.3} region_block={:.3} sexual_share={:.3} deaths_per_birth={:.3}",
@@ -660,8 +676,8 @@ fn clade_fate_observation() {
         rate(df[10], df[5]), rate(df[11], df[5]), rate(df[7], df[12]), rate(df[13], df[12]),
     );
     eprintln!(
-        "  [funnel] root_deco ready={} finds={} reject_hue={} reject_barrier={} reject_sig={} attempts={} sexual_attempts={} sexual_births={} asexual_attempts={} asexual_births={} kind_blocks={} region_blocks={} would_region_blocks={} births={} deaths={}",
-        rf[0], rf[1], rf[2], rf[3], rf[4], rf[5], rf[6], rf[7], rf[8], rf[9], rf[10], rf[11], rf[14], rf[12], rf[13],
+        "  [funnel] root_deco ready={} finds={} reject_hue={} reject_barrier={} reject_sig={} attempts={} sexual_attempts={} sexual_births={} asexual_attempts={} asexual_births={} kind_blocks={} region_blocks={} would_region_blocks={} protection_admitted={} births={} deaths={}",
+        rf[0], rf[1], rf[2], rf[3], rf[4], rf[5], rf[6], rf[7], rf[8], rf[9], rf[10], rf[11], rf[14], rf[15], rf[12], rf[13],
     );
     eprintln!(
         "  [funnel] root_deco rates find={:.3} compat={:.3} birth={:.3} kind_block={:.3} region_block={:.3} sexual_share={:.3} deaths_per_birth={:.3}",
