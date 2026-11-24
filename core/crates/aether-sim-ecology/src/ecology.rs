@@ -4678,6 +4678,18 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         self.deco_region_cap_limit(kind, region)
     }
 
+    /// Phase 69.3 Stage 0: total energy currently sitting in the carcass pool.
+    /// Pure read; the DECO resource face used to calibrate a resource-derived
+    /// family capacity in Stage 1.
+    pub fn carcass_energy_total(&self) -> f64 {
+        self.carcasses.iter().map(|c| c.energy).sum()
+    }
+
+    /// Phase 69.3 Stage 0: number of carcasses currently in the pool.
+    pub fn carcass_count(&self) -> usize {
+        self.carcasses.len()
+    }
+
     // ----- Phase 61: per-clade life telemetry ---------------------------------
 
     /// Phase 61: every clade's birth/death bookkeeping, in first-touch order.
@@ -11650,5 +11662,22 @@ mod phase69_build_window_tests {
         assert!(eco.spawn_tagged(d, x0, z0, None, 0, 0.0, Some((100, d))).is_none());
         assert_eq!(row(&eco, 100, d).protection_admitted, 0);
         assert_eq!(row(&eco, 100, d).region_cap_blocks, 1);
+    }
+}
+
+#[cfg(test)]
+mod phase69_3_stage0_tests {
+    use super::*;
+
+    #[test]
+    fn carcass_totals_are_a_pure_sum_of_the_pool() {
+        let mut eco = Ecology::new(20261215);
+        eco.carcasses.clear();
+        assert_eq!(eco.carcass_count(), 0);
+        assert_eq!(eco.carcass_energy_total(), 0.0);
+        eco.carcasses.push(Carcass { x: 1.0, z: 2.0, energy: 2.5, age: 0.0, occupied_by: None });
+        eco.carcasses.push(Carcass { x: 3.0, z: 4.0, energy: 4.25, age: 0.0, occupied_by: None });
+        assert_eq!(eco.carcass_count(), 2);
+        assert!((eco.carcass_energy_total() - 6.75).abs() < 1e-12);
     }
 }

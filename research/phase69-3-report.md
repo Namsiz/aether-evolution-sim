@@ -73,20 +73,79 @@ HEAD（起点）：`cfe2e71`（Phase 69.2：T-region 默认 OFF，P2/D0 败，�
 
 ## 2. Stage 0 实现
 
-（待实现后补入。）
+- `ecology.rs:4684`：`carcass_energy_total()`（Σ `Carcass.energy`，纯读）。
+- `ecology.rs:4689`：`carcass_count()`（`carcasses.len()`，纯读）。
+- `clade_fate_observatory.rs`：`clade_fate` CSV 末尾追加 `carcass_energy,carcass_count`；`[fate]` 行末尾追加 `carcass_e={:.1}`。
+- 单测 `phase69_3_stage0_tests::carcass_totals_are_a_pure_sum_of_the_pool`：空池为 0、两具尸体求和 6.75。
+- 零 RNG、零动力学路径改动；默认世界与 Phase 69.2 的 9/4、`@60000` 锚点一致。
 
 ---
 
 ## 3. Stage 0 结果
 
-（待 3 seed 200k 完成后补入：逐 seed 的 E/N 分布、E_ref、CV。）
+3 个默认 seed × 200k，取 `t ≥ 20_000` 的 37 个 5k 采样点：
+
+| seed | samples | E_mean | E_median | E_p10 | E_p90 | E_CV | N_mean | N_median |
+|---|---|---|---|---|---|---|---|---|
+| 20261215 | 37 | 186.12 | 194.70 | 92.70 | 250.50 | 0.367 | 15.57 | 17 |
+| 20261217 | 37 | 219.90 | 202.50 | 110.10 | 353.00 | 0.459 | 18.08 | 17 |
+| 20261219 | 37 | 173.74 | 173.10 | 98.50 | 273.60 | 0.430 | 14.30 | 14 |
+| **合计** | **111** | **193.25** | **192.50** | **98.50** | **304.00** | — | — | — |
+
+**`E_ref = 192.5`**（三 seed 的 `E_median` 中位数）。
+
+读数：
+
+- 三 seed 的 `E_median` 在 173-203 之间，跨 seed 中位数 CV ≈ 0.08，**D0-4 过**（≤0.5）。
+- 逐 seed 内部 CV 0.37-0.46：尸体池是**噪声资源**，必须用 EMA 平滑，不能直接用瞬时 E 驱 cap。
+- `E_p10=98.5`、`E_p90=304`：按 `80 × E / 192.5` 映射，cap 的典型范围约 **41-126**，正好落在预设 `[40,160]` 内，动态范围可用。
+- `N_median=14-17`：尸体池由少量大尸体组成；总能量比数量更稳定。
 
 ---
 
 ## 4. Stage 1 候选映射（Stage 0 后写死，暂不预注册）
 
-- `cap_total = clamp(round(MAX_DECO × E_ema / E_ref), MIN_CAP, MAX_CAP)`。
-- `E_ema` 每 5,000 tick 更新：`E_ema ← 0.8 × E_ema + 0.2 × E`（零 RNG）。
-- 初始 `MIN_CAP=40`、`MAX_CAP=160`；`E_ref` 取 Stage 0 的三 seed 中位数。
-- 根 DECO 的 `kind_budget` 调整为 `cap_total`；fork 仍按 `clamp(parent/4, 8, 20)` 划拨；灭绝归还。`family_budget_total(DECO)` 从恒 80 变为恒 `cap_total`。
-- Stage 1 的 A/B 判据：P1 分化非劣性、P2 births/kt ≥1.10×、P3 deaths/birth ≤1.05×、D0 cap 在 200k 内变化 ≥20%、D1 人口不爆炸/不塌缩（40-160）。
+- `E_ref = 192.5`（Stage 0 三 seed 的 `E_median` 中位数）。
+- `cap_total = clamp(round(80 × E_ema / 192.5), 40, 160)`；`E_p10/E_p90` 对应约 41/126，动态范围可用。
+- `E_ema` 初始 `E_ref`；每 5,000 tick 更新：`E_ema ← 0.8 × E_ema + 0.2 × E`（零 RNG）。
+- **预算重标定**：设当前 DECO 全族总额 `S = Σ kind_budget`；新 cap 为 `C`；逐 kind `new_k = round(old_k × C / S)`；四舍五入余量补到根 kind；若 `S=0`，根 = `C`。重标定后 `family_budget_total(DECO) = C`，fork 仍按 `clamp(parent/4, 8, 20)` 划拨，灭绝归还。
+- **必须同时改的集成点**：
+  1. `biome_cap_in` 对 DECO 的 `BiomeCap::Fallback` 现在返回 `def.global_cap=80`；Stage 1 必须改为 `deco_family_cap`，否则预算抬到 126 也会被 80 的 biome cap 卡住。
+  2. `cap_for_kind` 的 crowding 分母 `MAX_DECO=80` 必须改用 `deco_family_cap`，否则超过 80 时过度惩罚。
+  3. 安全阀 `total_cap` 仍用 `MAX_DECO=80`：cap 上限 160 时总上限 830 < total_cap+60=840，不会误杀；若未来上限 >160 需同步。
+  4. `SaveState`：A/B 期 arm/cap 不入档；若 Stage 1 转正，必须加 v25 字段（`DecoFamilyCap` / `ResourceCapOn`），否则读一份 cap>80 的存档会被 OFF 默认解释成「预算总和 >80 但机制关」。
+- Stage 1 的 A/B：`20261222–26`（备用 `20261227–28`）× OFF/R × 200k；P1 分化非劣性、P2 births/kt ≥1.10×、P3 deaths/birth ≤1.05×、D0 cap 在 200k 内变化 ≥20%、D1 人口不爆炸/不塌缩（40-160）。
+
+---
+
+## 5. 验证
+
+| 项 | 结果 |
+|---|---|
+| 默认自检 `20261102 / 200k` | **9 分化 / 4 灭绝**（1068.63 s） |
+| 默认 `@60000` | `0x3272f0e3eaba9250` 位精确（334.01 s） |
+| Stage 0 三 seed | `20261215 / 17 / 19` 全部 exit 0；CSV 列 `carcass_energy,carcass_count` 有值 |
+| 单测 | `phase69_3_stage0_tests::carcass_totals_are_a_pure_sum_of_the_pool` 通过 |
+| 全量测试 | 见 §5.1 |
+
+### 5.1 全量测试
+
+- 生态 crate：**50 二进制 / 318 passed / 0 failed / 28 ignored**。
+- Stage 0 单测：1/1 通过。
+- wasm：831 807 B，sha256 `1b936d5b7e8fe18ea230b0b8085ab7ed9f0ccd62fc22959c8596cb299458abb2`；`WASM VIEWER SMOKE OK`，10.09 ms/frame。
+
+---
+
+## 6. 改动文件
+
+- `core/crates/aether-sim-ecology/src/ecology.rs`：`carcass_energy_total()` / `carcass_count()` + Stage 0 单测。
+- `core/crates/aether-sim-ecology/tests/clade_fate_observatory.rs`：`clade_fate` CSV 两列 + `[fate]` 的 `carcass_e`。
+- `research/phase69-3-report.md`：本文件。
+
+---
+
+## 7. 明确未做
+
+- 没有实现 Stage 1 的资源→cap 映射；没有改 `MAX_DECO`、`kind_budgets`、`biome_cap_in`、`cap_for_kind`。
+- 没有跑 Stage 1 A/B；没有 re-baseline。
+- 没有动 region cap / 择偶半径 / W1 / M10。
