@@ -44,6 +44,12 @@
 //! `BUILD_WINDOW_TICKS` after its fork (arm-only, not persisted); "off" runs
 //! the compiled default. Output files carry the `bwin` arm so the two arms
 //! never overwrite each other.
+//!
+//! Phase 69.3 Stage 1 adds `PHASE_DECO_RESOURCE_CAP=on|off`: "on" derives the
+//! DECO family's total carrying capacity from the carcass pool's EMA (arm-only,
+//! not persisted); "off" runs the compiled default. The `clade_fate` CSV ends
+//! with `deco_family_cap` and the `[fate]` line carries `cap=` so the D0 check
+//! can see whether the total actually moved.
 
 use aether_sim_ecology::civilization_metrics::{format_line, measure};
 use aether_sim_ecology::ecology::Ecology;
@@ -205,16 +211,22 @@ fn clade_fate_observation() {
         Some("off") => "bwinoff",
         _ => "bwindflt",
     };
+    // Phase 69.3 Stage 1: resource-flow-derived DECO family capacity.
+    let rescap_arm = match env_str("PHASE_DECO_RESOURCE_CAP").as_deref() {
+        Some("on") => "rescapon",
+        Some("off") => "rescapoff",
+        _ => "rescapdflt",
+    };
     // Calibration-sweep tag (Phase 55): parallel arms of the same switch must
     // never overwrite each other's output files.
     let tag = env_str("PHASE_ARM_TAG").unwrap_or_default();
     let suffix = if tag.is_empty() { String::new() } else { format!("_{tag}") };
-    let csv_path = format!("/tmp/clade_fate_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}_{growth_arm}_{fork_min_arm}_{fork_dau_arm}_{grace_arm}_{mate_arm}_{bwin_arm}{suffix}.csv");
-    let tree_path = format!("/tmp/clade_tree_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}_{growth_arm}_{fork_min_arm}_{fork_dau_arm}_{grace_arm}_{mate_arm}_{bwin_arm}{suffix}.csv");
-    let culture_path = format!("/tmp/clade_culture_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}_{growth_arm}_{fork_min_arm}_{fork_dau_arm}_{grace_arm}_{mate_arm}_{bwin_arm}{suffix}.csv");
-    let life_path = format!("/tmp/clade_life_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}_{growth_arm}_{fork_min_arm}_{fork_dau_arm}_{grace_arm}_{mate_arm}_{bwin_arm}{suffix}.csv");
+    let csv_path = format!("/tmp/clade_fate_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}_{growth_arm}_{fork_min_arm}_{fork_dau_arm}_{grace_arm}_{mate_arm}_{bwin_arm}_{rescap_arm}{suffix}.csv");
+    let tree_path = format!("/tmp/clade_tree_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}_{growth_arm}_{fork_min_arm}_{fork_dau_arm}_{grace_arm}_{mate_arm}_{bwin_arm}_{rescap_arm}{suffix}.csv");
+    let culture_path = format!("/tmp/clade_culture_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}_{growth_arm}_{fork_min_arm}_{fork_dau_arm}_{grace_arm}_{mate_arm}_{bwin_arm}_{rescap_arm}{suffix}.csv");
+    let life_path = format!("/tmp/clade_life_{seed}_{arm}_{deco_arm}_{sign_arm}_{clamp_arm}_{place_arm}_{repro_arm}_{regcap_arm}_{renorm_arm}_{growth_arm}_{fork_min_arm}_{fork_dau_arm}_{grace_arm}_{mate_arm}_{bwin_arm}_{rescap_arm}{suffix}.csv");
     let mut csv = String::from(
-        "t,pop,herb,pred,scav,omn,fish,deco,clades_live,clades_total,events,tokens,bearers,groups,levels,authorities,grass_mean,grass_var,env_mean,env_var,structs,deco_r0,deco_r1,deco_r2,deco_r3,structs_r0,structs_r1,structs_r2,structs_r3,denv_mean,denv_var,carcass_energy,carcass_count\n",
+        "t,pop,herb,pred,scav,omn,fish,deco,clades_live,clades_total,events,tokens,bearers,groups,levels,authorities,grass_mean,grass_var,env_mean,env_var,structs,deco_r0,deco_r1,deco_r2,deco_r3,structs_r0,structs_r1,structs_r2,structs_r3,denv_mean,denv_var,carcass_energy,carcass_count,deco_family_cap\n",
     );
     let mut eco = Ecology::new(seed);
     if arm == "envon" { eco.structure_env_on = true; }
@@ -255,8 +267,10 @@ fn clade_fate_observation() {
     if mate_arm == "mateoff" { eco.mate_floor_off(); }
     if bwin_arm == "bwinon" { eco.build_window_treg_on(); }
     if bwin_arm == "bwinoff" { eco.build_window_treg_off(); }
+    if rescap_arm == "rescapon" { eco.deco_resource_cap_on(); }
+    if rescap_arm == "rescapoff" { eco.deco_resource_cap_off(); }
     let mut last_events = 0usize;
-    eprintln!("=== clade-fate seed {seed} ({ticks} ticks, structure_env={arm}, deco_env={deco_arm}, token_sign={sign_arm}, clamp={clamp_arm}, place={place_arm}, repro={repro_arm}, grace={grace_arm}, mate_floor={mate_arm}, build_window={bwin_arm}) ===");
+    eprintln!("=== clade-fate seed {seed} ({ticks} ticks, structure_env={arm}, deco_env={deco_arm}, token_sign={sign_arm}, clamp={clamp_arm}, place={place_arm}, repro={repro_arm}, grace={grace_arm}, mate_floor={mate_arm}, build_window={bwin_arm}, resource_cap={rescap_arm}) ===");
     for t in 1..=ticks {
         eco.update(0.1, daylight(t));
         let n = eco.clade_events().len();
@@ -294,7 +308,7 @@ fn clade_fate_observation() {
                 if r < 4 { structs_by_region[r] += 1; }
             }
             csv.push_str(&format!(
-                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.5},{:.5},{:.5},{:.5},{},{},{},{},{},{},{},{},{:.5},{:.5},{:.1},{}\n",
+                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.5},{:.5},{:.5},{:.5},{},{},{},{},{},{},{},{},{:.5},{:.5},{:.1},{},{}\n",
                 t, m.information.population, kind("herb"), kind("pred"), kind("scav"),
                 kind("omn"), kind("fish"), kind("deco"),
                 live_clades, eco.species_clades().len(), last_events,
@@ -304,11 +318,13 @@ fn clade_fate_observation() {
                 deco_by_region[0], deco_by_region[1], deco_by_region[2], deco_by_region[3],
                 structs_by_region[0], structs_by_region[1], structs_by_region[2], structs_by_region[3],
                 denv_mean, denv_var, eco.carcass_energy_total(), eco.carcass_count(),
+                eco.deco_family_cap,
             ));
             if t % 50_000 == 0 {
-                eprintln!("[fate] t={} {} live_clades={} total={} events={} grass_var={:.5} env_var={:.5} denv_var={:.5} structs={} carcass_e={:.1}",
+                eprintln!("[fate] t={} {} live_clades={} total={} events={} grass_var={:.5} env_var={:.5} denv_var={:.5} structs={} carcass_e={:.1} cap={}",
                     t, format_line(&m), live_clades, eco.species_clades().len(), last_events,
-                    grass_var, env_var, denv_var, eco.structure_registry.len(), eco.carcass_energy_total());
+                    grass_var, env_var, denv_var, eco.structure_registry.len(), eco.carcass_energy_total(),
+                    eco.deco_family_cap);
             }
         }
     }

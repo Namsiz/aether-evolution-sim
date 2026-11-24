@@ -171,6 +171,8 @@ HEAD（起点）：`8f0659d`（Stage 0 交付；`E_ref=192.5`）。
 | 存档 | A/B 期 arm/cap 不入档；若转正，加 v25 `DecoFamilyCap`/`ResourceCapOn`，读档默认 OFF |
 | 确定性 | 零 RNG；所有重标定用整数运算 + 固定余量规则 |
 
+> **实现偏差（2026-11-24，任何 Stage 1 200k 之前）**：§8.1 字面写「逐 kind `round(old × C / S)`，余量补根」。实现改为 **`floor(old × C / S)` + 余量补根**：独立 round 可能让 Σ 溢出或亏欠 `cap`，floor + 余量才能严格守恒；`assert_eq!(family_budget_total(DECO), cap)` 钉住。判据、seed 池、门槛、决策表不变。
+
 ### 8.2 seed 池
 
 `20261222–26` 仓库命中 0；`20261227–28` 备用。Phase 69.2 的 `20261215–20` 不复用。
@@ -230,3 +232,12 @@ P1/P2/P3 必须同时满足；D0/D1/D2 是必要条件。
 5. 跑 5 seed × 2 臂 × 200k + 双跑；记录逐 seed、P1-P3、D0-D2。
 6. 重建 wasm；三次 <16 ms。
 7. 写报告 §9 之后：结果、决策、锚点、测试、wasm、Phase 70 遗留。
+
+### 8.8 实现验证（Stage 1，A/B 之前）
+
+- 新增单测：`phase69_3_stage1_tests` 8 个（默认 OFF、cap clamp、重标定守恒、空族、EMA 确定性、arm 路由、存档契约）；`--lib phase69_3` 共 **9 passed / 0 failed**。
+- 全量生态 crate：**50 二进制 / 334 passed / 0 failed / 28 ignored**。
+- 默认 `@60000`：`0x3272f0e3eaba9250`（398.38 s）。
+- 20k ON 冒烟（20261222）：`deco_family_cap` 80→99→101→106→105；DECO 人口 106 > 80，证明 biome cap 真放开；`family_total=105`。
+- wasm：**832 800 B**，sha256 `33726e1424bdc371a4f79a16da0998aea726e202481df46d5bdd92c4ddb5b206`；smoke OK，10.04 ms/frame；新旧三轮 9.90-9.94 ms，全部 <16 ms。
+- 已知不一致：`kind_budgets` 入档而 arm/cap 不入档；A/B 不读档，转正需 v25。

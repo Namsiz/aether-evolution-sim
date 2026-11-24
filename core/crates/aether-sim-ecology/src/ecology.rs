@@ -1135,6 +1135,30 @@ pub const BUILD_WINDOW_TICKS: u32 = 10_000;
 /// the Phase 49 fork gate uses. Never raised above the kind's own budget.
 pub const BUILD_WINDOW_FLOOR: usize = SPECIATION_MIN_SIDE_DEFAULT;
 
+// ----- Phase 69.3 Stage 1: resource-flow-derived DECO family capacity --------
+//
+// The DECO guild is the only lineage that forks naturally, and its budget has
+// been a fixed 80 slots since Phase 49 — every capacity-side arm so far moved
+// *where* those slots sit (region cap, renormalisation, floors, grace), none
+// moved *how many* there are. The guild's only food is the carcass pool, so
+// the total is derived from that pool's energy instead: a smoothed carcass
+// total maps onto a family cap in [40, 160], and the Phase 49 kind budgets are
+// rescaled to sum to it (integer floors, remainder on the root). `E_ref` is
+// the Stage 0 three-seed median (`research/phase69-3-report.md` §3). Zero RNG;
+// every step is integer arithmetic plus one fixed-weight EMA.
+/// Compiled default: OFF until the pre-registered 5-seed A/B passes (§8.5).
+pub const DECO_RESOURCE_CAP_ON: bool = false;
+/// Reference carcass-pool energy: the family starts at `MAX_DECO` slots here.
+pub const DECO_RESOURCE_E_REF: f64 = 192.5;
+/// Per-5k-tick EMA weights: `ema ← keep × ema + new × E`.
+pub const DECO_RESOURCE_EMA_KEEP: f64 = 0.8;
+pub const DECO_RESOURCE_EMA_NEW: f64 = 0.2;
+/// The cap is recomputed on this cadence (the Stage 0 sampling interval).
+pub const DECO_RESOURCE_TICKS: u32 = 5_000;
+/// Clamp of the derived family total (Stage 0 `E_p10`/`E_p90` map to ≈41/126).
+pub const DECO_RESOURCE_CAP_MIN: usize = 40;
+pub const DECO_RESOURCE_CAP_MAX: usize = 160;
+
 // ----- Phase 66: derived-clade regional mate-radius floor -------------------
 //
 // Phase 66 diagnosis (research/phase66-report.md §1.1): 77.8 % of a derived
@@ -2286,6 +2310,21 @@ pub struct Ecology {
     /// derived DECO kind inside `BUILD_WINDOW_TICKS` of its fork. Arm knob,
     /// not persisted (a restored world lands on `BUILD_WINDOW_ON`).
     pub build_window: bool,
+    /// Phase 69.3 Stage 1 arm: derive the DECO family's total carrying
+    /// capacity from the carcass resource flow. Arm knob, not persisted (a
+    /// restored world lands on `DECO_RESOURCE_CAP_ON`).
+    pub deco_resource_cap: bool,
+    /// Phase 69.3 Stage 1: the DECO family's total carrying capacity. Starts
+    /// at `MAX_DECO`; only the arm's 5k-tick rescale moves it, and the family's
+    /// kind budgets always sum to it.
+    pub deco_family_cap: usize,
+    /// Phase 69.3 Stage 1: EMA of `carcass_energy_total()` (starts at
+    /// `DECO_RESOURCE_E_REF`, i.e. the family starts at 80 slots).
+    pub carcass_ema: f64,
+    /// Phase 69.3 Stage 1: tick of the most recent capacity update
+    /// (`u32::MAX` = never); keeps two `update` calls on the same 5k boundary
+    /// from stepping the EMA twice.
+    pub deco_cap_tick: u32,
     /// Phase 61 runtime telemetry: per-clade birth/death counters. Pure
     /// observation — not persisted, never read by the simulation.
     pub clade_life: Vec<CladeLifeStats>,
@@ -2568,6 +2607,10 @@ impl Ecology {
             deco_region_cap_floor_small: DECO_REGION_CAP_FLOOR_SMALL_ON,
             deco_region_cap_renorm_daughters: false,
             build_window: BUILD_WINDOW_ON,
+            deco_resource_cap: DECO_RESOURCE_CAP_ON,
+            deco_family_cap: MAX_DECO,
+            carcass_ema: DECO_RESOURCE_E_REF,
+            deco_cap_tick: u32::MAX,
             clade_life: Vec::new(),
             isolation_by_kind: Vec::new(),
             culture_value_on: true,
@@ -2814,6 +2857,10 @@ impl Ecology {
             deco_region_cap_floor_small: DECO_REGION_CAP_FLOOR_SMALL_ON,
             deco_region_cap_renorm_daughters: false,
             build_window: BUILD_WINDOW_ON,
+            deco_resource_cap: DECO_RESOURCE_CAP_ON,
+            deco_family_cap: MAX_DECO,
+            carcass_ema: DECO_RESOURCE_E_REF,
+            deco_cap_tick: u32::MAX,
             clade_life: Vec::new(),
             isolation_by_kind: Vec::new(),
             culture_value_on: true,
@@ -3684,7 +3731,16 @@ impl Ecology {
             BiomeCap::Scav => b.max_scav,
             BiomeCap::Omn => b.max_omn,
             BiomeCap::Fish => b.max_fish.unwrap_or(def.global_cap),
-            BiomeCap::Fallback => def.global_cap,
+            // Phase 69.3 Stage 1: the DECO family's fallback cap follows the
+            // resource-derived total while the arm is on, otherwise the
+            // family could never hold more than `MAX_DECO` slots.
+            BiomeCap::Fallback => {
+                if self.deco_resource_cap && self.root_kind(kind) == DECO {
+                    self.deco_family_cap
+                } else {
+                    def.global_cap
+                }
+            }
         }
     }
 
@@ -3693,7 +3749,15 @@ impl Ecology {
     pub fn biome_max_for(&self, kind: SpeciesKind, x: f64, z: f64) -> usize {
         match self.biome_reg.find_biome(x, z) {
             Some(b) => self.biome_cap_in(kind, b),
-            None => self.kind_def(kind).global_cap,
+            None => {
+                // Phase 69.3 Stage 1: same resource-derived fallback as
+                // `biome_cap_in`.
+                if self.deco_resource_cap && self.root_kind(kind) == DECO {
+                    self.deco_family_cap
+                } else {
+                    self.kind_def(kind).global_cap
+                }
+            }
         }
     }
 
@@ -4688,6 +4752,76 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
     /// Phase 69.3 Stage 0: number of carcasses currently in the pool.
     pub fn carcass_count(&self) -> usize {
         self.carcasses.len()
+    }
+
+    // ----- Phase 69.3 Stage 1: resource-derived DECO family capacity --------
+
+    /// Phase 69.3 Stage 1 arm on: derive the DECO family total from the carcass
+    /// resource flow (`PHASE_DECO_RESOURCE_CAP=on`).
+    pub fn deco_resource_cap_on(&mut self) { self.deco_resource_cap = true; }
+
+    /// Phase 69.3 Stage 1 arm off (the compiled default).
+    pub fn deco_resource_cap_off(&mut self) { self.deco_resource_cap = false; }
+
+    /// Phase 69.3 Stage 1: is the resource-derived capacity arm on?
+    pub fn deco_resource_cap_arm(&self) -> bool { self.deco_resource_cap }
+
+    /// Phase 69.3 Stage 1: the pre-registered `E_ema → family total` map —
+    /// `clamp(round(80 × ema / E_ref), 40, 160)`. Pure arithmetic; the 80 is
+    /// `MAX_DECO`, the reference the guild returns to at `E_ref`.
+    fn deco_resource_cap_from_ema(ema: f64) -> usize {
+        let raw = (MAX_DECO as f64 * ema / DECO_RESOURCE_E_REF).round();
+        (raw as usize).clamp(DECO_RESOURCE_CAP_MIN, DECO_RESOURCE_CAP_MAX)
+    }
+
+    /// Phase 69.3 Stage 1: the DECO crowding denominator — the family total
+    /// while the arm is on, the fixed `MAX_DECO` otherwise.
+    fn deco_crowd_denominator(&self) -> f64 {
+        if self.deco_resource_cap { self.deco_family_cap as f64 } else { MAX_DECO as f64 }
+    }
+
+    /// Phase 69.3 Stage 1: the 5k-tick capacity hook (end of `update`). Steps
+    /// the carcass EMA, maps it onto the family total and rescales the kind
+    /// budgets when the total moved. Zero RNG; a no-op on the compiled default.
+    fn tick_deco_resource_cap(&mut self) {
+        if !self.deco_resource_cap { return; }
+        if self.tick_count % DECO_RESOURCE_TICKS != 0 { return; }
+        if self.deco_cap_tick == self.tick_count { return; }
+        self.deco_cap_tick = self.tick_count;
+        let e = self.carcass_energy_total();
+        self.carcass_ema = DECO_RESOURCE_EMA_KEEP * self.carcass_ema + DECO_RESOURCE_EMA_NEW * e;
+        let cap = Self::deco_resource_cap_from_ema(self.carcass_ema);
+        if cap != self.deco_family_cap {
+            self.rescale_deco_family_budget(cap);
+            self.deco_family_cap = cap;
+        }
+    }
+
+    /// Phase 69.3 Stage 1: rescale every DECO kind's share so the family sums
+    /// to `cap`. Integer floors (`old × cap / S`), the rounding remainder all
+    /// landing on the root kind (the lineage that forks), so the Phase 49
+    /// conservation identity holds exactly: `family_budget_total(DECO) == cap`.
+    /// A family with no slots left (`S = 0`) hands the root the whole total.
+    fn rescale_deco_family_budget(&mut self, cap: usize) {
+        let s = self.family_budget_total(DECO);
+        if s == 0 {
+            self.set_kind_budget(DECO, cap);
+            assert_eq!(self.family_budget_total(DECO), cap);
+            return;
+        }
+        let mut total = 0usize;
+        for k in 0..self.kinds.len() {
+            let kind = k as SpeciesKind;
+            if self.root_kind(kind) != DECO { continue; }
+            let new = self.kind_budget(kind) * cap / s;
+            self.set_kind_budget(kind, new);
+            total += new;
+        }
+        // Floors never exceed `cap` (Σ old = S), so the remainder is a genuine
+        // surplus, never a debt.
+        let remainder = cap - total;
+        self.set_kind_budget(DECO, self.kind_budget(DECO) + remainder);
+        assert_eq!(self.family_budget_total(DECO), cap);
     }
 
     // ----- Phase 61: per-clade life telemetry ---------------------------------
@@ -7544,7 +7678,10 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         }
 
         // Metabolism: slow decomposer, low base drain.
-        let cap_for_kind = MAX_DECO as f64;
+        // Phase 69.3 Stage 1: crowding is measured against the family total
+        // while the resource arm is on (a 126-slot guild would otherwise be
+        // over-penalised by the fixed 80 denominator).
+        let cap_for_kind = self.deco_crowd_denominator();
         let local_crowd = self.count(DECO) as f64 / cap_for_kind;
         let crowd_penalty = if local_crowd > 0.4 { 1.0 + (local_crowd - 0.4) * 0.5 } else { 1.0 };
         // Phase 7: in selective mode, higher deco_efficiency reduces metabolic drain by up to 10%.
@@ -7963,6 +8100,10 @@ let age_om = 25.0 + self.rng.next_f64() * 60.0;
         if self.tick_count % crate::biochemistry::BIOCHEM_TICKS == 0 {
             self.biochem_step();
         }
+        // Phase 69.3 Stage 1: resource-derived DECO family capacity. Last, so
+        // the EMA reads the carcass pool this tick actually settled on; a
+        // no-op on the compiled default (zero RNG either way).
+        self.tick_deco_resource_cap();
     }
 
     // ----- sample / stats / checksum ----------------------------------------
@@ -10537,6 +10678,10 @@ impl Ecology {
             deco_region_cap_floor_small: DECO_REGION_CAP_FLOOR_SMALL_ON,
             deco_region_cap_renorm_daughters: false,
             build_window: BUILD_WINDOW_ON,
+            deco_resource_cap: DECO_RESOURCE_CAP_ON,
+            deco_family_cap: MAX_DECO,
+            carcass_ema: DECO_RESOURCE_E_REF,
+            deco_cap_tick: u32::MAX,
             clade_life: Vec::new(),
             isolation_by_kind: Vec::new(),
             culture_value_on: state.CultureValueOn,
@@ -11679,5 +11824,191 @@ mod phase69_3_stage0_tests {
         eco.carcasses.push(Carcass { x: 3.0, z: 4.0, energy: 4.25, age: 0.0, occupied_by: None });
         assert_eq!(eco.carcass_count(), 2);
         assert!((eco.carcass_energy_total() - 6.75).abs() < 1e-12);
+    }
+}
+
+#[cfg(test)]
+mod phase69_3_stage1_tests {
+    use super::*;
+
+    /// A derived DECO kind funded out of the root's share (the Phase 49
+    /// conservation contract the rescale must keep).
+    fn daughter(eco: &mut Ecology, name: &'static str, budget: usize) -> SpeciesKind {
+        let mut def = eco.kind_def(DECO).clone();
+        def.name = name;
+        def.parent_kind = Some(DECO);
+        def.global_cap = budget;
+        let d = eco.register_kind(def);
+        eco.set_kind_budget(d, budget);
+        d
+    }
+
+    /// A Fallback biome whose per-species caps are all 10 — any DECO cap that
+    /// does not read 10 is coming from the kind definition instead.
+    fn fallback_biome() -> Biome {
+        Biome {
+            id: 0,
+            name: "rescap-test",
+            center_x: 0.0,
+            center_z: 0.0,
+            radius: 1.0e6,
+            suit_modifier: 1.0,
+            max_herb: 10,
+            max_pred: 10,
+            max_scav: 10,
+            max_omn: 10,
+            max_fish: None,
+            home_range_mod: 1.0,
+        }
+    }
+
+    fn carcasses_with(eco: &mut Ecology, energy: f64) {
+        eco.carcasses.clear();
+        eco.carcasses.push(Carcass { x: 0.0, z: 0.0, energy, age: 0.0, occupied_by: None });
+    }
+
+    #[test]
+    fn compiled_default_is_off_and_the_family_stays_at_80() {
+        let eco = Ecology::new(20261222);
+        assert!(!DECO_RESOURCE_CAP_ON, "the arm ships OFF until the 5-seed verdict");
+        assert!(!eco.deco_resource_cap_arm());
+        assert_eq!(eco.deco_family_cap, MAX_DECO);
+        assert_eq!(eco.family_budget_total(DECO), MAX_DECO);
+        assert_eq!(eco.carcass_ema, DECO_RESOURCE_E_REF);
+        assert_eq!(eco.deco_cap_tick, u32::MAX);
+        // Empty biome registry → the `None` branch; a Fallback biome → the
+        // Fallback branch. Both must read the kind's own 80.
+        assert_eq!(eco.biome_max_for(DECO, 0.0, 0.0), MAX_DECO);
+        assert_eq!(eco.biome_cap_in(DECO, &fallback_biome()), MAX_DECO);
+        assert_eq!(eco.deco_crowd_denominator(), MAX_DECO as f64);
+    }
+
+    #[test]
+    fn the_ema_maps_onto_a_cap_clamped_to_40_and_160() {
+        assert_eq!(Ecology::deco_resource_cap_from_ema(0.0), DECO_RESOURCE_CAP_MIN);
+        // 80 × 50 / 192.5 = 20.8 → 21 → clamped up to 40.
+        assert_eq!(Ecology::deco_resource_cap_from_ema(50.0), 40);
+        // 80 × 96.25 / 192.5 = 40 exactly (the lower knee).
+        assert_eq!(Ecology::deco_resource_cap_from_ema(96.25), 40);
+        // At E_ref the guild holds its legacy 80.
+        assert_eq!(Ecology::deco_resource_cap_from_ema(DECO_RESOURCE_E_REF), MAX_DECO);
+        // 80 × 1000 / 192.5 = 415.6 → 416 → clamped down to 160.
+        assert_eq!(Ecology::deco_resource_cap_from_ema(1000.0), DECO_RESOURCE_CAP_MAX);
+    }
+
+    #[test]
+    fn the_rescale_is_conserved_and_the_remainder_lands_on_the_root() {
+        let mut eco = Ecology::new(20261222);
+        let d1 = daughter(&mut eco, "deco-a", 20);
+        let d2 = daughter(&mut eco, "deco-b", 15);
+        let d3 = daughter(&mut eco, "deco-c", 11);
+        let d4 = daughter(&mut eco, "deco-d", 8);
+        eco.set_kind_budget(DECO, 80 - 54);
+        assert_eq!(eco.family_budget_total(DECO), 80);
+        // Up to 126: floors 31/23/17/12 + root 40 = 123, remainder 3 → root 43.
+        eco.rescale_deco_family_budget(126);
+        assert_eq!(eco.family_budget_total(DECO), 126);
+        assert_eq!(eco.kind_budget(d1), 31);
+        assert_eq!(eco.kind_budget(d2), 23);
+        assert_eq!(eco.kind_budget(d3), 17);
+        assert_eq!(eco.kind_budget(d4), 12);
+        assert_eq!(eco.kind_budget(DECO), 43);
+        // Down to 40: floors 9/7/5/3 + root 13 = 37, remainder 3 → root 16.
+        eco.rescale_deco_family_budget(40);
+        assert_eq!(eco.family_budget_total(DECO), 40);
+        assert_eq!(eco.kind_budget(d1), 9);
+        assert_eq!(eco.kind_budget(d2), 7);
+        assert_eq!(eco.kind_budget(d3), 5);
+        assert_eq!(eco.kind_budget(d4), 3);
+        assert_eq!(eco.kind_budget(DECO), 16);
+    }
+
+    #[test]
+    fn an_empty_family_hands_the_whole_cap_to_the_root() {
+        let mut eco = Ecology::new(20261222);
+        let d = daughter(&mut eco, "deco-zero", 0);
+        eco.set_kind_budget(DECO, 0);
+        assert_eq!(eco.family_budget_total(DECO), 0);
+        eco.rescale_deco_family_budget(126);
+        assert_eq!(eco.family_budget_total(DECO), 126);
+        assert_eq!(eco.kind_budget(DECO), 126);
+        assert_eq!(eco.kind_budget(d), 0);
+    }
+
+    #[test]
+    fn the_ema_step_is_deterministic_and_once_per_boundary_tick() {
+        let mut a = Ecology::new(20261222);
+        let mut b = Ecology::new(20261222);
+        for eco in [&mut a, &mut b] {
+            eco.deco_resource_cap_on();
+            carcasses_with(eco, 500.0);
+            eco.tick_count = DECO_RESOURCE_TICKS;
+            eco.tick_deco_resource_cap();
+        }
+        let expect = DECO_RESOURCE_EMA_KEEP * DECO_RESOURCE_E_REF + DECO_RESOURCE_EMA_NEW * 500.0;
+        assert!((a.carcass_ema - expect).abs() < 1e-12);
+        assert_eq!(a.carcass_ema, b.carcass_ema, "same state, same EMA (zero RNG)");
+        assert_eq!(a.deco_family_cap, b.deco_family_cap);
+        // 0.8 × 192.5 + 0.2 × 500 = 254 → 80 × 254 / 192.5 = 105.56 → 106.
+        assert_eq!(a.deco_family_cap, 106);
+        assert_eq!(a.family_budget_total(DECO), 106);
+        assert_eq!(a.deco_cap_tick, DECO_RESOURCE_TICKS);
+        // A second call on the same tick must not step the EMA again.
+        let ema = a.carcass_ema;
+        carcasses_with(&mut a, 0.0);
+        a.tick_deco_resource_cap();
+        assert_eq!(a.carcass_ema, ema, "one EMA step per 5k boundary");
+        assert_eq!(a.deco_family_cap, 106);
+    }
+
+    #[test]
+    fn the_off_arm_never_moves_the_cap() {
+        let mut eco = Ecology::new(20261222);
+        carcasses_with(&mut eco, 500.0);
+        eco.tick_count = DECO_RESOURCE_TICKS;
+        eco.tick_deco_resource_cap();
+        assert_eq!(eco.carcass_ema, DECO_RESOURCE_E_REF, "no EMA on the compiled default");
+        assert_eq!(eco.deco_family_cap, MAX_DECO);
+        assert_eq!(eco.deco_cap_tick, u32::MAX);
+        assert_eq!(eco.family_budget_total(DECO), MAX_DECO);
+    }
+
+    #[test]
+    fn the_arm_routes_every_deco_cap_read_through_the_family_total() {
+        let mut eco = Ecology::new(20261223);
+        let d = daughter(&mut eco, "deco-armed", 20);
+        // A Fallback kind outside the DECO family keeps its own cap.
+        let mut other = eco.kind_def(PRED).clone();
+        other.name = "pred-fallback";
+        other.biome_cap = BiomeCap::Fallback;
+        other.parent_kind = None;
+        other.global_cap = 7;
+        let o = eco.register_kind(other);
+        eco.deco_resource_cap_on();
+        eco.deco_family_cap = 126;
+        assert_eq!(eco.biome_max_for(DECO, 0.0, 0.0), 126);
+        assert_eq!(eco.biome_cap_in(DECO, &fallback_biome()), 126);
+        assert_eq!(eco.biome_max_for(d, 0.0, 0.0), 126, "derived DECO rides the family total");
+        assert_eq!(eco.biome_max_for(o, 0.0, 0.0), 7, "the family guard excludes other kinds");
+        assert_eq!(eco.deco_crowd_denominator(), 126.0);
+        eco.deco_resource_cap_off();
+        assert_eq!(eco.biome_max_for(DECO, 0.0, 0.0), MAX_DECO);
+        assert_eq!(eco.biome_cap_in(DECO, &fallback_biome()), MAX_DECO);
+        assert_eq!(eco.deco_crowd_denominator(), MAX_DECO as f64);
+    }
+
+    #[test]
+    fn the_save_state_carries_neither_the_arm_nor_the_cap() {
+        let mut eco = Ecology::new(20261224);
+        eco.deco_resource_cap_on();
+        eco.deco_family_cap = 126;
+        eco.rescale_deco_family_budget(126);
+        let json = serde_json::to_string(&eco.to_save_state()).unwrap();
+        assert!(!json.contains("DecoResourceCap"), "the arm never enters the save state");
+        assert!(!json.contains("DecoFamilyCap"), "the cap never enters the save state");
+        let restored = Ecology::from_save_state(serde_json::from_str(&json).unwrap());
+        assert!(!restored.deco_resource_cap_arm(), "a restore lands on the compiled default");
+        assert_eq!(restored.deco_family_cap, MAX_DECO);
+        assert_eq!(restored.carcass_ema, DECO_RESOURCE_E_REF);
     }
 }
