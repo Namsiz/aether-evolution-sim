@@ -144,8 +144,89 @@ HEAD（起点）：`cfe2e71`（Phase 69.2：T-region 默认 OFF，P2/D0 败，�
 
 ---
 
-## 7. 明确未做
+## 7. 明确未做（Stage 0）
 
 - 没有实现 Stage 1 的资源→cap 映射；没有改 `MAX_DECO`、`kind_budgets`、`biome_cap_in`、`cap_for_kind`。
 - 没有跑 Stage 1 A/B；没有 re-baseline。
 - 没有动 region cap / 择偶半径 / W1 / M10。
+
+---
+
+## 8. Stage 1 预注册（跑之前写死）
+
+HEAD（起点）：`8f0659d`（Stage 0 交付；`E_ref=192.5`）。
+
+### 8.1 机制
+
+| 项 | 值 |
+|---|---|
+| 臂开关 | `PHASE_DECO_RESOURCE_CAP=on|off`；编译默认 **OFF** |
+| 资源信号 | `E = carcass_energy_total()`（尸体池总能量） |
+| 参考 | `E_ref = 192.5`（Stage 0 三 seed 中位） |
+| EMA | 初始 `E_ema = E_ref`；每 5,000 tick `E_ema ← 0.8 × E_ema + 0.2 × E`；零 RNG |
+| 总容量 | `cap_total = clamp(round(80 × E_ema / E_ref), 40, 160)` |
+| 预算重标定 | 当前 DECO 全族 `S = Σ kind_budget`；逐 kind `new = round(old × cap_total / S)`；余量补根 kind；`S=0` 时根 = `cap_total`；`family_budget_total(DECO) = cap_total` |
+| 区域 cap | 不变（仍按 `kind_budget` 与分解场权重分四区） |
+| 集成点 | ① `biome_cap_in` 对 DECO 的 `Fallback` 在臂 ON 时返回 `deco_family_cap`；② `cap_for_kind` crowding 分母用 `deco_family_cap`；③ 安全阀 `total_cap` 仍 80（cap≤160 时总上限 830 < 840） |
+| 存档 | A/B 期 arm/cap 不入档；若转正，加 v25 `DecoFamilyCap`/`ResourceCapOn`，读档默认 OFF |
+| 确定性 | 零 RNG；所有重标定用整数运算 + 固定余量规则 |
+
+### 8.2 seed 池
+
+`20261222–26` 仓库命中 0；`20261227–28` 备用。Phase 69.2 的 `20261215–20` 不复用。
+
+| 位 | seed | 用途 |
+|---|---|---|
+| 1–5 | 20261222 / 23 / 24 / 25 / 26 | 200k 判定 |
+| 备 | 20261227 / 28 | 退化替换，按序最多 2 个 |
+
+退化：`spec + ext = 0`，或 DECO 根 clade 在 `t < 10 000` 灭绝。
+
+### 8.3 臂与运行
+
+- OFF：编译默认；R：`PHASE_DECO_RESOURCE_CAP=on`。
+- 5 seed × 2 臂 × 200k = 10 个判定 run；4 进程/批。
+- 默认自检 `20261102 / 200k` = 9/4；R 双跑 `20261222` 两次；wasm 重建三次 <16 ms。
+
+### 8.4 判据
+
+| 判据 | 门槛 | 说明 |
+|---|---|---|
+| **P1 分化** | `Σ_R spec ≥ 0.90 × Σ_OFF` | 非劣性；先于 P2 |
+| **P2 出生率** | `births/kt_R ≥ 1.10 ×` OFF 同口径 | 主目标 |
+| **P3 死亡/出生** | `deaths/birth_R ≤ 1.05 ×` OFF | 非劣性 |
+| **D0 资源驱动** | 200k 内 `deco_family_cap` 至少 3 个不同取值，且 `max−min ≥ 16`（0.20×80） | 防「cap 没动」 |
+| **D1 人口** | 200k 末 DECO 人口 ∈ [40, 160] | 防爆炸/塌缩 |
+| **D2 确定性** | OFF 默认 @60000 锚点不变；R 双跑 bit-exact | 必要条件 |
+
+P1/P2/P3 必须同时满足；D0/D1/D2 是必要条件。
+
+### 8.5 决策表
+
+| # | 结果 | 决策 |
+|---|---|---|
+| 1 | D0 不成立 | 默认 OFF；结论「cap 未动，本池无信息」 |
+| 2 | D0 ∧ D1 ∧ P1 ∧ P2 ∧ P3 | 默认 ON；**第二十次 re-baseline**；保留 `PHASE_DECO_RESOURCE_CAP=off` 回放臂 |
+| 3 | P1 败 | 默认 OFF；分化代价越界 |
+| 4 | P1 过、P2 败 | 默认 OFF；资源总量不是出生率杠杆 |
+| 5 | P1/P2 过、P3 败 | 默认 OFF；多生多死 |
+| 6 | D1 败 | 默认 OFF；人口爆炸/塌缩 |
+| 7 | 可测 seed < 5 | inconclusive；默认 OFF |
+
+### 8.6 明确不做
+
+- 不做 region cap 永久/临时 floor、择偶半径、W1、M10。
+- 不做手工 cap 调参；`E_ref`、`40/160`、`0.8/0.2` 全部写死，不按结果回调。
+- 不新增全局预算上限；cap 只在 [40,160]。
+- 不做 per-seed 自适应；同一映射跑所有 seed。
+- 不改 region 预算分四区的语义；只改全族总额。
+
+### 8.7 执行协议
+
+1. 提交本预注册（§8）。
+2. 实现 §8.1 的 arm、`deco_family_cap`、EMA、预算重标定、`biome_cap_in`/`cap_for_kind` 集成；补单测（默认 OFF 位精确、cap 边界 40/160、重标定守恒、EMA 确定性、存档默认 OFF）。
+3. OFF 默认 @60000 锚点 + 全 workspace 测试 0 失败。
+4. 编译一次 release 测试二进制；10 个判定 run 复用。
+5. 跑 5 seed × 2 臂 × 200k + 双跑；记录逐 seed、P1-P3、D0-D2。
+6. 重建 wasm；三次 <16 ms。
+7. 写报告 §9 之后：结果、决策、锚点、测试、wasm、Phase 70 遗留。
